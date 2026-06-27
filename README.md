@@ -2,6 +2,13 @@
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-plugin-5865F2)](https://betterdiscord.app)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
+<br>
+
+<div align="center">
+  <img src="assets/Menu_Settings.png" alt="ByeBlocked Settings" width="400">
+</div>
+
+<br><br>
 Remove blocked and ignored users from chat, voice, member list, and group DMs.
 
 
