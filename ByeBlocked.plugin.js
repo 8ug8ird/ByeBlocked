@@ -2,13 +2,13 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 1.0.0
+ * @version 1.0.2
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
 module.exports = class ByeBlocked {
-    static VERSION     = "1.0.0";
+    static VERSION     = "1.0.2";
     static RAW_URL     = "https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL = "https://github.com/8ug8ird/ByeBlocked";
 
@@ -20,7 +20,11 @@ module.exports = class ByeBlocked {
         this.refreshTimeout = null;
         this.saveTimeout = null;
         this.relationshipChangeHandler = null;
+        this.guildChangeHandler = null;
+        this.routerChangeHandler = null;
+        this._routerUnsubscribe = null;
         this.isRunning = false;
+        this._refreshDebounce = null;
 
         this.patches = [];
         this.hiddenElements = new Set();
@@ -456,6 +460,22 @@ module.exports = class ByeBlocked {
         return merged;
     }
 
+    _handleNavigation() {
+        if (this._refreshDebounce) {
+            clearTimeout(this._refreshDebounce);
+            this._refreshDebounce = null;
+        }
+        this._refreshDebounce = setTimeout(() => {
+            if (!this.isRunning) return;
+            this.restoreAllElements();
+            this.queueDiscordUpdate();
+            setTimeout(() => {
+                this.queueScan();
+                this._refreshDebounce = null;
+            }, 300);
+        }, 150);
+    }
+
     start() {
         if (this.isRunning) return;
         this.isRunning = true;
@@ -482,6 +502,47 @@ module.exports = class ByeBlocked {
             setTimeout(() => this.checkForUpdatesAuto(), 5000);
             this._periodicCheckInterval = setInterval(() => this.checkForUpdatesAuto(), 7200000);
         }
+
+        try {
+            const GuildStore = BdApi.Webpack.getStore("SelectedGuildStore") || BdApi.Webpack.getStore("GuildStore");
+            if (GuildStore) {
+                this.guildChangeHandler = () => this._handleNavigation();
+                GuildStore.addChangeListener(this.guildChangeHandler);
+                this.patches.push(() => {
+                    try { GuildStore.removeChangeListener(this.guildChangeHandler); } catch (_) {}
+                });
+            }
+        } catch (_) {}
+
+        try {
+            const Router = BdApi.Webpack.getModule(m => m?.transitionTo && m?.replaceWith && typeof m.transitionTo === 'function');
+            if (Router && typeof Router.addRouteChangeListener === 'function') {
+                this.routerChangeHandler = () => this._handleNavigation();
+                this._routerUnsubscribe = Router.addRouteChangeListener(this.routerChangeHandler);
+                this.patches.push(() => {
+                    if (this._routerUnsubscribe) {
+                        try { this._routerUnsubscribe(); } catch (_) {}
+                        this._routerUnsubscribe = null;
+                    }
+                });
+            } else {
+                const origPushState = history.pushState;
+                const origReplaceState = history.replaceState;
+                const self = this;
+                history.pushState = function(...args) {
+                    origPushState.apply(this, args);
+                    self._handleNavigation();
+                };
+                history.replaceState = function(...args) {
+                    origReplaceState.apply(this, args);
+                    self._handleNavigation();
+                };
+                this.patches.push(() => {
+                    history.pushState = origPushState;
+                    history.replaceState = origReplaceState;
+                });
+            }
+        } catch (_) {}
     }
 
     stop() {
@@ -490,6 +551,10 @@ module.exports = class ByeBlocked {
         if (this._periodicCheckInterval) {
             clearInterval(this._periodicCheckInterval);
             this._periodicCheckInterval = null;
+        }
+        if (this._refreshDebounce) {
+            clearTimeout(this._refreshDebounce);
+            this._refreshDebounce = null;
         }
 
         this.observer?.disconnect();
@@ -516,6 +581,12 @@ module.exports = class ByeBlocked {
         this.queueDiscordUpdate();
 
         this._removeNotice();
+        this.guildChangeHandler = null;
+        this.routerChangeHandler = null;
+        if (this._routerUnsubscribe) {
+            try { this._routerUnsubscribe(); } catch (_) {}
+            this._routerUnsubscribe = null;
+        }
     }
 
     resolveModules() {
