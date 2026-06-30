@@ -2,14 +2,14 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 1.0.13
- * @description Hides blocked and ignored users from chat, voice, and member lists.
+ * @version 1.0.26
+ * @description Hides blocked and ignored users from chat, voice, and member lists. (Store-level filtering)
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
 module.exports = class ByeBlocked {
-    static VERSION     = "1.0.13";
-    static RAW_URL     = "https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
+    static VERSION = "1.0.26";
+    static RAW_URL = "https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL = "https://github.com/8ug8ird/ByeBlocked";
 
     constructor() {
@@ -21,7 +21,6 @@ module.exports = class ByeBlocked {
         this.saveTimeout = null;
         this.relationshipChangeHandler = null;
         this.isRunning = false;
-
         this.guildChangeHandler = null;
         this.routerChangeHandler = null;
         this._routerUnsubscribe = null;
@@ -39,6 +38,7 @@ module.exports = class ByeBlocked {
         this._lastNotifiedVersion = null;
         this._periodicCheckInterval = null;
         this._lastCheckTimestamp = this.loadLastCheck();
+        this._storePatched = false;
 
         this.hideStyles = `
             display: none !important;
@@ -64,6 +64,7 @@ module.exports = class ByeBlocked {
         `;
     }
 
+
     _formatDate(timestamp) {
         if (!timestamp) return "No check yet";
         try {
@@ -84,17 +85,11 @@ module.exports = class ByeBlocked {
 
     _updateLastCheckTime() {
         this._lastCheckTimestamp = Date.now();
-        try {
-            BdApi.Data.save(this.pluginName, "lastCheck", this._lastCheckTimestamp);
-        } catch (_) {}
+        try { BdApi.Data.save(this.pluginName, "lastCheck", this._lastCheckTimestamp); } catch (_) {}
     }
 
     loadLastCheck() {
-        try {
-            return BdApi.Data.load(this.pluginName, "lastCheck") || null;
-        } catch (_) {
-            return null;
-        }
+        try { return BdApi.Data.load(this.pluginName, "lastCheck") || null; } catch (_) { return null; }
     }
 
     _openSettingsModal() {
@@ -106,15 +101,13 @@ module.exports = class ByeBlocked {
                 React.createElement(function() {
                     const ref = React.useRef(null);
                     React.useEffect(function() {
-                        if (ref.current) {
-                            ref.current.appendChild(self.getSettingsPanel());
-                        }
+                        if (ref.current) ref.current.appendChild(self.getSettingsPanel());
                     }, []);
                     return React.createElement('div', { ref });
                 }),
                 { confirmText: 'Done', cancelText: null, size: 'large' }
             );
-        } catch(_) {
+        } catch (_) {
             this.toast('Go to BD Settings → Plugins → ByeBlocked ⚙️', 'info');
         }
     }
@@ -122,23 +115,18 @@ module.exports = class ByeBlocked {
     async checkForUpdatesAuto() {
         if (this._updateState.status === "checking") return;
         this._updateState = { status: "checking", latestVersion: null, remoteText: null };
-
         try {
             const text = await this._httpsGet(ByeBlocked.RAW_URL);
             const match = text.match(/@version\s+([\d.]+)/);
             if (!match) throw new Error("Version tag not found");
-
             const remote = match[1];
-            const local  = ByeBlocked.VERSION;
+            const local = ByeBlocked.VERSION;
             const hasUpdate = this._compareVersions(remote, local) > 0;
-
             this._updateLastCheckTime();
-
             if (hasUpdate) {
                 if (remote !== this._lastNotifiedVersion) {
                     this._lastNotifiedVersion = remote;
                     this._removeNotice();
-
                     try {
                         this._updateNotice = BdApi.UI.showNotice(
                             `🎉 ByeBlocked v${remote} is out! You're on v${local} - update available.`,
@@ -158,8 +146,7 @@ module.exports = class ByeBlocked {
                                     {
                                         label: "View on GitHub",
                                         onClick: () => {
-                                            try { require("electron").shell.openExternal(ByeBlocked.RELEASE_URL); }
-                                            catch (_) { window.open(ByeBlocked.RELEASE_URL, "_blank"); }
+                                            try { require("electron").shell.openExternal(ByeBlocked.RELEASE_URL); } catch (_) { window.open(ByeBlocked.RELEASE_URL, "_blank"); }
                                         }
                                     }
                                 ]
@@ -169,7 +156,6 @@ module.exports = class ByeBlocked {
                         this.toast(`🎉 ByeBlocked v${remote} available! Go to settings.`, "info");
                     }
                 }
-
                 this._updateState = { status: "available", latestVersion: remote, remoteText: text };
             } else {
                 this._updateState = { status: "idle", latestVersion: null, remoteText: null };
@@ -182,11 +168,8 @@ module.exports = class ByeBlocked {
     _removeNotice() {
         try {
             if (this._updateNotice) {
-                if (typeof this._updateNotice.close === 'function') {
-                    this._updateNotice.close();
-                } else if (typeof this._updateNotice.remove === 'function') {
-                    this._updateNotice.remove();
-                }
+                if (typeof this._updateNotice.close === 'function') this._updateNotice.close();
+                else if (typeof this._updateNotice.remove === 'function') this._updateNotice.remove();
                 this._updateNotice = null;
             }
             document.querySelectorAll('.bd-notice').forEach(el => {
@@ -203,19 +186,15 @@ module.exports = class ByeBlocked {
         if (this._updateState.status === "checking") return;
         this._updateState = { status: "checking", latestVersion: null, remoteText: null };
         this._renderUpdateBtn(panelRef);
-
         try {
             const text = await this._httpsGet(ByeBlocked.RAW_URL);
             const match = text.match(/@version\s+([\d.]+)/);
             if (!match) throw new Error("Version tag not found in remote file");
-
             const remote = match[1];
-            const local  = ByeBlocked.VERSION;
+            const local = ByeBlocked.VERSION;
             const hasUpdate = this._compareVersions(remote, local) > 0;
-
             this._updateLastCheckTime();
             this._updatePanelInfo(panelRef);
-
             if (hasUpdate) {
                 this._updateState = { status: "available", latestVersion: remote, remoteText: text };
                 this._renderUpdateBtn(panelRef);
@@ -239,8 +218,7 @@ module.exports = class ByeBlocked {
                                     {
                                         label: "View on GitHub",
                                         onClick: () => {
-                                            try { require("electron").shell.openExternal(ByeBlocked.RELEASE_URL); }
-                                            catch (_) { window.open(ByeBlocked.RELEASE_URL, "_blank"); }
+                                            try { require("electron").shell.openExternal(ByeBlocked.RELEASE_URL); } catch (_) { window.open(ByeBlocked.RELEASE_URL, "_blank"); }
                                         }
                                     }
                                 ]
@@ -253,9 +231,7 @@ module.exports = class ByeBlocked {
             } else {
                 this._updateState = { status: "upToDate", latestVersion: remote, remoteText: null };
                 this._renderUpdateBtn(panelRef);
-                if (!silent) {
-                    this.toast("ByeBlocked is up to date!", "success");
-                }
+                if (!silent) this.toast("ByeBlocked is up to date!", "success");
             }
         } catch (err) {
             this._updateState = { status: "error", latestVersion: null, remoteText: null };
@@ -270,42 +246,29 @@ module.exports = class ByeBlocked {
     _updatePanelInfo(panelRef) {
         if (!panelRef) return;
         const infoEl = panelRef.querySelector('[data-nmb-last-check]');
-        if (infoEl) {
-            infoEl.textContent = `Last check: ${this._formatDate(this._lastCheckTimestamp)}`;
-        }
+        if (infoEl) infoEl.textContent = `Last check: ${this._formatDate(this._lastCheckTimestamp)}`;
     }
 
     async _httpsGet(url, _redirectCount = 0) {
         if (_redirectCount > 5) throw new Error("Too many redirects");
-
         if (typeof BdApi?.Net?.fetch === "function") {
-            const res = await BdApi.Net.fetch(url, {
-                headers: {
-                    "User-Agent": "ByeBlocked-UpdateChecker/1.0",
-                    "Cache-Control": "no-cache"
-                }
-            });
+            const res = await BdApi.Net.fetch(url, { headers: { "User-Agent": "ByeBlocked-UpdateChecker/1.0", "Cache-Control": "no-cache" } });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return res.text();
         }
-
         const _require = typeof window !== "undefined" && typeof window.require === "function"
             ? window.require
             : (typeof __non_webpack_require__ !== "undefined" ? __non_webpack_require__ : null);
-
         if (_require) {
             return new Promise((resolve, reject) => {
                 try {
-                    const https  = _require("https");
+                    const https = _require("https");
                     const urlObj = new URL(url);
                     const options = {
                         hostname: urlObj.hostname,
                         path: urlObj.pathname + urlObj.search,
                         method: "GET",
-                        headers: {
-                            "User-Agent": "ByeBlocked-UpdateChecker/1.0",
-                            "Cache-Control": "no-cache"
-                        }
+                        headers: { "User-Agent": "ByeBlocked-UpdateChecker/1.0", "Cache-Control": "no-cache" }
                     };
                     const req = https.request(options, res => {
                         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -315,7 +278,7 @@ module.exports = class ByeBlocked {
                         if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return; }
                         const chunks = [];
                         res.on("data", c => chunks.push(c));
-                        res.on("end",  () => resolve(Buffer.concat(chunks).toString("utf8")));
+                        res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
                         res.on("error", reject);
                     });
                     req.on("error", reject);
@@ -324,10 +287,7 @@ module.exports = class ByeBlocked {
                 } catch (err) { reject(err); }
             });
         }
-
-        const res = await fetch(url, {
-            headers: { "User-Agent": "ByeBlocked-UpdateChecker/1.0", "Cache-Control": "no-cache" }
-        });
+        const res = await fetch(url, { headers: { "User-Agent": "ByeBlocked-UpdateChecker/1.0", "Cache-Control": "no-cache" } });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.text();
     }
@@ -345,26 +305,19 @@ module.exports = class ByeBlocked {
     async _autoInstall(remoteVersion, remoteText, panelRef = null) {
         try {
             this._removeNotice();
-
-            const fs   = require("fs");
+            const fs = require("fs");
             const path = require("path");
             const pluginsDir = BdApi.Plugins.folder;
             const dest = path.join(pluginsDir, "ByeBlocked.plugin.js");
             fs.writeFileSync(dest, remoteText, "utf8");
-
             this._updateState = { status: "upToDate", latestVersion: remoteVersion, remoteText: null };
             this._renderUpdateBtn(panelRef);
             this._lastNotifiedVersion = remoteVersion;
-
             this.toast(`ByeBlocked updated to v${remoteVersion}!`, "success");
-
             setTimeout(() => {
                 try {
-                    const pluginName = this.pluginName;
-                    if (BdApi.Plugins.isEnabled(pluginName)) {
-                        BdApi.Plugins.disable(pluginName);
-                    }
-                    BdApi.Plugins.enable(pluginName);
+                    if (BdApi.Plugins.isEnabled(this.pluginName)) BdApi.Plugins.disable(this.pluginName);
+                    BdApi.Plugins.enable(this.pluginName);
                     this.toast(`Plugin successfully re-activated (v${remoteVersion})!`, "success");
                 } catch (e) {
                     console.error("[ByeBlocked] Error reactivating:", e);
@@ -373,8 +326,7 @@ module.exports = class ByeBlocked {
             }, 800);
         } catch (err) {
             this.toast("Auto-install failed: " + err.message + " — download manually from GitHub.", "error");
-            try { require("electron").shell.openExternal(ByeBlocked.RELEASE_URL); }
-            catch (_) { window.open(ByeBlocked.RELEASE_URL, "_blank"); }
+            try { require("electron").shell.openExternal(ByeBlocked.RELEASE_URL); } catch (_) { window.open(ByeBlocked.RELEASE_URL, "_blank"); }
         }
     }
 
@@ -382,32 +334,28 @@ module.exports = class ByeBlocked {
         if (!panelRef) return;
         const btn = panelRef.querySelector("[data-nmb-update-btn]");
         if (!btn) return;
-
         const iconPaths = {
-            idle:      `<path d="M14 2v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 7A5.5 5.5 0 1 1 10.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
-            checking:  `<path d="M14 2v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 7A5.5 5.5 0 1 1 10.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
-            upToDate:  `<path d="M2.5 8.5l3.5 3.5 7.5-7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
+            idle: `<path d="M14 2v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 7A5.5 5.5 0 1 1 10.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
+            checking: `<path d="M14 2v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 7A5.5 5.5 0 1 1 10.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
+            upToDate: `<path d="M2.5 8.5l3.5 3.5 7.5-7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
             available: `<path d="M8 2v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
-            error:     `<path d="M8 3.5v5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11.5" r="0.75" fill="currentColor"/>`
+            error: `<path d="M8 3.5v5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11.5" r="0.75" fill="currentColor"/>`
         };
-
         const states = {
-            idle:      { label: "Check for updates",  cls: "",                    disabled: false },
-            checking:  { label: "Checking…",           cls: "is-checking",         disabled: true  },
-            upToDate:  { label: "Up to date",          cls: "is-up-to-date",       disabled: false },
-            available: { label: "Install update",      cls: "is-update-available", disabled: false },
-            error:     { label: "Error — try again",   cls: "is-error",            disabled: false }
+            idle: { label: "Check for updates", cls: "", disabled: false },
+            checking: { label: "Checking…", cls: "is-checking", disabled: true },
+            upToDate: { label: "Up to date", cls: "is-up-to-date", disabled: false },
+            available: { label: "Install update", cls: "is-update-available", disabled: false },
+            error: { label: "Error — try again", cls: "is-error", disabled: false }
         };
-        const s    = states[this._updateState.status] || states.idle;
+        const s = states[this._updateState.status] || states.idle;
         const icon = iconPaths[this._updateState.status] || iconPaths.idle;
-
         const labelEl = btn.querySelector(".nmb-btn-label");
-        const iconEl  = btn.querySelector(".nmb-btn-icon");
+        const iconEl = btn.querySelector(".nmb-btn-icon");
         if (labelEl) labelEl.textContent = s.label;
-        if (iconEl)  iconEl.innerHTML = icon;
-        btn.disabled  = s.disabled;
+        if (iconEl) iconEl.innerHTML = icon;
+        btn.disabled = s.disabled;
         btn.className = "nmb-update-btn " + s.cls;
-
         if (this._updateState.status === "available" && this._updateState.latestVersion) {
             btn.title = `v${this._updateState.latestVersion} available`;
         } else {
@@ -417,19 +365,9 @@ module.exports = class ByeBlocked {
 
     getDefaultSettings() {
         return {
-            types: {
-                blocked: true,
-                ignored: true
-            },
-            places: {
-                messages: true,
-                memberList: true,
-                voiceChannels: true,
-                groupDms: true
-            },
-            behavior: {
-                autoCheckUpdates: true
-            }
+            types: { blocked: true, ignored: true },
+            places: { messages: true, memberList: true, voiceChannels: true, groupDms: true },
+            behavior: { autoCheckUpdates: true }
         };
     }
 
@@ -438,18 +376,12 @@ module.exports = class ByeBlocked {
         try {
             const stored = BdApi.Data.load(this.pluginName, "settings") || {};
             return this.mergeSettings(defaults, stored);
-        } catch (_) {
-            return defaults;
-        }
+        } catch (_) { return defaults; }
     }
 
     saveSettings(immediate = false) {
         clearTimeout(this.saveTimeout);
-        const persist = () => {
-            try {
-                BdApi.Data.save(this.pluginName, "settings", this.settings);
-            } catch (_) {}
-        };
+        const persist = () => { try { BdApi.Data.save(this.pluginName, "settings", this.settings); } catch (_) {} };
         if (immediate) return persist();
         this.saveTimeout = setTimeout(persist, 250);
     }
@@ -463,46 +395,40 @@ module.exports = class ByeBlocked {
     }
 
     _cancelAllNavTimers() {
-        if (this.scanTimeout)           { clearTimeout(this.scanTimeout);           this.scanTimeout = null; }
-        if (this._refreshDebounce)      { clearTimeout(this._refreshDebounce);      this._refreshDebounce = null; }
-        if (this._guildSwitchWaitTimeout){ clearTimeout(this._guildSwitchWaitTimeout); this._guildSwitchWaitTimeout = null; }
+        if (this.scanTimeout) { clearTimeout(this.scanTimeout); this.scanTimeout = null; }
+        if (this._refreshDebounce) { clearTimeout(this._refreshDebounce); this._refreshDebounce = null; }
+        if (this._guildSwitchWaitTimeout) { clearTimeout(this._guildSwitchWaitTimeout); this._guildSwitchWaitTimeout = null; }
     }
 
     _handleNavigation() {
         if (!this.isRunning) return;
         this._cancelAllNavTimers();
-
         this.observer?.disconnect();
-
         this._injectGuildSwitchGuard();
-
         this._waitForChatReady(0);
     }
 
     _waitForChatReady(attempts) {
         const MAX_ATTEMPTS = 40;
-        const INTERVAL     = 50;
-
+        const INTERVAL = 50;
         if (!this.isRunning) {
             this._removeGuildSwitchGuard();
             this._restartObserver();
             return;
         }
-
         const chatReady =
-            document.querySelector('[class*="chatContent"]')         ||
+            document.querySelector('[class*="chatContent"]') ||
             document.querySelector('[data-list-id*="chat-messages"]') ||
-            document.querySelector('[class*="privateChannels"]')     ||
-            document.querySelector('[class*="friendsContainer"]')    ||
+            document.querySelector('[class*="privateChannels"]') ||
+            document.querySelector('[class*="friendsContainer"]') ||
             document.querySelector('[class*="noFriendsText"]');
-
         if (chatReady || attempts >= MAX_ATTEMPTS) {
             this.hiddenElements.clear();
             this.hiddenParents.clear();
             this._removeGuildSwitchGuard();
             this._restartObserver();
-
             this.scanDom();
+            this.patchMessageStore();
             this._guildSwitchWaitTimeout = setTimeout(() => {
                 if (!this.isRunning) return;
                 this.scanDom();
@@ -548,77 +474,57 @@ module.exports = class ByeBlocked {
         document.getElementById('nmb-guild-switch-guard')?.remove();
     }
 
+
     start() {
         if (this.isRunning) return;
         this.isRunning = true;
-
         this.resolveModules();
         if (!this.modules.RelationshipStore?.isBlocked) {
             this.isRunning = false;
             this.toast("Could not find Discord RelationshipStore.", "error");
             return;
         }
-
         this.addStyles();
-
         this.patchStores();
         this.patchRelationshipUpdates();
         this.patchBlockedMessageGroup();
-
+        this.patchMessageStore();
         this._restartObserver();
         this.scanInterval = setInterval(() => this.queueScan(), 4000);
-
         this.queueRefresh();
-
         if (this.settings.behavior.autoCheckUpdates) {
             setTimeout(() => this.checkForUpdatesAuto(), 5000);
             this._periodicCheckInterval = setInterval(() => this.checkForUpdatesAuto(), 7200000);
         }
-
         try {
-            const Dispatcher = BdApi.Webpack.getModule(
-                m => m?.dispatch && m?.subscribe && m?.unsubscribe,
-                { searchExports: false }
-            );
+            const Dispatcher = BdApi.Webpack.getModule(m => m?.dispatch && m?.subscribe && m?.unsubscribe, { searchExports: false });
             if (Dispatcher) {
                 this._navFluxHandler = () => this._handleNavigation();
                 Dispatcher.subscribe("CHANNEL_SELECT", this._navFluxHandler);
-                Dispatcher.subscribe("GUILD_CHANGE",   this._navFluxHandler);
+                Dispatcher.subscribe("GUILD_CHANGE", this._navFluxHandler);
                 this.patches.push(() => {
                     try { Dispatcher.unsubscribe("CHANNEL_SELECT", this._navFluxHandler); } catch (_) {}
-                    try { Dispatcher.unsubscribe("GUILD_CHANGE",   this._navFluxHandler); } catch (_) {}
+                    try { Dispatcher.unsubscribe("GUILD_CHANGE", this._navFluxHandler); } catch (_) {}
                 });
             } else {
-                const origPushState    = history.pushState;
+                const origPushState = history.pushState;
                 const origReplaceState = history.replaceState;
                 const self = this;
-                history.pushState    = function(...a) { origPushState.apply(this, a);    self._handleNavigation(); };
+                history.pushState = function(...a) { origPushState.apply(this, a); self._handleNavigation(); };
                 history.replaceState = function(...a) { origReplaceState.apply(this, a); self._handleNavigation(); };
                 this.patches.push(() => {
-                    history.pushState    = origPushState;
+                    history.pushState = origPushState;
                     history.replaceState = origReplaceState;
                 });
             }
         } catch (_) {}
-
     }
 
     stop() {
         this.isRunning = false;
-
-        if (this._periodicCheckInterval) {
-            clearInterval(this._periodicCheckInterval);
-            this._periodicCheckInterval = null;
-        }
-        if (this._refreshDebounce) {
-            clearTimeout(this._refreshDebounce);
-            this._refreshDebounce = null;
-        }
-        if (this._guildSwitchWaitTimeout) {
-            clearTimeout(this._guildSwitchWaitTimeout);
-            this._guildSwitchWaitTimeout = null;
-        }
-
+        if (this._periodicCheckInterval) { clearInterval(this._periodicCheckInterval); this._periodicCheckInterval = null; }
+        if (this._refreshDebounce) { clearTimeout(this._refreshDebounce); this._refreshDebounce = null; }
+        if (this._guildSwitchWaitTimeout) { clearTimeout(this._guildSwitchWaitTimeout); this._guildSwitchWaitTimeout = null; }
         this.observer?.disconnect();
         this.observer = null;
         clearInterval(this.scanInterval);
@@ -628,19 +534,14 @@ module.exports = class ByeBlocked {
         this.scanInterval = null;
         this.scanTimeout = null;
         this.refreshTimeout = null;
-
-        try {
-            this.modules.RelationshipStore?.removeChangeListener?.(this.relationshipChangeHandler);
-        } catch (_) {}
+        try { this.modules.RelationshipStore?.removeChangeListener?.(this.relationshipChangeHandler); } catch (_) {}
         this.relationshipChangeHandler = null;
-
         for (const unpatch of this.patches.splice(0)) {
             try { unpatch(); } catch (_) {}
         }
         try { BdApi.Patcher.unpatchAll(this.pluginName); } catch (_) {}
         this.restoreAllElements();
         this.removeStyles();
-
         this._removeNotice();
         this._removeGuildSwitchGuard();
         this._navFluxHandler = null;
@@ -653,19 +554,12 @@ module.exports = class ByeBlocked {
             try { this._routerUnsubscribe(); } catch (_) {}
             this._routerUnsubscribe = null;
         }
+        this._storePatched = false;
     }
 
-
     resolveModules() {
-        const getStore = name => {
-            try { return BdApi.Webpack.getStore(name); }
-            catch (_) { return null; }
-        };
-        const getModule = filter => {
-            try { return BdApi.Webpack.getModule(filter); }
-            catch (_) { return null; }
-        };
-
+        const getStore = name => { try { return BdApi.Webpack.getStore(name); } catch (_) { return null; } };
+        const getModule = filter => { try { return BdApi.Webpack.getModule(filter); } catch (_) { return null; } };
         this.modules.RelationshipStore = getStore("RelationshipStore");
         this.modules.SortedVoiceStateStore = getStore("SortedVoiceStateStore");
         this.modules.StageChannelParticipantStore = getStore("StageChannelParticipantStore");
@@ -686,7 +580,6 @@ module.exports = class ByeBlocked {
             this.originalVoiceMethods.getVoiceStates = voiceStore.getVoiceStates.bind(voiceStore);
             this.patchAfter(voiceStore, "getVoiceStates", (_, __, ret) => this.settings.places.voiceChannels ? this.filterVoiceStates(ret) : ret);
         }
-
         const stageStore = this.modules.StageChannelParticipantStore;
         if (stageStore?.getMutableParticipants) {
             this.patchAfter(stageStore, "getMutableParticipants", (_, __, ret) => {
@@ -694,7 +587,6 @@ module.exports = class ByeBlocked {
                 return ret.filter(participant => !this.shouldHide(this.extractUserId(participant)));
             });
         }
-
         const channelStore = this.modules.ChannelStore;
         if (channelStore?.getChannel) {
             this.patchAfter(channelStore, "getChannel", (_, __, channel) => {
@@ -709,10 +601,7 @@ module.exports = class ByeBlocked {
 
     patchRelationshipUpdates() {
         this.relationshipChangeHandler = () => this.queueRefresh();
-        try {
-            this.modules.RelationshipStore?.addChangeListener?.(this.relationshipChangeHandler);
-        } catch (_) {}
-
+        try { this.modules.RelationshipStore?.addChangeListener?.(this.relationshipChangeHandler); } catch (_) {}
         const utils = this.modules.RelationshipUtils;
         if (utils?.addRelationship) this.patchAfter(utils, "addRelationship", () => this.queueRefresh());
         if (utils?.removeRelationship) this.patchAfter(utils, "removeRelationship", () => this.queueRefresh());
@@ -720,7 +609,6 @@ module.exports = class ByeBlocked {
 
     patchBlockedMessageGroup() {
         if (!this.settings.places.messages) return;
-
         try {
             const BlockedMessageGroup = BdApi.Webpack.getModule(m =>
                 m?.displayName === "BlockedMessageGroup" ||
@@ -733,7 +621,6 @@ module.exports = class ByeBlocked {
                 return;
             }
         } catch (_) {}
-
         const BLOCKED_STRINGS = [
             "MESSAGE_GROUP_BLOCKED",
             "blockedMessageGroup",
@@ -757,7 +644,6 @@ module.exports = class ByeBlocked {
                 return;
             }
         } catch (_) {}
-
         try {
             let patched = false;
             BdApi.Webpack.getModule((m) => {
@@ -779,6 +665,70 @@ module.exports = class ByeBlocked {
         } catch (_) {}
     }
 
+    patchMessageStore() {
+        if (!this.settings.places.messages) return;
+        if (this._storePatched) return;
+        const store = this.modules.MessageStore;
+        if (!store) {
+            console.warn('[ByeBlocked] MessageStore not found.');
+            return;
+        }
+        const self = this;
+        const methods = ['getMessages', 'getMessagesForChannel', 'getMessagesForChannelId'];
+        for (const method of methods) {
+            if (typeof store[method] === 'function') {
+                this.patchAfter(store, method, function(_, args, ret) {
+                    if (!self.settings.places.messages) return ret;
+                    if (!ret) return ret;
+                    const getUserId = (msg) => msg?.author?.id || msg?.authorId || msg?.user?.id;
+                    if (Array.isArray(ret)) {
+                        return ret.filter(msg => {
+                            const userId = getUserId(msg);
+                            return !(userId && self.shouldHide(userId));
+                        });
+                    }
+                    if (ret && typeof ret === 'object' && Array.isArray(ret._array)) {
+                        const originalArray = ret._array;
+                        const filtered = originalArray.filter(msg => {
+                            const userId = getUserId(msg);
+                            return !(userId && self.shouldHide(userId));
+                        });
+                        if (filtered.length !== originalArray.length) {
+                            const newRet = Object.assign(Object.create(Object.getPrototypeOf(ret)), ret);
+                            newRet._array = filtered;
+                            return newRet;
+                        }
+                        return ret;
+                    }
+                    if (ret && typeof ret === 'object') {
+                        try {
+                            const filtered = {};
+                            let isMap = ret instanceof Map;
+                            const entries = isMap ? Array.from(ret.entries()) : Object.entries(ret);
+                            for (const [key, msg] of entries) {
+                                const userId = getUserId(msg);
+                                if (!(userId && self.shouldHide(userId))) {
+                                    filtered[key] = msg;
+                                }
+                            }
+                            if (isMap) {
+                                const newMap = new Map();
+                                for (const [key, val] of Object.entries(filtered)) {
+                                    newMap.set(key, val);
+                                }
+                                return newMap;
+                            }
+                            return filtered;
+                        } catch (_) { /* fallback */ }
+                    }
+                    return ret;
+                });
+            }
+        }
+        this._storePatched = true;
+        console.log('[ByeBlocked] ✅ MessageStore patched for safe filtering.');
+    }
+
     patchAfter(target, method, callback) {
         try {
             if (!target?.[method]) return;
@@ -789,7 +739,6 @@ module.exports = class ByeBlocked {
     filterVoiceStates(value) {
         if (!value) return value;
         if (Array.isArray(value)) return value.filter(state => !this.shouldHide(this.extractUserId(state)));
-
         if (value instanceof Map) {
             const filtered = new Map();
             for (const [key, item] of value) {
@@ -799,7 +748,6 @@ module.exports = class ByeBlocked {
             }
             return filtered;
         }
-
         if (typeof value === "object") {
             const filtered = {};
             for (const [key, item] of Object.entries(value)) {
@@ -813,7 +761,6 @@ module.exports = class ByeBlocked {
             }
             return filtered;
         }
-
         return value;
     }
 
@@ -823,9 +770,7 @@ module.exports = class ByeBlocked {
             if (this.settings.types.blocked && this.modules.RelationshipStore?.isBlocked?.(userId)) return true;
             if (this.settings.types.ignored && this.modules.RelationshipStore?.isIgnored?.(userId)) return true;
             return Boolean(isSpammer);
-        } catch (_) {
-            return false;
-        }
+        } catch (_) { return false; }
     }
 
     queueRefresh() {
@@ -844,9 +789,6 @@ module.exports = class ByeBlocked {
         }, 0);
     }
 
-    queueDiscordUpdate() {
-
-    }
 
     startObserver() {
         this.observer?.disconnect();
@@ -856,7 +798,7 @@ module.exports = class ByeBlocked {
             }
             this.queueScan();
         });
-        if (document.body) this.observer.observe(document.body, {childList: true, subtree: true});
+        if (document.body) this.observer.observe(document.body, { childList: true, subtree: true });
     }
 
     _fastHideFromMutations(mutations) {
@@ -881,12 +823,10 @@ module.exports = class ByeBlocked {
         if (!el || el.nodeType !== 1) return;
         if (el.dataset?.hiddenBlocked === "true") return;
         if (el.dataset?.nmbGhost === "true") return;
-
         const hasBlockedClass =
             el.matches?.('[class*="messageGroupBlocked"], [class*="blockedSystemMessage"]') ||
             el.querySelector?.('[class*="messageGroupBlocked"]') ||
             el.querySelector?.('[class*="blockedSystemMessage"]');
-
         if (hasBlockedClass) {
             const li = el.closest?.('li[class*="messageListItem"]') || el.closest?.('[class*="messageListItem"]') || el;
             if (li.dataset?.hiddenBlocked !== "true") {
@@ -895,25 +835,20 @@ module.exports = class ByeBlocked {
             }
             return;
         }
-
         if (el.matches?.('li[class*="messageListItem"], [class*="messageListItem"]') ||
             el.matches?.('[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]')) {
-
             let messageRow = el;
             if (el.matches?.('[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]')) {
                 messageRow = el.closest?.('li[class*="messageListItem"]') || el.closest?.('[class*="messageListItem"]');
                 if (!messageRow) return;
             }
-
             if (messageRow.dataset?.hiddenBlocked === "true") return;
-
             const userId = this.findUserId(messageRow);
             if (userId && this.shouldHide(userId)) {
                 this.hideElement(messageRow, "fast-message", userId);
                 void messageRow.offsetHeight;
                 return;
             }
-
             const replyBar = messageRow.querySelector('[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]');
             if (replyBar) {
                 const replyMention = replyBar.querySelector('[data-user-id]');
@@ -929,7 +864,6 @@ module.exports = class ByeBlocked {
                     return;
                 }
             }
-
             const mentions = messageRow.querySelectorAll?.('[class*="mention"]');
             if (mentions) {
                 for (let i = 0; i < mentions.length; i++) {
@@ -942,7 +876,6 @@ module.exports = class ByeBlocked {
                     }
                 }
             }
-
             const rawText = (messageRow.innerText || "").replace(/\s+/g, ' ').trim();
             if (rawText.length > 0 && this.isBlockedMessageBannerText(rawText)) {
                 this.hideElement(messageRow, "blocked-group-fast");
@@ -950,7 +883,6 @@ module.exports = class ByeBlocked {
                 return;
             }
         }
-
         if (el.matches?.('[class*="mention"]')) {
             const userId = this.findUserId(el);
             if (userId && this.shouldHide(userId)) {
@@ -965,7 +897,6 @@ module.exports = class ByeBlocked {
             }
         }
     }
-
 
     scanDom() {
         try {
@@ -983,29 +914,21 @@ module.exports = class ByeBlocked {
         } catch (_) {}
     }
 
-
     promoteOrphanedMessages() {
         document.querySelectorAll('[data-nmb-promoted="true"]').forEach(el => {
             const prev = this._prevVisibleLi(el);
-            if (prev && prev.dataset?.hiddenBlocked !== "true") {
-                this._demoteMessage(el);
-            }
+            if (prev && prev.dataset?.hiddenBlocked !== "true") this._demoteMessage(el);
         });
-
-        const hiddenLis = document.querySelectorAll(
-            'li[data-hidden-blocked="true"], [data-hidden-blocked="true"][class*="messageListItem"]'
-        );
+        const hiddenLis = document.querySelectorAll('li[data-hidden-blocked="true"], [data-hidden-blocked="true"][class*="messageListItem"]');
         for (let i = 0; i < hiddenLis.length; i++) {
             const hidden = hiddenLis[i];
             const next = this._nextVisibleLi(hidden);
             if (!next) continue;
             if (next.dataset?.hiddenBlocked === "true") continue;
             if (next.dataset?.nmbPromoted === "true") continue;
-
             const groupStartAttr = next.getAttribute("data-message-group-start");
             const isCompact = next.className?.includes?.("compact") || !!next.querySelector('[class*="compact"]');
             const hasHeader = !!next.querySelector('[class*="groupStart"], [class*="cozyHeader"], [class*="header_"], img[src*="/avatars/"]');
-
             if (groupStartAttr === "false" || (!hasHeader && !isCompact)) {
                 this._promoteMessage(next);
             }
@@ -1014,35 +937,24 @@ module.exports = class ByeBlocked {
 
     _promoteMessage(li) {
         if (!li || li.dataset?.nmbPromoted === "true") return;
-
         li.dataset.nmbPromoted = "true";
-
         try {
             let fiber = BdApi.ReactUtils.getInternalInstance(li);
             for (let i = 0; i < 30 && fiber; i++, fiber = fiber.return) {
                 const props = fiber.memoizedProps || fiber.pendingProps;
                 if (!props) continue;
-
-                const key = "groupStart" in props ? "groupStart"
-                    : "isGroupStart" in props ? "isGroupStart"
-                    : null;
+                const key = "groupStart" in props ? "groupStart" : "isGroupStart" in props ? "isGroupStart" : null;
                 if (key) {
-                    if (!li.dataset.nmbOrigGroupStart) {
-                        li.dataset.nmbOrigGroupStart = String(props[key]);
-                    }
+                    if (!li.dataset.nmbOrigGroupStart) li.dataset.nmbOrigGroupStart = String(props[key]);
                     break;
                 }
-
                 const msg = props.message || props.childMessage;
                 if (msg && "groupStart" in msg) {
-                    if (!li.dataset.nmbOrigGroupStart) {
-                        li.dataset.nmbOrigGroupStart = String(msg.groupStart);
-                    }
+                    if (!li.dataset.nmbOrigGroupStart) li.dataset.nmbOrigGroupStart = String(msg.groupStart);
                     break;
                 }
             }
         } catch (_) {}
-
         li.style.setProperty("--nmb-promoted", "1");
     }
 
@@ -1080,9 +992,7 @@ module.exports = class ByeBlocked {
     }
 
     collapseGhostSlots() {
-        const lis = document.querySelectorAll(
-            'li[class*="messageListItem"], li[class*="message_"], li[class*="cozy"], li[class*="compact"]'
-        );
+        const lis = document.querySelectorAll('li[class*="messageListItem"], li[class*="message_"], li[class*="cozy"], li[class*="compact"]');
         for (let i = 0; i < lis.length; i++) {
             const el = lis[i];
             if (el.dataset?.hiddenBlocked === "true") continue;
@@ -1092,10 +1002,7 @@ module.exports = class ByeBlocked {
             if (el.offsetHeight <= 1) continue;
             this._ghostHide(el);
         }
-
-        const wrappers = document.querySelectorAll(
-            '[class*="groupStart"] [class*="wrapper"], [class*="groupStart"] > [class*="cozy"]'
-        );
+        const wrappers = document.querySelectorAll('[class*="groupStart"] [class*="wrapper"], [class*="groupStart"] > [class*="cozy"]');
         for (let i = 0; i < wrappers.length; i++) {
             const el = wrappers[i];
             if (el.dataset?.hiddenBlocked === "true") continue;
@@ -1105,7 +1012,6 @@ module.exports = class ByeBlocked {
             if (el.offsetHeight <= 1) continue;
             this._ghostHide(el);
         }
-
         const groupStarts = document.querySelectorAll('[class*="groupStart"]');
         for (let i = 0; i < groupStarts.length; i++) {
             const group = groupStarts[i];
@@ -1142,12 +1048,10 @@ module.exports = class ByeBlocked {
     hideMessages() {
         const els = document.querySelectorAll('li[class*="messageListItem"], [class*="messageListItem"], [class*="blocked"], [class*="message-"], [class*="cozy-"], [class*="compact-"]');
         const parentSet = new Set();
-
         for (let i = 0; i < els.length; i++) {
             const el = els[i];
             const messageRow = el.closest('li[class*="messageListItem"]') || el;
             if (messageRow.dataset?.hiddenBlocked === "true") continue;
-
             const info = this.getMessageInfo(messageRow);
             if (this.settings.places.messages && this.shouldHide(info.authorId, info.isSpammer)) {
                 this.hideElement(messageRow, "message", info.authorId);
@@ -1168,7 +1072,6 @@ module.exports = class ByeBlocked {
                 if (parent && !parent.dataset?.hiddenBlocked) parentSet.add(parent);
                 continue;
             }
-
             const text = (messageRow.innerText || "").trim();
             if (this.settings.places.messages && this.isBlockedMessageBannerText(text)) {
                 this.hideElement(messageRow, "blocked-group-text");
@@ -1176,16 +1079,12 @@ module.exports = class ByeBlocked {
                 if (parent && !parent.dataset?.hiddenBlocked) parentSet.add(parent);
             }
         }
-
         for (const parent of parentSet) {
-            const visibleChildren = Array.from(parent.children).filter(child => 
-                !child.dataset?.hiddenBlocked && child.offsetParent !== null
-            );
+            const visibleChildren = Array.from(parent.children).filter(child => !child.dataset?.hiddenBlocked && child.offsetParent !== null);
             if (visibleChildren.length === 0) {
                 this.hideParent(parent, "empty-message-group");
             }
         }
-
         if (this.settings.places.messages) this.hideBlockedMessageTextBanners();
     }
 
@@ -1220,20 +1119,16 @@ module.exports = class ByeBlocked {
             const userId = el.dataset?.nmbUserId;
             if (userId && !this.shouldHide(userId)) this.restoreElement(el);
         }
-
         for (const parent of Array.from(this.hiddenParents)) {
             if (!document.contains(parent)) {
                 this.hiddenParents.delete(parent);
                 continue;
             }
-            const visibleChildren = Array.from(parent.children).filter(child => 
-                !child.dataset?.hiddenBlocked && child.offsetParent !== null
-            );
+            const visibleChildren = Array.from(parent.children).filter(child => !child.dataset?.hiddenBlocked && child.offsetParent !== null);
             if (visibleChildren.length > 0) {
                 this.restoreParent(parent);
             }
         }
-
         document.querySelectorAll('[data-nmb-ghost="true"]').forEach(slot => {
             const prev = slot.getAttribute("data-nmb-prev-ghost-style");
             if (prev) slot.setAttribute("style", prev);
@@ -1306,10 +1201,8 @@ module.exports = class ByeBlocked {
             const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
                 acceptNode: node => this.isBlockedMessageBannerText(node.nodeValue || "") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
             });
-
             const matches = [];
             while (walker.nextNode()) matches.push(walker.currentNode);
-
             for (let j = 0; j < matches.length; j++) {
                 const node = matches[j];
                 let candidate = node.parentElement;
@@ -1355,7 +1248,6 @@ module.exports = class ByeBlocked {
             if (header.dataset?.hiddenBlocked === "true") return;
             const id = header.dataset?.listItemId || "";
             if (/\d{17,20}$/.test(id)) return;
-
             let seenMember = false;
             let seenVisible = false;
             let next = header.nextElementSibling;
@@ -1376,14 +1268,12 @@ module.exports = class ByeBlocked {
     fixMemberGroupCounts() {
         document.querySelectorAll('[class*="membersGroup"], [data-list-item-id]').forEach(header => {
             if (header.dataset?.hiddenBlocked === "true" || !this.isMemberGroupHeader(header)) return;
-
             const count = this.countVisibleMembersAfter(header);
             if (count === null) return;
             if (count <= 0) {
                 this.hideElement(header, "empty-member-header");
                 return;
             }
-
             this.updateMemberGroupVisibleCount(header, count);
         });
     }
@@ -1399,7 +1289,6 @@ module.exports = class ByeBlocked {
         let count = 0;
         let sawMember = false;
         let next = header.nextElementSibling;
-
         while (next) {
             if (this.isMemberGroupHeader(next)) break;
             const userId = this.findUserId(next);
@@ -1409,26 +1298,22 @@ module.exports = class ByeBlocked {
             }
             next = next.nextElementSibling;
         }
-
         return sawMember ? count : null;
     }
 
     updateMemberGroupVisibleCount(header, count) {
         const headerDiv = header.querySelector('[class*="membersGroupHeader"]') || header;
         const spans = Array.from(headerDiv.querySelectorAll('span'));
-        
         const countSpan = spans.find(span => {
             if (span.className && span.className.includes('membersGroupName')) return false;
             return /[-–—]\s*\d+/.test(span.textContent || "");
         });
-
         if (countSpan) {
             if (!countSpan.hasAttribute("data-nmb-prev-text")) {
                 countSpan.setAttribute("data-nmb-prev-text", countSpan.textContent);
             }
             countSpan.textContent = `\u00A0— ${count}`;
         }
-        
         const hiddenSpan = header.querySelector('[class*="hiddenVisually"]');
         if (hiddenSpan) {
             if (!hiddenSpan.hasAttribute("data-nmb-prev-text")) {
@@ -1459,18 +1344,14 @@ module.exports = class ByeBlocked {
     fixVoiceCounters() {
         const voiceStore = this.modules.SortedVoiceStateStore;
         if (!voiceStore?.getVoiceStatesForChannel) return;
-
         document.querySelectorAll('[class*="voiceUsers"], [class*="userLimit"]').forEach(counter => {
             const text = counter.textContent || "";
             if (!/\d/.test(text)) return;
-
             const channel = counter.closest('[data-list-item-id], [id*="channels___"], [class*="voiceChannel"], [class*="channel-"]');
             const channelId = this.findChannelId(channel);
             if (!channelId) return;
-
             const states = this.getRawVoiceStatesForChannel(channelId);
             const visible = states.filter(state => !this.shouldHide(this.extractUserId(state))).length;
-
             if (text.includes("/")) {
                 const limit = text.split("/").pop().trim();
                 counter.textContent = `${visible} / ${limit}`;
@@ -1485,25 +1366,21 @@ module.exports = class ByeBlocked {
             const channelRow = row.closest?.('[data-list-item-id*="channels"]') || row.closest?.('li') || row;
             const channelId = this.findChannelId(channelRow) || this.findChannelId(row);
             if (!channelId) return;
-
             const states = this.getRawVoiceStatesForChannel(channelId);
             const allHidden = states.length > 0 && states.every(state => this.shouldHide(this.extractUserId(state)));
             const activeOnlyByDom = !states.length && this.looksLikeHiddenOnlyVoiceChannel(channelRow);
             const isHiddenOnly = allHidden || activeOnlyByDom;
-
             if (!isHiddenOnly) {
                 this.restoreVoiceChannelIcon(channelRow);
                 this.restoreVoiceChannelTimer(channelRow);
                 return;
             }
-
             channelRow.dataset.nmbMutedVoice = "true";
             channelRow.querySelectorAll('svg, [class*="icon"], [class*="iconLive"]').forEach(icon => {
                 if (!icon.hasAttribute("data-nmb-prev-icon-style")) icon.setAttribute("data-nmb-prev-icon-style", icon.getAttribute("style") || "");
                 icon.style.setProperty("color", "var(--channels-default)", "important");
                 icon.style.setProperty("fill", "currentColor", "important");
             });
-
             if (this.settings.places.voiceChannels) {
                 channelRow.querySelectorAll('[class*="timer"], [class*="voiceTimer"], [role="timer"], [class*="tabularNumbers"]').forEach(el => {
                     this.hideElement(el, "voice-timer");
@@ -1518,7 +1395,6 @@ module.exports = class ByeBlocked {
         const hasLiveIcon = Boolean(row.querySelector?.('[class*="iconLive"]'));
         const hasCallDuration = /dura(?:ç|c)[aã]o da chamada|call duration|duration/i.test(label);
         if (!hasLiveIcon && !hasCallDuration) return false;
-
         const container = row.closest?.('li') || row;
         const visibleVoiceRows = Array.from(container.querySelectorAll?.('[class*="voiceUser"], [class*="voiceUser_"], [class*="voiceUser-"], [data-list-item-id*="voice"]') || [])
             .filter(el => el.dataset?.hiddenBlocked !== "true" && el.offsetParent !== null);
@@ -1547,26 +1423,17 @@ module.exports = class ByeBlocked {
                 : this.modules.SortedVoiceStateStore?.getVoiceStatesForChannel?.(channelId);
             const states = Array.isArray(raw) ? raw : Object.values(raw || {});
             if (states.length) return states;
-
             const guildId = this.modules.SelectedGuildStore?.getGuildId?.();
             const byGuild = guildId && this.originalVoiceMethods.getVoiceStates
                 ? this.originalVoiceMethods.getVoiceStates(guildId)
                 : null;
             const channelStates = byGuild?.[channelId];
             return Array.isArray(channelStates) ? channelStates : Object.values(channelStates || {});
-        } catch (_) {
-            return [];
-        }
+        } catch (_) { return []; }
     }
 
     getMessageInfo(el) {
-        const info = {
-            authorId: null,
-            referencedAuthorId: null,
-            isBlockedGroup: false,
-            isSpammer: false
-        };
-
+        const info = { authorId: null, referencedAuthorId: null, isBlockedGroup: false, isSpammer: false };
         const visit = props => {
             if (!props || typeof props !== "object") return;
             const message = props.message || props.baseMessage || props.referencedMessage?.message;
@@ -1584,7 +1451,6 @@ module.exports = class ByeBlocked {
             if (/SPAMMER/i.test(type)) info.isSpammer = true;
             if (props.isBlockedMessage === true) info.isBlockedGroup = true;
         };
-
         this.walkFiberProps(el, visit, 24);
         if (!info.authorId) info.authorId = this.findUserId(el);
         return info;
@@ -1595,9 +1461,7 @@ module.exports = class ByeBlocked {
             const ref = message?.messageReference;
             if (!ref) return null;
             return this.modules.MessageStore?.getMessage?.(ref.channel_id, ref.message_id);
-        } catch (_) {
-            return null;
-        }
+        } catch (_) { return null; }
     }
 
     findUserId(el) {
@@ -1608,13 +1472,9 @@ module.exports = class ByeBlocked {
             const userIdEl = el.querySelector?.('[data-user-id]');
             if (userIdEl?.dataset?.userId) return userIdEl.dataset.userId;
         } catch (_) {}
-
         let found = null;
-        this.walkFiberProps(el, props => {
-            if (!found) found = this.extractUserId(props);
-        }, 24);
+        this.walkFiberProps(el, props => { if (!found) found = this.extractUserId(props); }, 24);
         if (found) return found;
-
         try {
             const listId = el.dataset?.listItemId || "";
             const idMatch = listId.match(/(\d{17,20})$/) || el.id?.match(/(\d{17,20})/);
@@ -1623,7 +1483,6 @@ module.exports = class ByeBlocked {
             const avatarMatch = avatar?.src?.match(/\/avatars\/(\d{17,20})\//);
             if (avatarMatch) return avatarMatch[1];
         } catch (_) {}
-
         return null;
     }
 
@@ -1631,19 +1490,15 @@ module.exports = class ByeBlocked {
         if (!value || depth > 3) return null;
         if (typeof value === "string" && /^\d{17,20}$/.test(value)) return value;
         if (typeof value !== "object") return null;
-
         const direct = value.userId || value.authorId || value.recipientId;
         if (direct && /^\d{17,20}$/.test(String(direct))) return String(direct);
-
         if (value.id && (value.username || value.discriminator || value.globalName) && /^\d{17,20}$/.test(String(value.id))) {
             return String(value.id);
         }
-
         const nested = value.user?.id || value.author?.id || value.member?.userId || value.member?.user?.id ||
             value.participant?.userId || value.participant?.user?.id || value.voiceState?.userId ||
             value.message?.author?.id || value.baseMessage?.author?.id || value.recipient?.id || value.channel?.recipientId;
         if (nested && /^\d{17,20}$/.test(String(nested))) return String(nested);
-
         for (const key of ["props", "memoizedProps", "pendingProps", "record", "row", "message"]) {
             if (value[key]) {
                 const found = this.extractUserId(value[key], depth + 1);
@@ -1711,7 +1566,6 @@ module.exports = class ByeBlocked {
 
     addStyles() {
         this.removeStyles();
-
         const hideBlockedBanner = this.settings.places.messages ? `
             [class*="messageGroupBlocked"],
             [class*="blockedSystemMessage"],
@@ -1730,7 +1584,6 @@ module.exports = class ByeBlocked {
                 contain: size style !important;
             }
         ` : '';
-
         const noticeButtonStyles = `
             .bd-notice button,
             .bd-notice .bd-button,
@@ -1750,18 +1603,11 @@ module.exports = class ByeBlocked {
                 color: var(--text-normal) !important;
             }
         `;
-
         BdApi.DOM.addStyle(this.pluginName, `
             [data-hidden-blocked="true"],
-            [data-hidden-blocked="true"] * {
-                ${this.hideStyles}
-            }
-
+            [data-hidden-blocked="true"] * { ${this.hideStyles} }
             [class*="messageGroupStart"]:empty,
-            [class*="messageGroupBlocked"]:empty {
-                display: none !important;
-            }
-
+            [class*="messageGroupBlocked"]:empty { display: none !important; }
             [data-nmb-ghost="true"] {
                 display: none !important;
                 height: 0 !important;
@@ -1772,46 +1618,24 @@ module.exports = class ByeBlocked {
                 overflow: hidden !important;
                 contain: size style !important;
             }
-
             ${hideBlockedBanner}
-
             [data-nmb-promoted="true"] [class*="compact"],
-            [data-nmb-promoted="true"] [class*="cozy"] {
-                margin-top: 17px !important;
-            }
+            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }
             [data-nmb-promoted="true"] [class*="avatar"],
-            [data-nmb-promoted="true"] img[class*="avatar"] {
-                display: block !important;
-            }
+            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }
             [data-nmb-promoted="true"] [class*="username"],
             [data-nmb-promoted="true"] [class*="header_"],
-            [data-nmb-promoted="true"] [class*="cozyHeader"] {
-                display: flex !important;
-            }
-
-            [class*="channelInfo"] {
-                display: flex !important;
-                align-items: center !important;
-                gap: 4px !important;
-            }
-
+            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }
+            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }
             [data-nmb-muted-voice="true"] svg,
             [data-nmb-muted-voice="true"] [class*="icon"],
             [data-nmb-muted-voice="true"] [class*="iconLive"] {
                 color: var(--channels-default) !important;
                 fill: currentColor !important;
             }
-
             [class*="bd-modal-large"],
-            [class*="bd-modal"][class*="large"] {
-                width: 90vw !important;
-                max-width: 860px !important;
-            }
-
-            [class*="bd-modal-body"] {
-                max-height: 82vh !important;
-            }
-
+            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }
+            [class*="bd-modal-body"] { max-height: 82vh !important; }
             .nmb-panel {
                 padding: 16px 20px;
                 color: var(--text-normal);
@@ -1823,7 +1647,6 @@ module.exports = class ByeBlocked {
                 transform: translateZ(0);
                 backface-visibility: hidden;
             }
-
             .nmb-header-minimal {
                 display: flex;
                 align-items: baseline;
@@ -1832,19 +1655,8 @@ module.exports = class ByeBlocked {
                 padding-bottom: 10px;
                 border-bottom: 1px solid var(--background-modifier-accent);
             }
-
-            .nmb-plugin-name {
-                font-size: 22px;
-                font-weight: 700;
-                color: var(--header-primary);
-            }
-
-            .nmb-version {
-                font-size: 15px;
-                color: var(--text-muted);
-                font-weight: 500;
-            }
-
+            .nmb-plugin-name { font-size: 22px; font-weight: 700; color: var(--header-primary); }
+            .nmb-version { font-size: 15px; color: var(--text-muted); font-weight: 500; }
             .nmb-section {
                 background: var(--background-secondary);
                 border-radius: 8px;
@@ -1852,7 +1664,6 @@ module.exports = class ByeBlocked {
                 overflow: hidden;
                 border: 1px solid var(--background-modifier-accent);
             }
-
             .nmb-section-header {
                 display: flex;
                 align-items: center;
@@ -1863,11 +1674,7 @@ module.exports = class ByeBlocked {
                 transition: background 160ms ease !important;
                 background: transparent;
             }
-
-            .nmb-panel .nmb-section-header:hover {
-                background: var(--background-modifier-hover) !important;
-            }
-
+            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }
             .nmb-section-title {
                 font-size: 12px;
                 font-weight: 600;
@@ -1876,7 +1683,6 @@ module.exports = class ByeBlocked {
                 color: var(--header-secondary);
                 margin: 0;
             }
-
             .nmb-chevron {
                 width: 16px;
                 height: 16px;
@@ -1884,30 +1690,15 @@ module.exports = class ByeBlocked {
                 transition: transform 220ms ease;
                 flex-shrink: 0;
             }
-
-            .nmb-section.is-open .nmb-chevron {
-                transform: rotate(180deg);
-            }
-
+            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }
             .nmb-section-body {
                 display: grid;
                 grid-template-rows: 0fr;
                 transition: grid-template-rows 200ms ease;
             }
-
-            .nmb-section.is-open .nmb-section-body {
-                grid-template-rows: 1fr;
-            }
-
-            .nmb-section-body-inner {
-                overflow: hidden;
-                padding: 0 16px;
-            }
-
-            .nmb-section.is-open .nmb-section-body-inner {
-                padding: 4px 16px 10px;
-            }
-
+            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }
+            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }
+            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }
             .nmb-row {
                 display: flex;
                 align-items: center;
@@ -1918,16 +1709,8 @@ module.exports = class ByeBlocked {
                 transition: background 150ms ease !important;
                 background: transparent;
             }
-
-            .nmb-panel .nmb-row:hover {
-                background: var(--background-modifier-hover) !important;
-            }
-
-            .nmb-row-label {
-                font-size: 14px;
-                color: var(--text-normal);
-            }
-
+            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }
+            .nmb-row-label { font-size: 14px; color: var(--text-normal); }
             .nmb-switch {
                 position: relative;
                 width: 34px;
@@ -1938,15 +1721,8 @@ module.exports = class ByeBlocked {
                 cursor: pointer;
                 transition: background 160ms ease, box-shadow 160ms ease;
             }
-
-            .nmb-switch:hover {
-                box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25);
-            }
-
-            .nmb-switch.is-on {
-                background: var(--brand-experiment, #5865f2);
-            }
-
+            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }
+            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }
             .nmb-switch-knob {
                 position: absolute;
                 top: 2px;
@@ -1958,11 +1734,7 @@ module.exports = class ByeBlocked {
                 box-shadow: 0 1px 2px rgba(0,0,0,0.3);
                 transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);
             }
-
-            .nmb-switch.is-on .nmb-switch-knob {
-                transform: translateX(16px);
-            }
-
+            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }
             .nmb-actions {
                 display: flex;
                 align-items: center;
@@ -1972,7 +1744,6 @@ module.exports = class ByeBlocked {
                 padding: 12px 0;
                 border-top: 1px solid var(--background-modifier-accent);
             }
-
             .nmb-update-btn {
                 display: inline-flex;
                 align-items: center;
@@ -1982,85 +1753,51 @@ module.exports = class ByeBlocked {
                 cursor: pointer;
                 transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;
                 white-space: nowrap;
-            }
-
-            .nmb-btn-icon {
-                width: 14px;
-                height: 14px;
-                flex-shrink: 0;
-            }
-
-            .nmb-update-btn {
                 padding: 8px 14px;
                 font-size: 13px;
                 background: var(--brand-experiment, #5865f2);
                 color: #fff;
                 border: none;
             }
-
+            .nmb-btn-icon { width: 14px; height: 14px; flex-shrink: 0; }
             .nmb-update-btn:hover:not(:disabled) {
                 background: var(--brand-experiment-hover, #4752c4);
                 transform: translateY(-1px);
                 box-shadow: 0 2px 8px rgba(0,0,0,0.25);
             }
-
-            .nmb-update-btn:disabled {
-                opacity: 0.55;
-                cursor: default;
-            }
-
-            .nmb-update-btn.is-checking .nmb-btn-icon {
-                animation: nmb-spin 0.8s linear infinite;
-            }
-
-            @keyframes nmb-spin {
-                from { transform: rotate(0deg); }
-                to   { transform: rotate(360deg); }
-            }
-
+            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }
+            .nmb-update-btn.is-checking .nmb-btn-icon { animation: nmb-spin 0.8s linear infinite; }
+            @keyframes nmb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
             .nmb-update-btn.is-up-to-date {
                 background: var(--text-positive, #23a559);
                 color: #fff;
                 border: none;
             }
-
             .nmb-update-btn.is-up-to-date:hover:not(:disabled) {
                 background: #1e8f4e;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.25);
             }
-
             .nmb-update-btn.is-update-available {
                 background: var(--brand-experiment, #5865f2);
                 color: #fff;
                 border: none;
                 animation: nmb-pulse-update 2s ease-in-out infinite;
             }
-
-            .nmb-update-btn.is-update-available:hover {
-                filter: brightness(1.1);
-            }
-
+            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }
             .nmb-update-btn.is-error {
                 background: var(--text-danger, #f23f43);
                 color: #fff;
                 border: none;
             }
-
             .nmb-update-btn.is-error:hover:not(:disabled) {
                 background: #d73338;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.25);
             }
-
             @keyframes nmb-pulse-update {
                 0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }
-                50%       { box-shadow: 0 0 0 6px rgba(88,101,242,0); }
+                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }
             }
-
-            .nmb-last-check {
-                font-size: 12px;
-                color: var(--text-muted);
-            }
-
+            .nmb-last-check { font-size: 12px; color: var(--text-muted); }
             ${noticeButtonStyles}
         `);
     }
@@ -2071,23 +1808,20 @@ module.exports = class ByeBlocked {
     }
 
     toast(message, type = "info") {
-        try { BdApi.UI.showToast(message, {type}); } catch (_) {}
+        try { BdApi.UI.showToast(message, { type }); } catch (_) {}
     }
 
     getSettingsPanel() {
         const panel = document.createElement("div");
         panel.className = "nmb-panel";
-
         panel.innerHTML = `
             <div class="nmb-header-minimal">
                 <span class="nmb-plugin-name">
                     <span class="nmb-version"> v${ByeBlocked.VERSION}</span>
                 </span>
             </div>
-
             ${this.renderSettingsGroup("types", "Hide users by type", true)}
             ${this.renderSettingsGroup("places", "Where to hide", true)}
-
             <div class="nmb-actions">
                 <button class="nmb-update-btn" data-nmb-update-btn>
                     <svg class="nmb-btn-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -2098,9 +1832,7 @@ module.exports = class ByeBlocked {
                 </button>
                 <span class="nmb-last-check" data-nmb-last-check>Last check: ${this._formatDate(this._lastCheckTimestamp)}</span>
             </div>
-
         `;
-
         if (this._updateState.status === "available") {
             this._renderUpdateBtn(panel);
         } else {
@@ -2112,7 +1844,6 @@ module.exports = class ByeBlocked {
                 this._renderUpdateBtn(panel);
             }
         }
-
         panel.addEventListener("click", event => {
             const updateBtn = event.target.closest("[data-nmb-update-btn]");
             if (updateBtn) {
@@ -2123,16 +1854,14 @@ module.exports = class ByeBlocked {
                 }
                 return;
             }
-
             const header = event.target.closest(".nmb-section-header");
             if (header) {
                 header.closest(".nmb-section")?.classList.toggle("is-open");
                 return;
             }
-
             const switchEl = event.target.closest(".nmb-switch");
             if (switchEl) {
-                const {section, key} = switchEl.dataset;
+                const { section, key } = switchEl.dataset;
                 const next = !this.settings[section][key];
                 this.settings[section][key] = next;
                 switchEl.classList.toggle("is-on", next);
@@ -2141,11 +1870,7 @@ module.exports = class ByeBlocked {
                 return;
             }
         });
-
-        setTimeout(() => {
-            panel.scrollIntoView({ block: 'start', behavior: 'smooth' });
-        }, 50);
-
+        setTimeout(() => { panel.scrollIntoView({ block: 'start', behavior: 'smooth' }); }, 50);
         return panel;
     }
 
@@ -2159,7 +1884,6 @@ module.exports = class ByeBlocked {
             groupDms: "Group DMs",
             autoCheckUpdates: "Auto-check updates on startup"
         };
-
         const rows = Object.keys(this.settings[section]).map(key => {
             const isOn = this.settings[section][key];
             return `
@@ -2173,7 +1897,6 @@ module.exports = class ByeBlocked {
                 </div>
             `;
         }).join("");
-
         return `
             <section class="nmb-section ${openByDefault ? "is-open" : ""}">
                 <div class="nmb-section-header">
