@@ -2,13 +2,13 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 1.0.2
+ * @version 1.0.13
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
 module.exports = class ByeBlocked {
-    static VERSION     = "1.0.2";
+    static VERSION     = "1.0.13";
     static RAW_URL     = "https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL = "https://github.com/8ug8ird/ByeBlocked";
 
@@ -20,11 +20,13 @@ module.exports = class ByeBlocked {
         this.refreshTimeout = null;
         this.saveTimeout = null;
         this.relationshipChangeHandler = null;
+        this.isRunning = false;
+
         this.guildChangeHandler = null;
         this.routerChangeHandler = null;
         this._routerUnsubscribe = null;
-        this.isRunning = false;
         this._refreshDebounce = null;
+        this._chatContentObserver = null;
 
         this.patches = [];
         this.hiddenElements = new Set();
@@ -460,20 +462,90 @@ module.exports = class ByeBlocked {
         return merged;
     }
 
+    _cancelAllNavTimers() {
+        if (this.scanTimeout)           { clearTimeout(this.scanTimeout);           this.scanTimeout = null; }
+        if (this._refreshDebounce)      { clearTimeout(this._refreshDebounce);      this._refreshDebounce = null; }
+        if (this._guildSwitchWaitTimeout){ clearTimeout(this._guildSwitchWaitTimeout); this._guildSwitchWaitTimeout = null; }
+    }
+
     _handleNavigation() {
-        if (this._refreshDebounce) {
-            clearTimeout(this._refreshDebounce);
-            this._refreshDebounce = null;
+        if (!this.isRunning) return;
+        this._cancelAllNavTimers();
+
+        this.observer?.disconnect();
+
+        this._injectGuildSwitchGuard();
+
+        this._waitForChatReady(0);
+    }
+
+    _waitForChatReady(attempts) {
+        const MAX_ATTEMPTS = 40;
+        const INTERVAL     = 50;
+
+        if (!this.isRunning) {
+            this._removeGuildSwitchGuard();
+            this._restartObserver();
+            return;
         }
-        this._refreshDebounce = setTimeout(() => {
-            if (!this.isRunning) return;
-            this.restoreAllElements();
-            this.queueDiscordUpdate();
-            setTimeout(() => {
-                this.queueScan();
-                this._refreshDebounce = null;
-            }, 300);
-        }, 150);
+
+        const chatReady =
+            document.querySelector('[class*="chatContent"]')         ||
+            document.querySelector('[data-list-id*="chat-messages"]') ||
+            document.querySelector('[class*="privateChannels"]')     ||
+            document.querySelector('[class*="friendsContainer"]')    ||
+            document.querySelector('[class*="noFriendsText"]');
+
+        if (chatReady || attempts >= MAX_ATTEMPTS) {
+            this.hiddenElements.clear();
+            this.hiddenParents.clear();
+            this._removeGuildSwitchGuard();
+            this._restartObserver();
+
+            this.scanDom();
+            this._guildSwitchWaitTimeout = setTimeout(() => {
+                if (!this.isRunning) return;
+                this.scanDom();
+                this._guildSwitchWaitTimeout = null;
+            }, 400);
+        } else {
+            this._guildSwitchWaitTimeout = setTimeout(() => {
+                this._waitForChatReady(attempts + 1);
+            }, INTERVAL);
+        }
+    }
+
+    _restartObserver() {
+        this.observer?.disconnect();
+        this.observer = new MutationObserver((mutations) => {
+            if (this.settings.places.messages) {
+                try { this._fastHideFromMutations(mutations); } catch (_) {}
+            }
+            this.queueScan();
+        });
+        if (document.body) this.observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    _injectGuildSwitchGuard() {
+        if (document.getElementById('nmb-guild-switch-guard')) return;
+        const style = document.createElement('style');
+        style.id = 'nmb-guild-switch-guard';
+        style.textContent = `
+            [class*="messageGroupBlocked"],
+            [class*="blockedSystemMessage"],
+            li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),
+            li[class*="messageListItem"]:has([class*="blockedSystemMessage"]) {
+                display: none !important;
+                height: 0 !important;
+                overflow: hidden !important;
+                contain: size style !important;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    _removeGuildSwitchGuard() {
+        document.getElementById('nmb-guild-switch-guard')?.remove();
     }
 
     start() {
@@ -493,7 +565,7 @@ module.exports = class ByeBlocked {
         this.patchRelationshipUpdates();
         this.patchBlockedMessageGroup();
 
-        this.startObserver();
+        this._restartObserver();
         this.scanInterval = setInterval(() => this.queueScan(), 4000);
 
         this.queueRefresh();
@@ -504,45 +576,31 @@ module.exports = class ByeBlocked {
         }
 
         try {
-            const GuildStore = BdApi.Webpack.getStore("SelectedGuildStore") || BdApi.Webpack.getStore("GuildStore");
-            if (GuildStore) {
-                this.guildChangeHandler = () => this._handleNavigation();
-                GuildStore.addChangeListener(this.guildChangeHandler);
+            const Dispatcher = BdApi.Webpack.getModule(
+                m => m?.dispatch && m?.subscribe && m?.unsubscribe,
+                { searchExports: false }
+            );
+            if (Dispatcher) {
+                this._navFluxHandler = () => this._handleNavigation();
+                Dispatcher.subscribe("CHANNEL_SELECT", this._navFluxHandler);
+                Dispatcher.subscribe("GUILD_CHANGE",   this._navFluxHandler);
                 this.patches.push(() => {
-                    try { GuildStore.removeChangeListener(this.guildChangeHandler); } catch (_) {}
-                });
-            }
-        } catch (_) {}
-
-        try {
-            const Router = BdApi.Webpack.getModule(m => m?.transitionTo && m?.replaceWith && typeof m.transitionTo === 'function');
-            if (Router && typeof Router.addRouteChangeListener === 'function') {
-                this.routerChangeHandler = () => this._handleNavigation();
-                this._routerUnsubscribe = Router.addRouteChangeListener(this.routerChangeHandler);
-                this.patches.push(() => {
-                    if (this._routerUnsubscribe) {
-                        try { this._routerUnsubscribe(); } catch (_) {}
-                        this._routerUnsubscribe = null;
-                    }
+                    try { Dispatcher.unsubscribe("CHANNEL_SELECT", this._navFluxHandler); } catch (_) {}
+                    try { Dispatcher.unsubscribe("GUILD_CHANGE",   this._navFluxHandler); } catch (_) {}
                 });
             } else {
-                const origPushState = history.pushState;
+                const origPushState    = history.pushState;
                 const origReplaceState = history.replaceState;
                 const self = this;
-                history.pushState = function(...args) {
-                    origPushState.apply(this, args);
-                    self._handleNavigation();
-                };
-                history.replaceState = function(...args) {
-                    origReplaceState.apply(this, args);
-                    self._handleNavigation();
-                };
+                history.pushState    = function(...a) { origPushState.apply(this, a);    self._handleNavigation(); };
+                history.replaceState = function(...a) { origReplaceState.apply(this, a); self._handleNavigation(); };
                 this.patches.push(() => {
-                    history.pushState = origPushState;
+                    history.pushState    = origPushState;
                     history.replaceState = origReplaceState;
                 });
             }
         } catch (_) {}
+
     }
 
     stop() {
@@ -555,6 +613,10 @@ module.exports = class ByeBlocked {
         if (this._refreshDebounce) {
             clearTimeout(this._refreshDebounce);
             this._refreshDebounce = null;
+        }
+        if (this._guildSwitchWaitTimeout) {
+            clearTimeout(this._guildSwitchWaitTimeout);
+            this._guildSwitchWaitTimeout = null;
         }
 
         this.observer?.disconnect();
@@ -578,16 +640,21 @@ module.exports = class ByeBlocked {
         try { BdApi.Patcher.unpatchAll(this.pluginName); } catch (_) {}
         this.restoreAllElements();
         this.removeStyles();
-        this.queueDiscordUpdate();
 
         this._removeNotice();
+        this._removeGuildSwitchGuard();
+        this._navFluxHandler = null;
         this.guildChangeHandler = null;
         this.routerChangeHandler = null;
+        this._guildSwitchFluxHandler = null;
+        this._channelSelectFluxHandler = null;
+        this._lastSeenGuildId = null;
         if (this._routerUnsubscribe) {
             try { this._routerUnsubscribe(); } catch (_) {}
             this._routerUnsubscribe = null;
         }
     }
+
 
     resolveModules() {
         const getStore = name => {
@@ -765,9 +832,8 @@ module.exports = class ByeBlocked {
         clearTimeout(this.refreshTimeout);
         this.refreshTimeout = setTimeout(() => {
             this.restoreUnhiddenElements();
-            this.queueDiscordUpdate();
             this.queueScan();
-        }, 60);
+        }, 10);
     }
 
     queueScan() {
@@ -775,13 +841,11 @@ module.exports = class ByeBlocked {
         this.scanTimeout = setTimeout(() => {
             this.scanTimeout = null;
             this.scanDom();
-        }, 100);
+        }, 0);
     }
 
     queueDiscordUpdate() {
-        try {
-            BdApi.ReactUtils.forceUpdate?.(document.querySelector("#app-mount"));
-        } catch (_) {}
+
     }
 
     startObserver() {
@@ -803,7 +867,8 @@ module.exports = class ByeBlocked {
                 if (node.nodeType !== 1) continue;
                 this._fastHideNode(node);
                 const descendants = node.querySelectorAll ? node.querySelectorAll(
-                    'li[class*="messageListItem"], [class*="messageListItem"]'
+                    'li[class*="messageListItem"], [class*="messageListItem"], ' +
+                    '[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]'
                 ) : [];
                 for (let d = 0; d < descendants.length; d++) {
                     this._fastHideNode(descendants[d]);
@@ -826,17 +891,81 @@ module.exports = class ByeBlocked {
             const li = el.closest?.('li[class*="messageListItem"]') || el.closest?.('[class*="messageListItem"]') || el;
             if (li.dataset?.hiddenBlocked !== "true") {
                 this.hideElement(li, "blocked-group-fast");
+                void li.offsetHeight;
             }
             return;
         }
 
-        if (el.matches?.('li[class*="messageListItem"], [class*="messageListItem"]')) {
-            const rawText = (el.innerText || "").replace(/\s+/g, ' ').trim();
+        if (el.matches?.('li[class*="messageListItem"], [class*="messageListItem"]') ||
+            el.matches?.('[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]')) {
+
+            let messageRow = el;
+            if (el.matches?.('[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]')) {
+                messageRow = el.closest?.('li[class*="messageListItem"]') || el.closest?.('[class*="messageListItem"]');
+                if (!messageRow) return;
+            }
+
+            if (messageRow.dataset?.hiddenBlocked === "true") return;
+
+            const userId = this.findUserId(messageRow);
+            if (userId && this.shouldHide(userId)) {
+                this.hideElement(messageRow, "fast-message", userId);
+                void messageRow.offsetHeight;
+                return;
+            }
+
+            const replyBar = messageRow.querySelector('[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]');
+            if (replyBar) {
+                const replyMention = replyBar.querySelector('[data-user-id]');
+                const replyUserId = replyMention?.dataset?.userId || this.findUserId(replyBar);
+                if (replyUserId && this.shouldHide(replyUserId)) {
+                    this.hideElement(messageRow, "fast-reply-to-blocked", replyUserId);
+                    void messageRow.offsetHeight;
+                    return;
+                }
+                if (replyBar.matches('[class*="blocked"]') || replyBar.querySelector('[class*="blocked"]')) {
+                    this.hideElement(messageRow, "fast-reply-blocked-class");
+                    void messageRow.offsetHeight;
+                    return;
+                }
+            }
+
+            const mentions = messageRow.querySelectorAll?.('[class*="mention"]');
+            if (mentions) {
+                for (let i = 0; i < mentions.length; i++) {
+                    const mention = mentions[i];
+                    const mentionedId = this.findUserId(mention);
+                    if (mentionedId && this.shouldHide(mentionedId)) {
+                        this.hideElement(messageRow, "fast-mention", mentionedId);
+                        void messageRow.offsetHeight;
+                        return;
+                    }
+                }
+            }
+
+            const rawText = (messageRow.innerText || "").replace(/\s+/g, ' ').trim();
             if (rawText.length > 0 && this.isBlockedMessageBannerText(rawText)) {
-                this.hideElement(el, "blocked-group-fast");
+                this.hideElement(messageRow, "blocked-group-fast");
+                void messageRow.offsetHeight;
+                return;
+            }
+        }
+
+        if (el.matches?.('[class*="mention"]')) {
+            const userId = this.findUserId(el);
+            if (userId && this.shouldHide(userId)) {
+                const messageRow = el.closest('li[class*="messageListItem"]') || el.closest('[class*="messageListItem"]');
+                if (messageRow) {
+                    this.hideElement(messageRow, "fast-mention", userId);
+                    void messageRow.offsetHeight;
+                } else {
+                    this.hideElement(el, "fast-mention", userId);
+                    void el.offsetHeight;
+                }
             }
         }
     }
+
 
     scanDom() {
         try {
@@ -851,9 +980,9 @@ module.exports = class ByeBlocked {
             this.hideOrphanedDividers();
             this.collapseGhostSlots();
             this.promoteOrphanedMessages();
-            this.queueDiscordUpdate();
         } catch (_) {}
     }
+
 
     promoteOrphanedMessages() {
         document.querySelectorAll('[data-nmb-promoted="true"]').forEach(el => {
