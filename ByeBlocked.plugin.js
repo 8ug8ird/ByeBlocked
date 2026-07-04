@@ -463,7 +463,7 @@ module.exports = class ByeBlocked {
             },
             behavior: {
                 autoCheckUpdates: true,
-                muteVoiceJoinLeaveSound: false
+                muteVoiceJoinLeaveSound: true
             }
         };
     }
