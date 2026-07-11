@@ -2,12 +2,12 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.2.0
+ * @version 2.1.0
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 module.exports = class ByeBlocked {
-    static VERSION="2.2.0";
+    static VERSION="2.1.0";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     constructor() {
@@ -370,7 +370,7 @@ module.exports = class ByeBlocked {
                     this._lastNotifiedVersion = remote;
                     this._removeNotice();
                     try {
-                        this._updateNotice = BdApi.UI.showNotice(`ðŸŽ‰ ByeBlocked v${remote} is out! You're on v${local} - update available.`, {
+                        this._updateNotice = BdApi.UI.showNotice(`🎉 ByeBlocked v${remote} is out! You're on v${local} - update available.`, {
                             timeout: 0,
                             buttons: [ {
                                 label: "Install now",
@@ -391,7 +391,7 @@ module.exports = class ByeBlocked {
                             } ]
                         });
                     } catch (_) {
-                        this.toast(`ðŸŽ‰ ByeBlocked v${remote} available! Go to settings.`, "info");
+                        this.toast(`🎉 ByeBlocked v${remote} available! Go to settings.`, "info");
                     }
                 }
                 this._updateState = {
@@ -475,7 +475,7 @@ module.exports = class ByeBlocked {
                 this._renderUpdateBtn(panelRef);
                 if (!silent) {
                     try {
-                        this._updateNotice = BdApi.UI.showNotice(`ðŸŽ‰ ByeBlocked v${remote} is out! You're on v${local} â€” update available.`, {
+                        this._updateNotice = BdApi.UI.showNotice(`🎉 ByeBlocked v${remote} is out! You're on v${local} â€” update available.`, {
                             timeout: 0,
                             buttons: [ {
                                 label: "Install now",
