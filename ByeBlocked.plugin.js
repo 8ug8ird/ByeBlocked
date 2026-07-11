@@ -2,12 +2,12 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.2.0
+ * @version 2.2.1
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 module.exports = class ByeBlocked {
-    static VERSION="2.2.0";
+    static VERSION="2.2.1";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     constructor() {
@@ -65,6 +65,7 @@ module.exports = class ByeBlocked {
         this._privateChannelStorePatched = false;
         this._mentionAutocompletePatched = false;
         this._activePostsPopoverPatched = false;
+        this._lastScanDomTime = 0;
         this._lastContextMessageId = null;
         this._reactorModalPassTimer = null;
         this._contextMenuHandler = null;
@@ -90,6 +91,7 @@ module.exports = class ByeBlocked {
         this._voiceChannelMemberIds = new Map;
         this._voiceFakeTimers = new Map;
         this._voiceFakeTimerTick = null;
+        
 
         this._historyPatchActive = false;
         this._origPushState = null;
@@ -475,7 +477,7 @@ module.exports = class ByeBlocked {
                 this._renderUpdateBtn(panelRef);
                 if (!silent) {
                     try {
-                        this._updateNotice = BdApi.UI.showNotice(`🎉 ByeBlocked v${remote} is out! You're on v${local} â€” update available.`, {
+                        this._updateNotice = BdApi.UI.showNotice(`🎉 ByeBlocked v${remote} is out! You're on v${local} - update available.`, {
                             timeout: 0,
                             buttons: [ {
                                 label: "Install now",
@@ -845,7 +847,41 @@ module.exports = class ByeBlocked {
             this._rememberPinPinner(messageId, pinnerId);
             return String(pinnerId);
         }
+        if (channelId) this._schedulePinPinnerRetry(channelId, messageId);
         return null;
+    }
+    _cleanupPendingPin(channelId, messageId) {
+        if (!channelId || !messageId) return;
+        const pending = this._pendingPinsByChannel;
+        if (!pending) return;
+        const queue = pending.get(channelId);
+        if (queue) { queue.delete(messageId); if (!queue.size) pending.delete(channelId); }
+    }
+    _schedulePinPinnerRetry(channelId, messageId, attempt = 0) {
+        if (!channelId || !messageId) return;
+        if (!this._pendingPinsByChannel) this._pendingPinsByChannel = new Map;
+        if (!this._pendingPinsByChannel.has(channelId)) this._pendingPinsByChannel.set(channelId, new Set);
+        if (!attempt && this._pendingPinsByChannel.get(channelId).has(messageId)) return;
+        if (!attempt) this._pendingPinsByChannel.get(channelId).add(messageId);
+        const delays = [1500, 3000, 6000];
+        const maxAttempts = delays.length;
+        const delay = attempt < maxAttempts ? delays[attempt] : 10000;
+        setTimeout(() => {
+            if (!this.isRunning) return;
+            const pending = this._pendingPinsByChannel;
+            if (!pending || !pending.has(channelId) || !pending.get(channelId).has(messageId)) return;
+            if (this._pinPinnerByMessageId.has(String(messageId))) {
+                this._cleanupPendingPin(channelId, messageId);
+                return;
+            }
+            this._resolvePendingPinFromStore(channelId, messageId);
+            if (attempt + 1 < maxAttempts) {
+                if (!this._pendingPinsByChannel) this._pendingPinsByChannel = new Map;
+                if (!this._pendingPinsByChannel.has(channelId)) this._pendingPinsByChannel.set(channelId, new Set);
+                this._pendingPinsByChannel.get(channelId).add(messageId);
+                this._schedulePinPinnerRetry(channelId, messageId, attempt + 1);
+            }
+        }, delay);
     }
     _shouldHidePinnedMessage(channelId, messageId, pinItem) {
         if (!messageId) return false;
@@ -873,7 +909,7 @@ module.exports = class ByeBlocked {
             if (pinnerId && this.shouldHide(pinnerId)) {
                 if (!this._blockedPinnedMessageIds.has(String(messageId))) changed = true;
                 this._markMessagePinnedByBlocked(messageId);
-            } else if (pinnerId && !this.shouldHide(pinnerId) && this._blockedPinnedMessageIds.has(messageId)) {
+            } else if (pinnerId && !this.shouldHide(pinnerId) && this._blockedPinnedMessageIds.has(String(messageId))) {
                 changed = true;
                 this._unmarkMessageUnpinned(messageId);
             }
@@ -919,7 +955,7 @@ module.exports = class ByeBlocked {
         } catch (_) {}
     }
     _markMessagePinnedByBlocked(messageId) {
-        if (!messageId || this._blockedPinnedMessageIds.has(messageId)) return;
+        if (!messageId || this._blockedPinnedMessageIds.has(String(messageId))) return;
         this._blockedPinnedMessageIds.add(String(messageId));
         this.saveBlockedPinnedIds();
         this.queueRefresh();
@@ -927,8 +963,8 @@ module.exports = class ByeBlocked {
         this._ackBlockedOnlyPins();
     }
     _unmarkMessageUnpinned(messageId) {
-        if (!messageId || !this._blockedPinnedMessageIds.has(messageId)) return;
-        this._blockedPinnedMessageIds.delete(messageId);
+        if (!messageId || !this._blockedPinnedMessageIds.has(String(messageId))) return;
+        this._blockedPinnedMessageIds.delete(String(messageId));
         this.saveBlockedPinnedIds();
         this._forceReadStateRecheck();
     }
@@ -1319,7 +1355,7 @@ module.exports = class ByeBlocked {
             for (const timer of this._readStateReloadRecheckTimers) clearTimeout(timer);
         }
         this._forceReadStateRecheck(true);
-        this._readStateReloadRecheckTimers = [ 0, 150, 400, 900, 1800, 3500, 7e3, 12e3 ].map(delay => setTimeout(() => {
+        this._readStateReloadRecheckTimers = [ 0, 300, 800, 2e3, 5e3, 1e4 ].map(delay => setTimeout(() => {
             if (this.isRunning) {
                 this._bootstrapBlockedUnreadSuppression();
                 this._forceReadStateRecheck(delay === 0);
@@ -1465,13 +1501,37 @@ module.exports = class ByeBlocked {
             }, INTERVAL);
         }
     }
+    _isRelevantMutation(mutations) {
+        for (let m = 0; m < mutations.length; m++) {
+            const added = mutations[m].addedNodes;
+            for (let n = 0; n < added.length; n++) {
+                const node = added[n];
+                if (node.nodeType !== 1) continue;
+                const tag = node.tagName;
+                if (tag === 'LINK' || tag === 'STYLE' || tag === 'SCRIPT' || tag === 'META' || tag === 'TITLE') continue;
+                return true;
+            }
+        }
+        return false;
+    }
     _restartObserver() {
         this.observer?.disconnect();
+        this._observerFramePending = false;
         this.observer = new MutationObserver(mutations => {
-            try {
-                this._fastHideFromMutations(mutations);
-            } catch (_) {}
-            this.queueScan();
+            if (!this._isRelevantMutation(mutations)) return;
+            if (this.isRunning && this.settings.places?.reactions) {
+                try { this._fastHideReactionsFromMutations(mutations); } catch (_) {}
+            }
+            if (this._observerFramePending) return;
+            this._observerFramePending = true;
+            requestAnimationFrame(() => {
+                this._observerFramePending = false;
+                if (!this.isRunning) return;
+                try {
+                    this._fastHideFromMutations(mutations);
+                } catch (_) {}
+                this.queueScan(true);
+            });
         });
         if (document.body) this.observer.observe(document.body, {
             childList: true,
@@ -1579,8 +1639,6 @@ this.patches.push(() => {
             this._safePatch("patchMentionAutocomplete", () => this.patchMentionAutocomplete());
             this._safePatch("patchGuildMembersPageRow", () => this.patchGuildMembersPageRow());
             this._safePatch("patchMemberListRow", () => this.patchMemberListRow());
-        }, 2e3);
-        setTimeout(() => {
             this._safePatch("patchSoundboardEffects", () => this.patchSoundboardEffects());
             if (this.settings.behavior.muteVoiceJoinLeaveSound) {
                 this._safePatch("patchSound", () => this.patchSound());
@@ -3658,10 +3716,14 @@ return false;
     }
     shouldHide(userId, isSpammer = false) {
         if (!userId) return false;
+        if (isSpammer) return true;
+        if (this._shouldHideCache?.has(userId)) return this._shouldHideCache.get(userId);
         try {
-            if (this.settings.types.blocked && this.modules.RelationshipStore?.isBlocked?.(userId)) return true;
-            if (this.settings.types.ignored && this.modules.RelationshipStore?.isIgnored?.(userId)) return true;
-            return Boolean(isSpammer);
+            let result = false;
+            if (this.settings.types.blocked && this.modules.RelationshipStore?.isBlocked?.(userId)) result = true;
+            else if (this.settings.types.ignored && this.modules.RelationshipStore?.isIgnored?.(userId)) result = true;
+            if (this._shouldHideCache) this._shouldHideCache.set(userId, result);
+            return result;
         } catch (_) {
             return false;
         }
@@ -3675,15 +3737,20 @@ return false;
             const channelId = store.getChannelId?.() || null;
             if (channelId === this._lastWatchedChannelId) return;
             this._lastWatchedChannelId = channelId;
-            for (const delay of [ 0, 50, 150, 400, 900 ]) {
+            const delays = [ 50, 250, 600 ];
+            for (let d = 0; d < delays.length; d++) {
                 setTimeout(() => {
                     if (!this.isRunning) return;
                     try {
                         if (this.settings.places.messages) this.hideForumPosts();
                         if (this.settings.places.memberList) this.hideMemberRows();
                         if (this.settings.places.groupDms || this.settings.places.messages) this.hidePrivateChannels();
+                        if (this.settings.places.reactions) {
+                            this.fixReactionCounts();
+                            this.hideBlockedReactors();
+                        }
                     } catch (_) {}
-                }, delay);
+                }, delays[d]);
             }
         };
         store.addChangeListener(this._channelSwitchChangeHandler);
@@ -3703,13 +3770,23 @@ return false;
             if (channelId) this._scanExistingPinsForChannel(channelId);
         } catch (_) {}
     }
-    queueScan() {
+    queueScan(fromMutation = false) {
         if (!this.isRunning || this.scanTimeout) return;
         this._nmbWatchdogCheck();
-        this.scanTimeout = setTimeout(() => {
+        const now = Date.now();
+        if (this._lastScanDomTime && now - this._lastScanDomTime < 80) {
+            this.scanTimeout = setTimeout(() => {
+                this.scanTimeout = null;
+                this._lastScanDomTime = Date.now();
+                this.scanDom(fromMutation);
+            }, 80);
+            return;
+        }
+        this.scanTimeout = requestAnimationFrame(() => {
             this.scanTimeout = null;
-            this.scanDom();
-        }, 0);
+            this._lastScanDomTime = Date.now();
+            this.scanDom(fromMutation);
+        });
     }
     _nmbWatchdogCheck() {
         try {
@@ -3782,15 +3859,24 @@ return false;
             const idMatch = messageRow.id?.match(/chat-messages-(?:\d+-)?(\d+)$/);
             return idMatch ? idMatch[1] : messageRow.id || null;
         };
+        const isRelevantClick = event => {
+            if (event.type === "contextmenu") return true;
+            const target = event.target;
+            if (target?.closest?.('li[class*="messageListItem"], [class*="messageListItem"]')) return true;
+            if (target?.closest?.('[aria-haspopup="menu"], [aria-haspopup="true"], [role="menuitem"], [class*="buttonContainer"]')) return true;
+            return false;
+        };
         const capture = event => {
+            if (!isRelevantClick(event)) return;
             const resolved = resolveMessageId(event.target);
             if (resolved) this._lastContextMessageId = resolved;
-            for (const delay of [ 0, 50, 150, 300, 600 ]) {
+            const delays = this._contextMenuDelays || (this._contextMenuDelays = [ 50, 200, 450 ]);
+            for (let d = 0; d < delays.length; d++) {
                 setTimeout(() => {
                     try {
                         if (this.settings.places.reactions) this._hideViewReactionsMenuItem();
                     } catch (_) {}
-                }, delay);
+                }, delays[d]);
             }
         };
         this._contextMenuHandler = capture;
@@ -3806,7 +3892,7 @@ return false;
                 for (let n = 0; n < added.length; n++) {
                     const node = added[n];
                     if (node.nodeType !== 1) continue;
-                    const reactionMenuSelector = "#message-actions-reactions, #message-remove-emoji-reactions, #message-remove-reactions";
+                    const reactionMenuSelector = "#message-actions-reactions, #message-remove-emoji-reactions, #message-remove-reactions, #message-reactions";
                     const menuItem = node.matches?.(reactionMenuSelector) ? node : node.querySelector?.(reactionMenuSelector);
                     if (menuItem) {
                         try {
@@ -3884,7 +3970,7 @@ return false;
                         return;
                     }
                 }
-            }, 20);
+            }, 12);
         } catch (_) {}
         if (!found) {
             const bars = document.querySelectorAll('[id^="message-reactions-"]');
@@ -4081,29 +4167,15 @@ return false;
     }
     _messageHasRealReaction(messageId) {
         try {
-            const store = this.modules.ReactionsStore;
-            if (!store || typeof store.getReactions !== "function" || !messageId) return true;
-            const SelectedChannelStore = this.modules.SelectedChannelStore;
-            const channelId = SelectedChannelStore?.getChannelId?.();
-            if (!channelId) return true;
+            if (!messageId) return true;
             const container = document.getElementById(`message-reactions-${messageId}`);
             if (!container) return true;
-            const emojiImgs = container.querySelectorAll('img.emoji, img[class*="emoji"]');
-            if (!emojiImgs.length) return false;
-            for (const img of emojiImgs) {
-                const name = img.getAttribute("data-name");
-                if (!name) continue;
-                const id = img.getAttribute("data-id") || null;
-                let users;
-                try {
-                    users = this._getFilteredReactions(store, channelId, messageId, {
-                        id: id,
-                        name: name
-                    }, 0);
-                } catch (_) {
-                    continue;
-                }
-                if (this._reactionUsersSize(users) > 0) return true;
+            this.fixReactionCounts();
+            if (container.dataset.nmbZeroReaction === "true") return false;
+            const rows = container.querySelectorAll('[class*="reactionInner"]');
+            if (!rows.length) return false;
+            for (const row of rows) {
+                if (row.dataset.nmbZeroReaction !== "true") return true;
             }
             return false;
         } catch (_) {
@@ -4111,7 +4183,7 @@ return false;
         }
     }
     _REACTION_MENU_ITEM_IDS() {
-        return [ "message-actions-reactions", "message-remove-emoji-reactions", "message-remove-reactions" ];
+        return [ "message-actions-reactions", "message-remove-emoji-reactions", "message-remove-reactions", "message-reactions" ];
     }
     _hideViewReactionsMenuItem() {
         const focusedRow = document.querySelector('li[class*="messageListItem"][class*="contextMenuOpen"], li[class*="messageListItem"][aria-expanded="true"]');
@@ -4230,7 +4302,7 @@ return false;
                         if (threadId) return;
                         const candidate = props?.threadId || props?.thread?.id;
                         if (candidate && /^\d{17,20}$/.test(String(candidate))) threadId = String(candidate);
-                    }, 24);
+                    }, 12);
                 }
                 if (threadId && this.modules.ChannelStore && typeof this.modules.ChannelStore.getChannel === "function") {
                     try {
@@ -4306,18 +4378,29 @@ return false;
     hideActivePostsPopover(root) {
         if (!root) return;
         try {
-            let rows = root.querySelectorAll('[class*="row__"]');
+            const rowSel = '[class*="row__"]';
+            let rows = root.querySelectorAll(rowSel);
             if (!rows.length) {
-                rows = Array.from(root.querySelectorAll('[role="button"]')).filter(el => !!this._threadFromRowFiber(el));
+                rows = root.querySelectorAll('[role="button"]');
+                if (!rows.length) return;
+                let filtered = [], r;
+                for (let i = 0; i < rows.length; i++) {
+                    r = rows[i];
+                    if (this._threadFromRowFiber(r)) filtered.push(r);
+                }
+                rows = filtered;
             }
-            for (const row of rows) {
-                if (!row || row.nodeType !== 1) continue;
-                if (row.dataset?.hiddenBlocked === "true") continue;
+            if (!rows.length) return;
+            let visibleCount = 0;
+            for (let i = 0; i < rows.length; i++) {
+                const row = rows[i];
+                if (row.nodeType !== 1 || row.dataset?.hiddenBlocked === "true") continue;
                 let authorId = null;
                 const thread = this._threadFromRowFiber(row);
                 if (thread) authorId = thread.ownerId || thread.owner_id || null;
                 if (!authorId) {
-                    const threadId = thread?.id || row.dataset?.listItemId?.match?.(/(\d{17,20})/)?.[1];
+                    const match = row.dataset?.listItemId?.match?.(/(\d{17,20})/);
+                    const threadId = thread?.id || (match ? match[1] : null);
                     if (threadId && this.modules.ChannelStore?.getChannel) {
                         try {
                             const ch = this.modules.ChannelStore.getChannel(threadId);
@@ -4328,21 +4411,20 @@ return false;
                 if (!authorId) authorId = this.findUserId(row);
                 if (authorId && this.shouldHide(authorId)) {
                     this.hideElement(row, "active-posts-popover-blocked", authorId);
+                } else {
+                    visibleCount++;
                 }
             }
-            if (rows.length > 0) {
-                const stillVisible = Array.from(rows).some(r => r.dataset?.hiddenBlocked !== "true");
-                if (!stillVisible) {
-                    this.hideElement(root, "active-posts-popover-all-blocked", false);
-                }
+            if (visibleCount === 0) {
+                this.hideElement(root, "active-posts-popover-all-blocked", false);
             }
         } catch (_) {}
     }
     hidePrivateChannels() {
         try {
-            const dmRows = document.querySelectorAll('[data-list-item-id^="private-channels___"], [class*="privateChannels"] [class*="channel"]');
-            for (const row of dmRows) {
-                if (row.dataset?.hiddenBlocked === "true") continue;
+            const dmRows = document.querySelectorAll('[data-list-item-id^="private-channels___"]:not([data-hidden-blocked="true"]), [class*="privateChannels"] [class*="channel"]:not([data-hidden-blocked="true"])');
+            for (let i = 0; i < dmRows.length; i++) {
+                const row = dmRows[i];
                 const userId = this.findUserId(row);
                 if (userId && this.shouldHide(userId)) {
                     this.hideElement(row, "dm-blocked", userId);
@@ -4527,29 +4609,56 @@ return false;
     _scheduleForumRetry() {
         if (this._forumRetryScheduled) return;
         this._forumRetryScheduled = true;
-        for (const delay of [ 50, 150, 400 ]) {
+        const delays = [ 100, 400 ];
+        for (let d = 0; d < delays.length; d++) {
             setTimeout(() => {
                 if (!this.isRunning) return;
-                try {
-                    this.hideForumPosts();
-                } catch (_) {}
-            }, delay);
+                try { this.hideForumPosts(); } catch (_) {}
+            }, delays[d]);
         }
-        setTimeout(() => {
-            this._forumRetryScheduled = false;
-        }, 400);
+        setTimeout(() => { this._forumRetryScheduled = false; }, 400);
     }
-    _fastHideFromMutations(mutations) {
+    _fastHideReactionsFromMutations(mutations) {
+        const reactionSel = '[id^="message-reactions-"], [class*="reactionInner"]';
+        let found = false;
         for (let m = 0; m < mutations.length; m++) {
             const added = mutations[m].addedNodes;
             for (let n = 0; n < added.length; n++) {
                 const node = added[n];
                 if (node.nodeType !== 1) continue;
-                this._fastHideNode(node);
-                const descendants = node.querySelectorAll ? node.querySelectorAll('li[class*="messageListItem"], [class*="messageListItem"], ' + '[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"], ' + '[data-list-item-id^="pins__"], [class*="messageGroupWrapper"], [class*="memberRow"], ' + '[role="listitem"][data-list-item-id]') : [];
-                for (let d = 0; d < descendants.length; d++) {
-                    this._fastHideNode(descendants[d]);
+                const tag = node.tagName;
+                if (tag === 'LINK' || tag === 'STYLE' || tag === 'SCRIPT' || tag === 'META' || tag === 'TITLE') continue;
+                if (node.matches?.(reactionSel) || node.querySelector?.(reactionSel)) {
+                    found = true;
+                    break;
                 }
+            }
+            if (found) break;
+        }
+        if (!found) return;
+        this.fixReactionCounts();
+        this.hideBlockedReactors();
+    }
+    _fastHideFromMutations(mutations) {
+        const places = this.settings.places;
+        for (let m = 0; m < mutations.length; m++) {
+            const added = mutations[m].addedNodes;
+            for (let n = 0; n < added.length; n++) {
+                const node = added[n];
+                if (node.nodeType !== 1) continue;
+                const tag = node.tagName;
+                if (tag === 'LINK' || tag === 'STYLE' || tag === 'SCRIPT' || tag === 'META' || tag === 'TITLE') continue;
+                this._fastHideNode(node);
+                const qsa = node.querySelectorAll;
+                if (qsa) {
+                    const descendants = qsa.call(node, 'li[class*="messageListItem"], [class*="messageListItem"], [data-list-item-id^="pins__"], [class*="memberRow"], [role="listitem"][data-list-item-id]');
+                    for (let d = 0; d < descendants.length; d++) {
+                        this._fastHideNode(descendants[d]);
+                    }
+                }
+                if (node.children?.length === 0 && !node.classList?.length) continue;
+                const tagLC = tag === 'DIV' || tag === 'LI';
+                if (!tagLC && !node.children?.length) continue;
                 if (node.matches?.('[data-list-id="pins"], [data-list-id*="pins"]') || node.querySelector?.('[data-list-id="pins"], [data-list-id*="pins"]')) {
                     try {
                         const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
@@ -4564,15 +4673,13 @@ return false;
                 }
                 if (node.matches?.('div.container__6764b, [class*="container__6764b"]')) this.hideTopicPanelItems();
                 if (node.matches?.('[data-list-item-id^="private-channels___"]')) this.hidePrivateChannels();
-                if (node.matches?.('[class*="memberRow"]') || node.querySelector?.('[class*="memberRow"]')) {
-                    if (this.settings.places.memberList) {
-                        this.hideMemberRows();
-                    }
-                }
-                if (this.settings.places.memberList && (node.matches?.('[data-list-id^="members-"]') || node.querySelector?.('[data-list-id^="members-"]'))) {
+                if (places.memberList && (node.matches?.('[class*="memberRow"]') || node.querySelector?.('[class*="memberRow"]'))) {
                     this.hideMemberRows();
                 }
-                if (this.settings.places.events) {
+                if (places.memberList && (node.matches?.('[data-list-id^="members-"]') || node.querySelector?.('[data-list-id^="members-"]'))) {
+                    this.hideMemberRows();
+                }
+                if (places.events) {
                     const eventsSidebarItem = node.matches?.('[data-list-item-id^="channels___upcoming-events-"]') ? node : node.querySelector?.('[data-list-item-id^="channels___upcoming-events-"]');
                     if (eventsSidebarItem) {
                         const li = eventsSidebarItem.closest('li');
@@ -4580,9 +4687,7 @@ return false;
                             li.dataset.nmbSidebarPreHidden = "true";
                             li.style.visibility = 'hidden';
                         }
-                        try {
-                            this._fixEventsSidebarCounterFor(eventsSidebarItem);
-                        } catch (_) {}
+                        try { this._fixEventsSidebarCounterFor(eventsSidebarItem); } catch (_) {}
                     }
                     if (node.matches?.('[data-list-item-id^="channels___guild_scheduled_event-"]') || node.querySelector?.('[data-list-item-id^="channels___guild_scheduled_event-"]')) {
                         try { this.hideSidebarEventItems(); } catch (_) {}
@@ -4591,9 +4696,9 @@ return false;
                         try { this.hideBlockedStageChannelNotice(); } catch (_) {}
                     }
                 }
-                if (this.settings.places.voiceChannels) {
-                    if (node.matches?.('[class*="stageUser_"], [class*="stageSection_"], [class*="activityPanel_"], [class*="streamPreview_"], [class*="streamTile_"], [class*="tile_"], [class*="tileSizer_"], [class*="videoWrapper_"], [class*="participantWrapper_"], [class*="gridLayout_"], [class*="callContainer_"], [class*="audienceContainer__"], [class*="raisedHandCount__"], [class*="toolbar__"], [class*="details_"], [class*="speakerCount__"], [class*="text__9aed4"], [class*="blockedNotice__"], [class*="channelNotice__"], [class*="subtitle__"]') ||
-                        node.querySelector?.('[class*="stageUser_"], [class*="stageSection_"], [class*="activityPanel_"], [class*="streamPreview_"], [class*="streamTile_"], [class*="tile_"], [class*="tileSizer_"], [class*="videoWrapper_"], [class*="participantWrapper_"], [class*="gridLayout_"], [class*="callContainer_"], [class*="audienceContainer__"], [class*="raisedHandCount__"], [class*="toolbar__"], [class*="details_"], [class*="speakerCount__"], [class*="text__9aed4"], [class*="blockedNotice__"], [class*="channelNotice__"], [class*="subtitle__"]')) {
+                if (places.voiceChannels) {
+                    const voiceSel = '[class*="stageUser_"],[class*="stageSection_"],[class*="activityPanel_"],[class*="streamPreview_"],[class*="streamTile_"],[class*="tile_"],[class*="tileSizer_"],[class*="videoWrapper_"],[class*="participantWrapper_"],[class*="gridLayout_"],[class*="callContainer_"],[class*="audienceContainer__"],[class*="raisedHandCount__"],[class*="toolbar__"],[class*="details_"],[class*="speakerCount__"],[class*="text__9aed4"],[class*="blockedNotice__"],[class*="channelNotice__"],[class*="subtitle__"]';
+                    if (node.matches?.(voiceSel) || node.querySelector?.(voiceSel)) {
                         try { this.hideVoiceUsers(); } catch (_) {}
                     }
                 }
@@ -4639,7 +4744,6 @@ return false;
             const userId = this.findUserId(el);
             if (userId && this.shouldHide(userId)) {
                 this.hideElement(el, "fast-guild-member-row", userId);
-                void el.offsetHeight;
                 try {
                     this.fixGuildMembersPageCount();
                 } catch (_) {}
@@ -4653,7 +4757,6 @@ return false;
                 const userId = this.findUserId(el);
                 if (userId && this.shouldHide(userId)) {
                     this.hideElement(el, "fast-sidebar-member-row", userId);
-                    void el.offsetHeight;
                     try {
                         this.fixMemberGroupCounts();
                     } catch (_) {}
@@ -4669,65 +4772,53 @@ return false;
                 const pinMatch = listId.match(/^pins_+(\d{17,20})$/);
                 const messageId = pinMatch ? pinMatch[1] : null;
                 const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+                const pinsItems = channelId ? this.modules.ChannelPinsStore?.getPins?.(channelId)?.items || [] : [];
                 const shouldHideByAuthor = userId && this.shouldHide(userId);
-                const shouldHideByPinner = messageId && this._shouldHidePinnedMessage(channelId, messageId, null);
+                const pinItem = messageId && pinsItems.length ? pinsItems.find(item => item?.message?.id === messageId) || null : null;
+                const shouldHideByPinner = messageId && this._shouldHidePinnedMessage(channelId, messageId, pinItem);
                 if (shouldHideByAuthor || shouldHideByPinner) {
                     this.hideElement(pinCard, shouldHideByAuthor ? "fast-pin-author" : "fast-pin-by-blocked", shouldHideByAuthor ? userId : false);
-                    void pinCard.offsetHeight;
                     const wrapper = pinCard.closest('[class*="messageGroupWrapper"]');
                     if (wrapper && wrapper.dataset?.hiddenBlocked !== "true") {
                         const siblingCards = Array.from(wrapper.querySelectorAll('[data-list-item-id^="pins__"]'));
                         if (siblingCards.every(card => card.dataset?.hiddenBlocked === "true")) {
                             this.hideElement(wrapper, "pinned-panel-residue", false);
-                            void wrapper.offsetHeight;
                         }
                     }
-                    const pinsRoot = el.closest('[data-list-id="pins"], [data-list-id*="pins"]');
-                    if (pinsRoot) {
-                        try {
-                            this.cleanupPinnedPanelResidue();
-                        } catch (_) {}
-                    }
+                }
+                if (channelId && !this._pinsCleanupThrottled) {
+                    this._pinsCleanupThrottled = true;
+                    requestAnimationFrame(() => {
+                        this._pinsCleanupThrottled = false;
+                        try { this.hidePinnedMessages(); } catch (_) {}
+                    });
                 }
             }
         }
         const hasBlockedClass = this.settings.places.messages && (el.matches?.('[class*="messageGroupBlocked"], [class*="blockedSystemMessage"]') || el.querySelector?.('[class*="messageGroupBlocked"]') || el.querySelector?.('[class*="blockedSystemMessage"]'));
         if (hasBlockedClass) {
-            const directLi = el.closest?.('li[class*="messageListItem"]') || el.closest?.('[class*="messageListItem"]');
-            if (directLi) {
-                if (directLi.dataset?.hiddenBlocked !== "true") {
-                    this.hideElement(directLi, "blocked-group-fast");
-                    void directLi.offsetHeight;
+            const items = new Set;
+            const collectTargets = node => {
+                const blocked = node.matches?.('[class*="messageGroupBlocked"], [class*="blockedSystemMessage"]') ? [node] : Array.from(node.querySelectorAll?.('[class*="messageGroupBlocked"], [class*="blockedSystemMessage"]') || []);
+                for (const b of blocked) {
+                    let t = b.closest?.('[class*="messageListItem"]') || b.closest?.('[role="article"]') || b.closest?.('[class*="wrapper_"]') || b;
+                    const gs = t.closest?.('[class*="groupStart"]');
+                    if (gs) t = gs;
+                    items.add(t);
                 }
-            } else if (el.matches?.('[class*="messageGroupBlocked"], [class*="blockedSystemMessage"]')) {
-                if (el.dataset?.hiddenBlocked !== "true") {
-                    this.hideElement(el, "blocked-group-fast");
-                    void el.offsetHeight;
-                }
-            } else {
-                const inner = el.querySelectorAll?.('[class*="messageGroupBlocked"], [class*="blockedSystemMessage"]') || [];
-                for (let k = 0; k < inner.length; k++) {
-                    const innerEl = inner[k];
-                    const innerLi = innerEl.closest?.('li[class*="messageListItem"]') || innerEl.closest?.('[class*="messageListItem"]') || innerEl;
-                    if (innerLi.dataset?.hiddenBlocked !== "true") {
-                        this.hideElement(innerLi, "blocked-group-fast");
-                        void innerLi.offsetHeight;
-                    }
-                }
+            };
+            collectTargets(el);
+            for (const item of items) {
+                if (item.dataset?.hiddenBlocked !== "true") this.hideElement(item, "blocked-group-fast");
             }
             return;
         }
-        if (this.settings.places.messages && (el.matches?.('li[class*="messageListItem"], [class*="messageListItem"]') || el.matches?.('[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]'))) {
-            let messageRow = el;
-            if (el.matches?.('[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]')) {
-                messageRow = el.closest?.('li[class*="messageListItem"]') || el.closest?.('[class*="messageListItem"]');
-                if (!messageRow) return;
-            }
+        if (this.settings.places.messages && (el.matches?.('li[class*="messageListItem"], [class*="messageListItem"]'))) {
+            const messageRow = el;
             if (messageRow.dataset?.hiddenBlocked === "true") return;
             const userId = this.findUserId(messageRow);
             if (userId && this.shouldHide(userId)) {
                 this.hideElement(messageRow, "fast-message", userId);
-                void messageRow.offsetHeight;
                 return;
             }
             const replyBar = messageRow.querySelector('[class*="repliedMessage"], [class*="replyBar"], [class*="messageReference"]');
@@ -4736,31 +4827,24 @@ return false;
                 const replyUserId = replyMention?.dataset?.userId || this.findUserId(replyBar);
                 if (replyUserId && this.shouldHide(replyUserId)) {
                     this.hideElement(messageRow, "fast-reply-to-blocked", replyUserId);
-                    void messageRow.offsetHeight;
                     return;
                 }
                 if (replyBar.matches('[class*="blocked"]') || replyBar.querySelector('[class*="blocked"]')) {
                     this.hideElement(messageRow, "fast-reply-blocked-class");
-                    void messageRow.offsetHeight;
                     return;
                 }
             }
-            const mentions = messageRow.querySelectorAll?.('[class*="mention"]');
-            if (mentions) {
-                for (let i = 0; i < mentions.length; i++) {
-                    const mention = mentions[i];
-                    const mentionedId = this.findUserId(mention);
-                    if (mentionedId && this.shouldHide(mentionedId)) {
-                        this.hideElement(messageRow, "fast-mention", mentionedId);
-                        void messageRow.offsetHeight;
-                        return;
-                    }
+            const mention = messageRow.querySelector?.('[class*="mention"][data-user-id]');
+            if (mention) {
+                const mentionedId = mention.dataset.userId || this.findUserId(mention);
+                if (mentionedId && this.shouldHide(mentionedId)) {
+                    this.hideElement(messageRow, "fast-mention", mentionedId);
+                    return;
                 }
             }
-            const rawText = (messageRow.innerText || "").replace(/\s+/g, " ").trim();
-            if (rawText.length > 0 && this.isBlockedMessageBannerText(rawText)) {
+            const text = messageRow.textContent;
+            if (text && this.isBlockedMessageBannerText(text)) {
                 this.hideElement(messageRow, "blocked-group-fast");
-                void messageRow.offsetHeight;
                 return;
             }
         }
@@ -4770,44 +4854,56 @@ return false;
                 const messageRow = el.closest('li[class*="messageListItem"]') || el.closest('[class*="messageListItem"]');
                 if (messageRow) {
                     this.hideElement(messageRow, "fast-mention", userId);
-                    void messageRow.offsetHeight;
-                } else {
+                                    } else {
                     this.hideElement(el, "fast-mention", userId);
-                    void el.offsetHeight;
-                }
+                                    }
             }
         }
     }
-    scanDom() {
+    scanDom(fromMutation = false) {
         try {
+            this._shouldHideCache = new Map;
             this.restoreUnhiddenElements();
             this._removeAllVoiceInviteSuggestions();
-            if (this.settings.places.voiceChannels) this.hideVoiceUsers();
-            if (this.settings.places.voiceChannels && !this._callGridPatched) {
-                try {
-                    this.patchCallGridParticipants();
-                } catch (_) {}
+            if (fromMutation) {
+                this.fixMemberGroupCounts();
+                this.fixVoiceChannelIconColors();
+                this.hideOrphanedDividers();
+                this.collapseGhostSlots();
+                this.promoteOrphanedMessages();
+                if (this.settings.places?.reactions) {
+                    this.fixReactionCounts();
+                    this.hideBlockedReactors();
+                }
+                return;
             }
-            if (this.settings.places.memberList) this.hideMemberRows();
-            if (this.settings.places.messages) this.hideMessages();
-            if (this.settings.places.messages) this.hideMentions();
-            if (this.settings.places.messages) this.hideForumPosts();
-            if (this.settings.places.messages) {
+            const p = this.settings.places;
+            if (p.voiceChannels) this.hideVoiceUsers();
+            if (p.voiceChannels && !this._callGridPatched) {
+                try { this.patchCallGridParticipants(); } catch (_) {}
+            }
+            if (p.memberList) this.hideMemberRows();
+            if (p.messages) {
+                this.hideMessages();
+                this.hidePinnedMessages();
+                this.hideForumPosts();
                 this.hideTopicPanelItems();
                 this.fixEmptyTopicPanelState();
+                this.fixPinNotificationBadge();
             }
-            if (this.settings.places.messages) this.hidePinnedMessages();
-            if (this.settings.places.messages) this.fixPinNotificationBadge();
-            if (this.settings.places.groupDms || this.settings.places.messages) this.hidePrivateChannels();
+            if (p.groupDms || p.messages) this.hidePrivateChannels();
             this.enforceEmptyDmSkeleton();
-            if (this.settings.places.autocomplete) this.hideAutocompleteRows();
-            if (this.settings.places.reactions) this.fixReactionCounts();
-            if (this.settings.places.reactions) this.hideBlockedReactors();
-            if (this.settings.places.events) this.hideBlockedEvents();
-            if (this.settings.places.events) this.hideSidebarEventItems();
-            if (this.settings.places.events) this.hideBlockedStageChannelNotice();
-            if (this.settings.places.events) this.hideBlockedGuildStageBadge();
-            this.hideEmptyMemberHeaders();
+            if (p.autocomplete) this.hideAutocompleteRows();
+            if (p.reactions) {
+                this.fixReactionCounts();
+                this.hideBlockedReactors();
+            }
+            if (p.events) {
+                this.hideBlockedEvents();
+                this.hideSidebarEventItems();
+                this.hideBlockedStageChannelNotice();
+                this.hideBlockedGuildStageBadge();
+            }
             this.fixMemberGroupCounts();
             this.fixVoiceChannelIconColors();
             this.hideOrphanedDividers();
@@ -4888,50 +4984,45 @@ return false;
         return null;
     }
     collapseGhostSlots() {
-        const lis = document.querySelectorAll('li[class*="messageListItem"], li[class*="message_"], li[class*="cozy"], li[class*="compact"]');
+        const isEmptyText = el => !(el.textContent || "").trim();
+        const lis = document.querySelectorAll('li[class*="messageListItem"]:not([data-hidden-blocked="true"]):not([data-nmb-ghost="true"])');
+        const lisToGhost = [];
         for (let i = 0; i < lis.length; i++) {
             const el = lis[i];
-            if (el.dataset?.hiddenBlocked === "true") continue;
-            if (el.dataset?.nmbGhost === "true") continue;
-            const text = (el.innerText || "").replace(/\s+/g, " ").trim();
-            if (text.length > 0) continue;
-            if (el.offsetHeight <= 1) continue;
-            this._ghostHide(el);
+            if (!isEmptyText(el)) continue;
+            if (el.getClientRects().length === 0) continue;
+            lisToGhost.push(el);
         }
-        const wrappers = document.querySelectorAll('[class*="groupStart"] [class*="wrapper"], [class*="groupStart"] > [class*="cozy"]');
+        for (let i = 0; i < lisToGhost.length; i++) this._ghostHide(lisToGhost[i]);
+
+        const WRP_SEL = '[class*="groupStart"] [class*="wrapper"], [class*="groupStart"] > [class*="cozy"]';
+        const wrappers = document.querySelectorAll(WRP_SEL + ':not([data-hidden-blocked="true"]):not([data-nmb-ghost="true"])');
+        const wrappersToGhost = [];
         for (let i = 0; i < wrappers.length; i++) {
             const el = wrappers[i];
-            if (el.dataset?.hiddenBlocked === "true") continue;
-            if (el.dataset?.nmbGhost === "true") continue;
-            const text = (el.innerText || "").replace(/\s+/g, " ").trim();
-            if (text.length > 0) continue;
-            if (el.offsetHeight <= 1) continue;
-            this._ghostHide(el);
+            if (!isEmptyText(el)) continue;
+            if (el.getClientRects().length === 0) continue;
+            wrappersToGhost.push(el);
         }
-        const groupStarts = document.querySelectorAll('[class*="groupStart"]');
-        for (let i = 0; i < groupStarts.length; i++) {
-            const group = groupStarts[i];
-            if (group.dataset?.nmbGhost === "true") continue;
+        for (let i = 0; i < wrappersToGhost.length; i++) this._ghostHide(wrappersToGhost[i]);
+
+        const groups = document.querySelectorAll('[class*="groupStart"]:not([data-nmb-ghost="true"])');
+        const groupsToGhost = [];
+        for (let i = 0; i < groups.length; i++) {
+            const group = groups[i];
             if (group.tagName?.toLowerCase() === "li") continue;
+            if (!isEmptyText(group)) continue;
             let hasVisible = false;
             for (const child of group.children) {
                 if (child.dataset?.hiddenBlocked === "true" || child.dataset?.nmbGhost === "true") continue;
-                if (child.offsetParent !== null) {
-                    hasVisible = true;
-                    break;
-                }
-                const childText = (child.innerText || "").replace(/\s+/g, " ").trim();
-                if (childText.length > 0) {
+                if (child.offsetParent !== null || !isEmptyText(child)) {
                     hasVisible = true;
                     break;
                 }
             }
-            if (!hasVisible) {
-                const groupText = (group.innerText || "").replace(/\s+/g, " ").trim();
-                if (groupText.length > 0) continue;
-                this._ghostHide(group);
-            }
+            if (!hasVisible) groupsToGhost.push(group);
         }
+        for (let i = 0; i < groupsToGhost.length; i++) this._ghostHide(groupsToGhost[i]);
     }
     _ghostHide(el) {
         el.dataset.nmbGhost = "true";
@@ -4943,6 +5034,7 @@ return false;
     hidePinnedMessages() {
         if (!this.settings.places?.messages) return;
         const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+        const pinsItems = channelId ? this.modules.ChannelPinsStore?.getPins?.(channelId)?.items || [] : [];
         const pinCards = document.querySelectorAll('[data-list-item-id^="pins__"]');
         for (let i = 0; i < pinCards.length; i++) {
             const pinCard = pinCards[i];
@@ -4951,8 +5043,9 @@ return false;
             const pinMatch = listId.match(/^pins_+(\d{17,20})$/);
             const messageId = pinMatch ? pinMatch[1] : null;
             const userId = this.findUserId(pinCard);
+            const pinItem = messageId && pinsItems.length ? pinsItems.find(item => item?.message?.id === messageId) || null : null;
             const shouldHideByAuthor = userId && this.shouldHide(userId);
-            const shouldHideByPinner = messageId && this._shouldHidePinnedMessage(channelId, messageId, null);
+            const shouldHideByPinner = messageId && this._shouldHidePinnedMessage(channelId, messageId, pinItem);
             if (!shouldHideByAuthor && !shouldHideByPinner) continue;
             this.hideElement(pinCard, shouldHideByAuthor ? "pin-author" : "pin-by-blocked", shouldHideByAuthor ? userId : false);
             const wrapper = pinCard.closest('[class*="messageGroupWrapper"]');
@@ -4988,59 +5081,48 @@ return false;
         }
     }
     hideMessages() {
-        const els = document.querySelectorAll('li[class*="messageListItem"], [class*="messageListItem"], [class*="blocked"], [class*="message-"], [class*="cozy-"], [class*="compact-"]');
+        const LI_SEL = 'li[class*="messageListItem"]:not([data-hidden-blocked="true"])';
+        const els = document.querySelectorAll(LI_SEL);
+        if (!els.length) return;
         const parentSet = new Set;
         for (let i = 0; i < els.length; i++) {
-            const el = els[i];
-            const messageRow = el.closest('li[class*="messageListItem"]') || el;
-            if (messageRow.dataset?.hiddenBlocked === "true") continue;
+            const messageRow = els[i];
             const info = this.getMessageInfo(messageRow);
-            if (this.settings.places.messages && this.shouldHide(info.authorId, info.isSpammer)) {
+            if (this.shouldHide(info.authorId, info.isSpammer)) {
                 this.hideElement(messageRow, "message", info.authorId);
-                const parent = messageRow.parentElement;
-                if (parent && !parent.dataset?.hiddenBlocked) parentSet.add(parent);
+                const p = messageRow.parentElement;
+                if (p && !p.dataset?.hiddenBlocked) parentSet.add(p);
                 continue;
             }
-            if (false && this.settings.places.messages && info.messageId && this._blockedPinnedMessageIds.has(info.messageId)) {
-                this.hideElement(messageRow, "pinned-by-blocked", false);
-                const parent = messageRow.parentElement;
-                if (parent && !parent.dataset?.hiddenBlocked) parentSet.add(parent);
-                continue;
-            }
-            if (this.settings.places.messages && this.shouldHide(info.referencedAuthorId)) {
+            if (this.shouldHide(info.referencedAuthorId)) {
                 this.hideElement(messageRow, "reply-to-blocked", info.referencedAuthorId);
-                const parent = messageRow.parentElement;
-                if (parent && !parent.dataset?.hiddenBlocked) parentSet.add(parent);
+                const p = messageRow.parentElement;
+                if (p && !p.dataset?.hiddenBlocked) parentSet.add(p);
                 continue;
             }
-            if (this.settings.places.messages && info.isBlockedGroup) {
-                const target = el.closest("li") || messageRow;
-                this.hideElement(target, "blocked-group");
-                const parent = target.parentElement;
-                if (parent && !parent.dataset?.hiddenBlocked) parentSet.add(parent);
+            if (info.isBlockedGroup) {
+                this.hideElement(messageRow, "blocked-group");
+                const p = messageRow.parentElement;
+                if (p && !p.dataset?.hiddenBlocked) parentSet.add(p);
                 continue;
-            }
-            const text = (messageRow.innerText || "").trim();
-            if (this.settings.places.messages && this.isBlockedMessageBannerText(text)) {
-                this.hideElement(messageRow, "blocked-group-text");
-                const parent = messageRow.parentElement;
-                if (parent && !parent.dataset?.hiddenBlocked) parentSet.add(parent);
             }
         }
         for (const parent of parentSet) {
-            const visibleChildren = Array.from(parent.children).filter(child => !child.dataset?.hiddenBlocked && child.offsetParent !== null);
-            if (visibleChildren.length === 0) {
-                this.hideParent(parent, "empty-message-group");
+            let hasVisible = false;
+            for (const child of parent.children) {
+                if (child.dataset?.hiddenBlocked !== "true" && child.offsetParent !== null) {
+                    hasVisible = true;
+                    break;
+                }
             }
+            if (!hasVisible) this.hideParent(parent, "empty-message-group");
         }
-        if (this.settings.places.messages) this.hideBlockedMessageTextBanners();
     }
     hideParent(el, reason = "empty-parent") {
         if (!el || el.dataset?.hiddenBlocked === "true") return;
         if (!el.hasAttribute("data-nmb-prev-style")) el.setAttribute("data-nmb-prev-style", el.getAttribute("style") || "");
         el.dataset.hiddenBlocked = "true";
         el.dataset.nmbReason = reason;
-        el.style.cssText = this.hideStyles;
         this.hiddenParents.add(el);
         el.dataset.nmbParentHidden = "true";
     }
@@ -5058,6 +5140,17 @@ return false;
         for (const el of Array.from(this.hiddenElements)) {
             if (!document.contains(el)) {
                 this.hiddenElements.delete(el);
+                continue;
+            }
+            const reason = el.dataset?.nmbReason;
+            if (reason === "pin-by-blocked" || reason === "fast-pin-by-blocked") {
+                const listId = el.dataset?.listItemId || "";
+                const pinMatch = listId.match(/^pins_+(\d{17,20})$/);
+                const messageId = pinMatch ? pinMatch[1] : null;
+                const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+                if (messageId && !this._shouldHidePinnedMessage(channelId, messageId, null)) {
+                    this.restoreElement(el);
+                }
                 continue;
             }
             const userId = el.dataset?.nmbUserId;
@@ -5162,7 +5255,7 @@ return false;
         this.hiddenParents.clear();
     }
     hideVoiceUsers() {
-        const els = document.querySelectorAll('[class*="voiceUser"], [class*="voiceUsers"] [data-list-item-id], [class*="listItem"][data-list-item-id]');
+        const els = document.querySelectorAll('[class*="voiceUser"]:not([data-hidden-blocked="true"]), [class*="voiceUsers"] [data-list-item-id]:not([data-hidden-blocked="true"]), [class*="listItem"][data-list-item-id]:not([data-hidden-blocked="true"])');
         for (let i = 0; i < els.length; i++) {
             const el = els[i];
             const userId = this.findUserId(el);
@@ -5498,9 +5591,12 @@ return false;
                 }
             }
 
-            const details = document.querySelectorAll('[class*="details_"]');
-            for (let i = 0; i < details.length; i++) {
-                if (hasNum(details[i])) replaceNum(details[i], correctCount);
+            const stageRoots = document.querySelectorAll('[class*="stageSection_"], [class*="audienceContainer_"]');
+            for (let r = 0; r < stageRoots.length; r++) {
+                const details = stageRoots[r].querySelectorAll('[class*="details_"]');
+                for (let i = 0; i < details.length; i++) {
+                    if (hasNum(details[i])) replaceNum(details[i], correctCount);
+                }
             }
 
             const h1List = document.querySelectorAll('h1');
@@ -5513,7 +5609,7 @@ return false;
 
             const headers = document.querySelectorAll('[class*="text__9aed4"]');
             for (let i = 0; i < headers.length; i++) {
-                if (hasNum(headers[i]) && /[â€”â€“-]/.test(headers[i].textContent)) {
+                if (hasNum(headers[i]) && /[\u2014\u2013-]/.test(headers[i].textContent)) {
                     replaceNum(headers[i], correctCount);
                 }
             }
@@ -5656,13 +5752,24 @@ return false;
         }
     }
     hideMemberRows() {
-        const els = document.querySelectorAll('[data-list-item-id], [class*="member-"], [class*="member_"], [class*="memberRow"]');
-        for (let i = 0; i < els.length; i++) {
-            const el = els[i];
-            const userId = this.findUserId(el);
-            if (!this.shouldHide(userId)) continue;
-            const row = el.closest("[data-list-item-id]") || el.closest('[class*="memberRow"]') || el;
-            this.hideElement(row, row.matches?.('[class*="memberRow"]') ? "guild-members-page" : "member", userId);
+        const els = document.querySelectorAll('[data-list-item-id]:not([data-hidden-blocked="true"]), [class*="member-"]:not([data-hidden-blocked="true"]), [class*="member_"]:not([data-hidden-blocked="true"]), [class*="memberRow"]:not([data-hidden-blocked="true"])');
+        if (this._memberListRowPatched) {
+            for (let i = 0; i < els.length; i++) {
+                const el = els[i];
+                if (el.closest?.('[data-list-id^="members-"]')) continue;
+                const userId = this.findUserId(el);
+                if (!this.shouldHide(userId)) continue;
+                const row = el.closest("[data-list-item-id]") || el.closest('[class*="memberRow"]') || el;
+                this.hideElement(row, row.matches?.('[class*="memberRow"]') ? "guild-members-page" : "member", userId);
+            }
+        } else {
+            for (let i = 0; i < els.length; i++) {
+                const el = els[i];
+                const userId = this.findUserId(el);
+                if (!this.shouldHide(userId)) continue;
+                const row = el.closest("[data-list-item-id]") || el.closest('[class*="memberRow"]') || el;
+                this.hideElement(row, row.matches?.('[class*="memberRow"]') ? "guild-members-page" : "member", userId);
+            }
         }
         this.fixGuildMembersPageCount();
     }
@@ -6031,16 +6138,13 @@ return false;
         this.walkFiberProps(el, props => {
             if (found) return;
             const direct = this.extractUserId(props);
-            if (direct) {
-                found = direct;
-                return;
-            }
+            if (direct) { found = direct; return; }
             const event = props?.guildScheduledEvent || props?.event || props?.scheduledEvent;
             if (event) {
                 const nested = event.creatorId || event.creator_id || event.creator?.id;
                 if (nested && /^\d{17,20}$/.test(String(nested))) found = String(nested);
             }
-        }, 24);
+        }, 14);
         return found;
     }
     _closeBlockedEventModalIfOpen() {
@@ -6113,13 +6217,10 @@ return false;
         this.walkFiberProps(notice, props => {
             if (found || !props) return;
             const direct = props.channelId;
-            if (direct && /^\d{17,20}$/.test(String(direct))) {
-                found = String(direct);
-                return;
-            }
+            if (direct && /^\d{17,20}$/.test(String(direct))) { found = String(direct); return; }
             const nested = props.channel?.id;
             if (nested && /^\d{17,20}$/.test(String(nested))) found = String(nested);
-        }, 30);
+        }, 14);
         if (found) return found;
 
         const nameEl = notice.querySelector('[class*="channelName_"]');
@@ -6292,7 +6393,7 @@ return false;
             if (found || !props) return;
             const direct = props.guildId ?? props.channel?.guild_id;
             if (direct && /^\d{17,20}$/.test(String(direct))) found = String(direct);
-        }, 30);
+        }, 14);
         return found;
     }
     _resolveGuildActiveStageChannelIdViaStore(guildId) {
@@ -6514,51 +6615,8 @@ return false;
             strong.textContent = String(visible);
         }
     }
-    hideBlockedMessageTextBanners() {
-        const roots = document.querySelectorAll('[class*="chatContent"], [class*="messagesWrapper"], [data-list-id*="chat-messages"]');
-        for (let i = 0; i < roots.length; i++) {
-            const root = roots[i];
-            const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-                acceptNode: node => this.isBlockedMessageBannerText(node.nodeValue || "") ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
-            });
-            const matches = [];
-            while (walker.nextNode()) matches.push(walker.currentNode);
-            for (let j = 0; j < matches.length; j++) {
-                const node = matches[j];
-                let candidate = node.parentElement;
-                let best = candidate;
-                for (let k = 0; k < 8 && candidate && candidate !== root; k++, candidate = candidate.parentElement) {
-                    const text = (candidate.innerText || "").trim();
-                    if (this.isBlockedMessageBannerText(text)) best = candidate;
-                    if (candidate.matches?.('li[class*="messageListItem"], [class*="messageListItem"], [role="group"], [class*="blocked"]')) {
-                        best = candidate;
-                        break;
-                    }
-                }
-                if (best && best !== root) {
-                    const target = best.closest("li") || best;
-                    this.hideElement(target, "blocked-group-text");
-                }
-            }
-        }
-    }
     isBlockedMessageBannerText(text) {
         return /(?:^|\s)(?:\d+\s+)?(?:blocked\s+messages?|messages?\s+blocked|mensage(?:m|ns)\s+bloquead[ao]s?)(?:\s*[â€”]\s*(?:mostrar|show))?(?:\s|$)/i.test(String(text || "").trim());
-    }
-    hideMentions() {
-        const els = document.querySelectorAll('[class*="mention"], [class*="messageContent"] [data-user-id]');
-        for (let i = 0; i < els.length; i++) {
-            const el = els[i];
-            const userId = this.findUserId(el);
-            if (this.shouldHide(userId)) {
-                const messageRow = el.closest('li[class*="messageListItem"]') || el.closest('[class*="messageListItem"]');
-                if (messageRow) {
-                    this.hideElement(messageRow, "mention", userId);
-                } else {
-                    this.hideElement(el, "mention", userId);
-                }
-            }
-        }
     }
     hideAutocompleteRows() {
         const rows = document.querySelectorAll('[data-list-id^="channel-autocomplete"] [role="option"], [data-list-id^="mention-autocomplete"] [role="option"]');
@@ -6571,44 +6629,27 @@ return false;
             }
         }
     }
-    hideEmptyMemberHeaders() {
-        document.querySelectorAll("[data-list-item-id]").forEach(header => {
-            if (header.dataset?.hiddenBlocked === "true") return;
-            const id = header.dataset?.listItemId || "";
-            if (/\d{17,20}$/.test(id)) return;
-            let seenMember = false;
-            let seenVisible = false;
-            let next = header.nextElementSibling;
-            while (next) {
-                const nextId = next.dataset?.listItemId || "";
-                if (!/\d{17,20}$/.test(nextId)) break;
-                seenMember = true;
-                if (next.dataset?.hiddenBlocked !== "true") {
-                    seenVisible = true;
-                    break;
-                }
-                next = next.nextElementSibling;
-            }
-            if (seenMember && !seenVisible) this.hideElement(header, "empty-member-header");
-        });
-    }
     fixMemberGroupCounts() {
-        document.querySelectorAll('[class*="membersGroup"], [data-list-item-id]').forEach(header => {
-            if (header.dataset?.hiddenBlocked === "true" || !this.isMemberGroupHeader(header)) return;
+        const headers = document.querySelectorAll('[class*="membersGroup"], [data-list-item-id]');
+        for (let i = 0; i < headers.length; i++) {
+            const header = headers[i];
+            if (header.dataset?.hiddenBlocked === "true" || !this.isMemberGroupHeader(header)) continue;
             const count = this.countVisibleMembersAfter(header);
-            if (count === null) return;
+            if (count === null) continue;
             if (count <= 0) {
                 this.hideElement(header, "empty-member-header");
-                return;
+                continue;
             }
             this.updateMemberGroupVisibleCount(header, count);
-        });
+        }
     }
     isMemberGroupHeader(el) {
+        const id = el.dataset?.listItemId || "";
+        if (id && /\d{17,20}$/.test(id)) return false;
         const text = (el.textContent || "").trim();
-        if (!text || /\d{17,20}$/.test(el.dataset?.listItemId || "")) return false;
+        if (!text) return false;
         if (/[\s\u00A0]+[\u2013\u2014][\s\u00A0]*\d+\s*$/.test(text)) return true;
-        return Boolean(String(el.className || "").includes("membersGroup"));
+        return String(el.className || "").includes("membersGroup");
     }
     countVisibleMembersAfter(header) {
         let count = 0;
@@ -6616,10 +6657,11 @@ return false;
         let next = header.nextElementSibling;
         while (next) {
             if (this.isMemberGroupHeader(next)) break;
+            if (next.dataset?.hiddenBlocked === "true") { next = next.nextElementSibling; continue; }
             const userId = this.findUserId(next);
             if (userId) {
                 sawMember = true;
-                if (next.dataset?.hiddenBlocked !== "true" && !this.shouldHide(userId)) count++;
+                if (!this.shouldHide(userId)) count++;
             }
             next = next.nextElementSibling;
         }
@@ -6647,22 +6689,22 @@ return false;
         }
     }
     hideOrphanedDividers() {
-        document.querySelectorAll('li:has([class*="divider"]), [class*="divider_"], [class*="divider-"]').forEach(divider => {
-            if (divider.dataset?.hiddenBlocked === "true") return;
+        const dividers = document.querySelectorAll('li:has([class*="divider"]), [class*="divider_"], [class*="divider-"]');
+        for (let i = 0; i < dividers.length; i++) {
+            const divider = dividers[i];
+            if (divider.dataset?.hiddenBlocked === "true") continue;
             let next = divider.nextElementSibling;
-            let hasVisibleMessage = false;
+            let hasVisible = false;
             while (next) {
-                const className = String(next.className || "");
-                if (next.querySelector?.('[class*="divider"]') || className.includes("divider")) break;
-                if (next.dataset?.hiddenBlocked !== "true" && (next.innerText || "").trim()) {
-                    hasVisibleMessage = true;
+                if (next.matches?.('[class*="divider"], li:has([class*="divider"])')) break;
+                if (next.dataset?.hiddenBlocked !== "true" && (next.textContent || "").trim()) {
+                    hasVisible = true;
                     break;
                 }
                 next = next.nextElementSibling;
             }
-            if (!hasVisibleMessage) this.hideElement(divider, "orphan-divider");
-        });
-        this.cleanupPinnedPanelResidue();
+            if (!hasVisible) this.hideElement(divider, "orphan-divider");
+        }
     }
     cleanupPinnedPanelResidue() {
         const pinsRoots = document.querySelectorAll('[data-list-id="pins"], [data-list-id*="pins"]');
@@ -6699,9 +6741,9 @@ return false;
     }
     static get PINS_EMPTY_TRANSLATIONS() {
         const ptBr = {
-            body: "Este canal nÃ£o tem<br>mensagens fixadas... por enquanto.",
+            body: "Este canal n\u00e3o tem<br>mensagens fixadas... por enquanto.",
             tip_label: "Fica a dica:",
-            tip_text: "UsuÃ¡rios com a permissÃ£o â€œGerenciar Mensagensâ€ podem fixar uma mensagem no menu de contexto."
+            tip_text: "Usu\u00e1rios com a permiss\u00e3o \u201cGerenciar Mensagens\u201d podem fixar uma mensagem no menu de contexto."
         };
         const enUs = {
             body: "This channel doesn't have<br>any pinned messages... yet.",
@@ -6839,6 +6881,12 @@ return false;
                 const oldSet = prevMembers.get(oldChannelId);
                 oldSet?.delete(userId);
                 if (oldSet && !oldSet.size) prevMembers.delete(oldChannelId);
+            }
+            if (selfId && userId === selfId && !newChannelId) {
+                this._voiceFakeTimers.delete(oldChannelId);
+                setTimeout(() => {
+                    if (this.isRunning) this.fixVoiceChannelIconColors();
+                }, 0);
             }
             if (newChannelId) {
                 const existingMembers = prevMembers.get(newChannelId) || new Set;
@@ -7104,13 +7152,31 @@ return false;
             isSpammer: false,
             messageId: null
         };
+        try {
+            const uidEl = el.querySelector?.("[data-user-id]");
+            if (uidEl?.dataset?.userId) info.authorId = uidEl.dataset.userId;
+        } catch (_) {}
+        if (!info.authorId) {
+            try {
+                const avatar = el.querySelector?.('img[src*="/avatars/"]');
+                const match = avatar?.src?.match(/\/avatars\/(\d{17,20})/);
+                if (match) info.authorId = match[1];
+            } catch (_) {}
+        }
+        if (!info.authorId) {
+            const listId = el.dataset?.listItemId || "";
+            const idMatch = listId.match(/(\d{17,20})$/) || el.id?.match(/(\d{17,20})/);
+            if (idMatch) info.authorId = idMatch[1];
+        }
         const visit = props => {
             if (!props || typeof props !== "object") return;
             const message = props.message || props.baseMessage || props.referencedMessage?.message;
             if (message?.id && !info.messageId) info.messageId = message.id;
-            if (message?.author?.id && !info.authorId) info.authorId = message.author.id;
-            if (props.author?.id && !info.authorId) info.authorId = props.author.id;
-            if (props.user?.id && !info.authorId) info.authorId = props.user.id;
+            if (!info.authorId) {
+                if (message?.author?.id) info.authorId = message.author.id;
+                else if (props.author?.id) info.authorId = props.author.id;
+                else if (props.user?.id) info.authorId = props.user.id;
+            }
             if (props.referencedMessage?.message?.author?.id) info.referencedAuthorId = props.referencedMessage.message.author.id;
             if (props.referencedMessage?.author?.id) info.referencedAuthorId = props.referencedMessage.author.id;
             if (message?.messageReference && !info.referencedAuthorId) {
@@ -7122,8 +7188,9 @@ return false;
             if (/SPAMMER/i.test(type)) info.isSpammer = true;
             if (props.isBlockedMessage === true) info.isBlockedGroup = true;
         };
-        this.walkFiberProps(el, visit, 24);
-        if (!info.authorId) info.authorId = this.findUserId(el);
+        if (!info.messageId || !info.authorId || !info.referencedAuthorId) {
+            this._walkFiberPropsShallow(el, visit);
+        }
         if (!info.messageId) {
             const listId = el.dataset?.listItemId || el.closest?.("[data-list-item-id]")?.dataset?.listItemId || "";
             const pinMatch = listId.match(/^pins_+(\d{17,20})$/);
@@ -7145,28 +7212,53 @@ return false;
             return null;
         }
     }
+    _findUserIdDataAttr(el) {
+        if (el.dataset?.userId) return el.dataset.userId;
+        const uidEl = el.querySelector?.("[data-user-id]");
+        return uidEl?.dataset?.userId || null;
+    }
     findUserId(el) {
         if (!el) return null;
+        let identityKey = "";
         try {
-            if (el.dataset?.userId) return el.dataset.userId;
-            if (el.dataset?.nmbUserId) return el.dataset.nmbUserId;
-            const userIdEl = el.querySelector?.("[data-user-id]");
-            if (userIdEl?.dataset?.userId) return userIdEl.dataset.userId;
+            const fromData = this._findUserIdDataAttr(el);
+            if (fromData) return fromData;
+            identityKey = el.dataset?.listItemId || el.id || "";
+            if (identityKey && el.dataset?.nmbUserId && el.dataset?.nmbUserIdKey === identityKey) {
+                return el.dataset.nmbUserId;
+            }
+            if (identityKey) {
+                const idMatch = identityKey.match(/(\d{17,20})$/);
+                if (idMatch) {
+                    el.dataset.nmbUserId = idMatch[1];
+                    el.dataset.nmbUserIdKey = identityKey;
+                    return idMatch[1];
+                }
+            }
         } catch (_) {}
         let found = null;
-        this.walkFiberProps(el, props => {
-            if (!found) found = this.extractUserId(props);
-        }, 24);
-        if (found) return found;
         try {
-            const listId = el.dataset?.listItemId || "";
-            const idMatch = listId.match(/(\d{17,20})$/) || el.id?.match(/(\d{17,20})/);
-            if (idMatch) return idMatch[1];
             const avatar = el.querySelector?.('img[src*="/avatars/"]');
             const avatarMatch = avatar?.src?.match(/\/avatars\/(\d{17,20})/);
-            if (avatarMatch) return avatarMatch[1];
+            if (avatarMatch) found = avatarMatch[1];
         } catch (_) {}
-        return null;
+        if (!found) {
+            this._walkFiberPropsShallow(el, props => {
+                if (!found) found = this.extractUserId(props);
+            });
+        }
+        if (found && identityKey) {
+            try { el.dataset.nmbUserId = found; el.dataset.nmbUserIdKey = identityKey; } catch (_) {}
+        }
+        return found;
+    }
+    _walkFiberPropsShallow(el, visitor) {
+        try {
+            let fiber = BdApi.ReactUtils.getInternalInstance(el);
+            for (let i = 0; i < 10 && fiber; i++, fiber = fiber.return) {
+                if (fiber.memoizedProps) visitor(fiber.memoizedProps);
+            }
+        } catch (_) {}
     }
     extractUserId(value, depth = 0) {
         if (!value || depth > 3) return null;
@@ -7187,7 +7279,7 @@ return false;
         }
         return null;
     }
-    walkFiberProps(el, visitor, maxDepth = 20) {
+    walkFiberProps(el, visitor, maxDepth = 12) {
         try {
             let fiber = BdApi.ReactUtils.getInternalInstance(el);
             for (let i = 0; i < maxDepth && fiber; i++, fiber = fiber.return) {
@@ -7215,10 +7307,13 @@ return false;
         if (!el || el.dataset?.hiddenBlocked === "true") return;
         if (!el.hasAttribute("data-nmb-prev-style")) el.setAttribute("data-nmb-prev-style", el.getAttribute("style") || "");
         const resolvedUserId = userId === false ? null : userId || this.findUserId(el);
-        if (resolvedUserId) el.dataset.nmbUserId = resolvedUserId;
+        if (resolvedUserId) {
+            el.dataset.nmbUserId = resolvedUserId;
+            const identityKey = el.dataset?.listItemId || el.id || "";
+            if (identityKey) el.dataset.nmbUserIdKey = identityKey;
+        }
         el.dataset.hiddenBlocked = "true";
         el.dataset.nmbReason = reason;
-        el.style.cssText = this.hideStyles;
         this.hiddenElements.add(el);
     }
     restoreElement(el) {
@@ -7228,6 +7323,7 @@ return false;
         delete el.dataset.hiddenBlocked;
         delete el.dataset.nmbReason;
         delete el.dataset.nmbUserId;
+        delete el.dataset.nmbUserIdKey;
         el.removeAttribute("data-nmb-prev-style");
         this.hiddenElements.delete(el);
     }
@@ -7353,15 +7449,7 @@ return false;
                 if (this.shouldHide(pinnedById)) this._markMessagePinnedByBlocked(messageId); else this._unmarkMessageUnpinned(messageId);
                 return;
             }
-            if (!this._pendingPinsByChannel) this._pendingPinsByChannel = new Map;
-            if (channelId) {
-                if (!this._pendingPinsByChannel.has(channelId)) this._pendingPinsByChannel.set(channelId, new Set);
-                this._pendingPinsByChannel.get(channelId).add(messageId);
-            }
-            const self = this;
-            setTimeout(() => {
-                self._resolvePendingPinFromStore(channelId, messageId);
-            }, 1500);
+            this._schedulePinPinnerRetry(channelId, messageId);
         } catch (_) {}
     }
     _resolvePendingPinFromStore(channelId, messageId) {
@@ -7390,13 +7478,10 @@ return false;
             }
             if (matched) {
                 this._handlePinSystemMessage(matched);
+                this._cleanupPendingPin(channelId, messageId);
             } else {
                 this._handleUnresolvedPin(channelId, messageId);
-                const queue = pending.get(channelId);
-                if (queue) {
-                    queue.delete(messageId);
-                    if (!queue.size) pending.delete(channelId);
-                }
+                this._cleanupPendingPin(channelId, messageId);
             }
         } catch (_) {}
     }
@@ -7709,7 +7794,7 @@ return false;
     }
     addStyles() {
         this.removeStyles();
-        const hideBlockedBanner = this.settings.places.messages ? `\n            [class*="messageGroupBlocked"],\n            [class*="blockedSystemMessage"],\n            [class*="messageGroupStart"]:has([class*="blocked"]),\n            li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),\n            li[class*="messageListItem"]:has([class*="blockedSystemMessage"]),\n            li[class*="messageListItem"]:has([class*="blocked"][class*="message"]),\n            [class*="messageListItem"]:has([class*="messageGroupBlocked"]) {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n        ` : "";
+        const hideBlockedBanner = this.settings.places.messages ? `\n            [class*="messageGroupBlocked"],\n            [class*="blockedSystemMessage"],\n            [class*="groupStart"]:has([class*="blocked"]),\n            li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),\n            li[class*="messageListItem"]:has([class*="blockedSystemMessage"]),\n            li[class*="messageListItem"]:has([class*="blocked"][class*="message"]),\n            [class*="messageListItem"]:has([class*="messageGroupBlocked"]) {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n        ` : "";
         const eventsSidebarNameRule = this.settings.places.events ? `\n            li:has([data-list-item-id^="channels___upcoming-events-"]) {\n                visibility: hidden !important;\n            }\n            li:has([data-list-item-id^="channels___upcoming-events-"]):has([data-nmb-events-ready="true"]) {\n                visibility: visible !important;\n            }\n        ` : "";
         const noticeButtonStyles = `\n            .bd-notice button,\n            .bd-notice .bd-button,\n            .bd-notice [class*="button"],\n            .bd-notice [role="button"] {\n                background: transparent !important;\n                border: 1px solid var(--text-muted) !important;\n                color: var(--text-normal) !important;\n                transition: background 0.15s, border-color 0.15s !important;\n            }\n            .bd-notice button:hover,\n            .bd-notice .bd-button:hover,\n            .bd-notice [class*="button"]:hover,\n            .bd-notice [role="button"]:hover {\n                background: rgba(255, 255, 255, 0.08) !important;\n                border-color: var(--brand-experiment) !important;\n                color: var(--text-normal) !important;\n            }\n        `;
         BdApi.DOM.addStyle(this.pluginName, `\n            [data-hidden-blocked="true"],\n            [data-hidden-blocked="true"] * { ${this.hideStyles} }\n            h1[data-nmb-header-hidden="true"] {\n                font-size: 0 !important;\n                line-height: 0 !important;\n            }\n            h1[data-nmb-header-hidden="true"] [data-nmb-header-overlay="true"] {\n                font-size: var(--nmb-header-restore-size, 20px) !important;\n                line-height: var(--nmb-header-restore-line-height, normal) !important;\n            }\n            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-header-minimal {\n                display: flex;\n                align-items: baseline;\n                gap: 10px;\n                margin-bottom: 12px;\n                padding-bottom: 10px;\n                border-bottom: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-plugin-name { font-size: 22px; font-weight: 700; color: var(--header-primary); }\n            .nmb-version { font-size: 15px; color: var(--text-muted); font-weight: 500; }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 8px;\n                margin-top: 28px;\n                padding: 12px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-btn-icon { width: 14px; height: 14px; flex-shrink: 0; }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-checking .nmb-btn-icon { animation: nmb-spin 0.8s linear infinite; }\n            @keyframes nmb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n\n            ${noticeButtonStyles}\n        `);
