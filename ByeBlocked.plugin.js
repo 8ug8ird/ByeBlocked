@@ -2,12 +2,12 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.2.1
+ * @version 2.3.2
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 module.exports = class ByeBlocked {
-    static VERSION="2.2.1";
+    static VERSION="2.3.2";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     constructor() {
@@ -91,6 +91,11 @@ module.exports = class ByeBlocked {
         this._voiceChannelMemberIds = new Map;
         this._voiceFakeTimers = new Map;
         this._voiceFakeTimerTick = null;
+        this._voiceMutePatched = false;
+        this._mutedBlockedUserIds = new Set;
+        this._localMuteKey = null;
+        this._localVolumeKey = null;
+        this._blockedChannelStatuses = new Map;
         
 
         this._historyPatchActive = false;
@@ -729,6 +734,7 @@ module.exports = class ByeBlocked {
             behavior: {
                 autoCheckUpdates: true,
                 muteVoiceJoinLeaveSound: true,
+                muteBlockedVoiceAudio: true,
                 suppressTaskbarBadge: true
             }
         };
@@ -1640,8 +1646,11 @@ this.patches.push(() => {
             this._safePatch("patchGuildMembersPageRow", () => this.patchGuildMembersPageRow());
             this._safePatch("patchMemberListRow", () => this.patchMemberListRow());
             this._safePatch("patchSoundboardEffects", () => this.patchSoundboardEffects());
-            if (this.settings.behavior.muteVoiceJoinLeaveSound) {
+            if (this.settings.behavior.muteVoiceJoinLeaveSound || this.settings.behavior.muteBlockedVoiceAudio) {
                 this._safePatch("patchSound", () => this.patchSound());
+            }
+            if (this.settings.behavior.muteBlockedVoiceAudio) {
+                this._safePatch("patchVoiceMute", () => this.patchVoiceMute());
             }
         }, 2e3);
         setTimeout(() => {
@@ -1738,6 +1747,11 @@ this.patches.push(() => {
         }
         this._voiceFakeTimers.clear();
         this._voiceChannelMemberIds.clear();
+        this._blockedChannelStatuses?.clear();
+        try {
+            this._releaseAllVoiceMutes();
+        } catch (_) {}
+        this._voiceMutePatched = false;
         try {
             this.modules.RelationshipStore?.removeChangeListener?.(this.relationshipChangeHandler);
         } catch (_) {}
@@ -1822,6 +1836,7 @@ this.patches.push(() => {
         this._stageRenderComponentPatched = false;
         this._activityPanelComponentPatched = false;
         this._blockedMsgGroupPatched = false;
+        this._voiceMutePatched = false;
         if (this._muteTimeout) {
             clearTimeout(this._muteTimeout);
             this._muteTimeout = null;
@@ -1860,8 +1875,10 @@ this.patches.push(() => {
         this.modules.ActiveJoinedThreadsStore = getStore("ActiveJoinedThreadsStore", "JoinedThreadsStore");
         this.modules.ThreadStore = getStore("ActiveThreadsStore", "ThreadStore", "ForumChannelStore", "GuildThreadStore", "ThreadsStore");
         this.modules.GuildScheduledEventStore = getStore("GuildScheduledEventStore", "ScheduledEventStore", "GuildEventsStore");
+        this.modules.ChannelStatusStore = getStore("ChannelStatusStore", "VoiceChannelStatusStore", "ChannelStatusesStore");
         this._resolveDispatcher();
         this.modules.RTCConnectionUtils = getModule(m => typeof m?.getChannelId === "function" && typeof m?.getGuildId === "function");
+        this._resolveMediaEngineActions();
         try {
             this.resolveInviteQueryModule();
         } catch (_) {
@@ -1912,6 +1929,35 @@ this.patches.push(() => {
                 const k = this._wpFindFnKeyFuzzy(altMod, "playSound", "play");
                 if (k) { this.modules.SoundUtils = altMod; this._soundPlayKey = k; }
             }
+        }
+    }
+    _resolveMediaEngineActions() {
+        try {
+            const mod = this._wpGetModule(m => {
+                if (typeof m !== "object" || !m) return false;
+                return Object.values(m).some(v => {
+                    if (typeof v !== "function") return false;
+                    try {
+                        const src = v.toString();
+                        return src.includes("setLocalVolume") || (src.includes("LOCAL_VOLUME") && src.includes("userId"));
+                    } catch (_) { return false; }
+                });
+            }, { searchExports: true });
+            if (mod) {
+                this.modules.MediaEngineActions = mod;
+                this._localVolumeKey = this._wpFindFnKeyFuzzy(mod, "setLocalVolume") || this._wpFindFnKey(mod, "setLocalVolume");
+                this._localMuteKey = this._wpFindFnKeyFuzzy(mod, "setLocalMute") || this._wpFindFnKey(mod, "setLocalMute");
+            }
+        } catch (_) {}
+        if (!this.modules.MediaEngineActions || (!this._localVolumeKey && !this._localMuteKey)) {
+            try {
+                const alt = this._wpGetModule(m => typeof m?.setLocalVolume === "function" || typeof m?.setLocalMute === "function");
+                if (alt) {
+                    this.modules.MediaEngineActions = alt;
+                    this._localVolumeKey = typeof alt.setLocalVolume === "function" ? "setLocalVolume" : this._localVolumeKey;
+                    this._localMuteKey = typeof alt.setLocalMute === "function" ? "setLocalMute" : this._localMuteKey;
+                }
+            } catch (_) {}
         }
     }
     _resolveMessagesGet() {
@@ -4868,6 +4914,7 @@ return false;
             if (fromMutation) {
                 this.fixMemberGroupCounts();
                 this.fixVoiceChannelIconColors();
+                this._resyncBlockedChannelStatuses();
                 this.hideOrphanedDividers();
                 this.collapseGhostSlots();
                 this.promoteOrphanedMessages();
@@ -4906,6 +4953,7 @@ return false;
             }
             this.fixMemberGroupCounts();
             this.fixVoiceChannelIconColors();
+            this._resyncBlockedChannelStatuses();
             this.hideOrphanedDividers();
             this.collapseGhostSlots();
             this.promoteOrphanedMessages();
@@ -6853,6 +6901,22 @@ return false;
                 if (memberIds.size) this._voiceChannelMemberIds.set(channelId, memberIds);
             });
         } catch (_) {}
+        this._seedBlockedChannelStatuses();
+    }
+    _seedBlockedChannelStatuses() {
+        try {
+            document.querySelectorAll('[data-list-item-id*="channels"]').forEach(row => {
+                const channelId = this.findChannelId(row);
+                if (!channelId) return;
+                const statusEl = row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]');
+                if (!statusEl || !statusEl.textContent?.trim()) return;
+                if (this._channelHasBlockedMember(channelId)) {
+                    if (!this._blockedChannelStatuses) this._blockedChannelStatuses = new Map;
+                    this._blockedChannelStatuses.set(channelId, statusEl.textContent.trim());
+                    this._suppressChannelStatusText(channelId);
+                }
+            });
+        } catch (_) {}
     }
     _getSelfUserId() {
         try {
@@ -6882,8 +6946,15 @@ return false;
                 oldSet?.delete(userId);
                 if (oldSet && !oldSet.size) prevMembers.delete(oldChannelId);
             }
+            if (this.shouldHide(userId)) {
+                try {
+                    if (oldChannelId) this._reevaluateChannelStatusVisibility(oldChannelId);
+                    if (newChannelId) this._reevaluateChannelStatusVisibility(newChannelId);
+                } catch (_) {}
+            }
             if (selfId && userId === selfId && !newChannelId) {
                 this._voiceFakeTimers.delete(oldChannelId);
+                this._releaseAllVoiceMutes();
                 setTimeout(() => {
                     if (this.isRunning) this.fixVoiceChannelIconColors();
                 }, 0);
@@ -6908,7 +6979,134 @@ return false;
                     if (anyBlockedBefore && !anyUnblockedBefore) {
                         this._resetFakeVoiceTimer(newChannelId);
                     }
+                    try {
+                        this._applyVoiceMuteForChannel(newChannelId);
+                    } catch (_) {}
                 }
+            }
+        }
+    }
+    _reevaluateChannelStatusVisibility(channelId) {
+        if (!channelId || !this.settings.places.voiceChannels) return;
+        const row = this._findChannelRowById(channelId);
+        if (!row) return;
+        const statusEl = row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]');
+        const hasBlocked = this._channelHasBlockedMember(channelId);
+        if (!this._blockedChannelStatuses) this._blockedChannelStatuses = new Map;
+        if (hasBlocked) {
+            const currentText = statusEl?.dataset?.hiddenBlocked === "true"
+                ? this._blockedChannelStatuses.get(channelId)
+                : statusEl?.textContent?.trim();
+            if (currentText) {
+                this._blockedChannelStatuses.set(channelId, currentText);
+                this._suppressChannelStatusText(channelId);
+            }
+        } else {
+            this._blockedChannelStatuses.delete(channelId);
+            this._restoreChannelStatusText(channelId);
+        }
+    }
+    _getMediaEngineContext() {
+        try {
+            const RTCUtils = this.modules.RTCConnectionUtils;
+            if (RTCUtils) {
+                const channelId = RTCUtils.getChannelId?.();
+                const guildId = RTCUtils.getGuildId?.();
+                if (channelId) return { channelId: channelId, guildId: guildId || null, context: "default" };
+            }
+        } catch (_) {}
+        try {
+            const candidate = this.modules.SelectedChannelStore?.getVoiceChannelId?.();
+            if (candidate) return { channelId: candidate, guildId: null, context: "default" };
+        } catch (_) {}
+        return null;
+    }
+    _setBlockedUserLocalMute(userId, mute) {
+        const actions = this.modules.MediaEngineActions;
+        if (!actions || !userId) return false;
+        const ctx = this._getMediaEngineContext();
+        const context = ctx?.context || "default";
+        let applied = false;
+        try {
+            if (this._localMuteKey && typeof actions[this._localMuteKey] === "function") {
+                actions[this._localMuteKey](userId, mute, context);
+                applied = true;
+            }
+        } catch (_) {}
+        try {
+            if (this._localVolumeKey && typeof actions[this._localVolumeKey] === "function") {
+                actions[this._localVolumeKey](userId, mute ? 0 : 100, context);
+                applied = true;
+            }
+        } catch (_) {}
+        return applied;
+    }
+    _applyVoiceMuteForChannel(channelId) {
+        if (!this.settings.behavior.muteBlockedVoiceAudio) return;
+        if (!channelId) return;
+        try {
+            const states = this.getRawVoiceStatesForChannel(channelId) || [];
+            const selfId = this._getSelfUserId();
+            for (const state of states) {
+                const userId = this.extractUserId(state);
+                if (!userId || userId === selfId) continue;
+                if (this.shouldHide(userId)) {
+                    if (!this._mutedBlockedUserIds) this._mutedBlockedUserIds = new Set;
+                    this._setBlockedUserLocalMute(userId, true);
+                    this._mutedBlockedUserIds.add(userId);
+                }
+            }
+        } catch (_) {}
+    }
+    _releaseVoiceMuteForUser(userId) {
+        if (!userId) return;
+        if (!this._mutedBlockedUserIds || !this._mutedBlockedUserIds.has(userId)) return;
+        this._setBlockedUserLocalMute(userId, false);
+        this._mutedBlockedUserIds.delete(userId);
+    }
+    _releaseAllVoiceMutes() {
+        if (!this._mutedBlockedUserIds || !this._mutedBlockedUserIds.size) return;
+        for (const userId of [...this._mutedBlockedUserIds]) {
+            this._setBlockedUserLocalMute(userId, false);
+        }
+        this._mutedBlockedUserIds.clear();
+    }
+    patchVoiceMute() {
+        if (this._voiceMutePatched) return;
+        const Dispatcher = this.modules.Dispatcher;
+        if (!Dispatcher || typeof Dispatcher.dispatch !== "function") return;
+        this._voiceMutePatched = true;
+        this._mutedBlockedUserIds = this._mutedBlockedUserIds || new Set;
+        const self = this;
+        this.patches.push(BdApi.Patcher.before(this.pluginName, Dispatcher, "dispatch", function(context, args) {
+            const action = args[0];
+            if (!action || typeof action !== "object") return;
+            if (action.type === "VOICE_STATE_UPDATES" && Array.isArray(action.voiceStates)) {
+                try {
+                    self._handleVoiceStateUpdatesForMute(action.voiceStates);
+                } catch (_) {}
+            }
+        }));
+        try {
+            const ctx = this._getMediaEngineContext();
+            if (ctx?.channelId) this._applyVoiceMuteForChannel(ctx.channelId);
+        } catch (_) {}
+    }
+    _handleVoiceStateUpdatesForMute(voiceStates) {
+        if (!this.settings.behavior.muteBlockedVoiceAudio) return;
+        const selfId = this._getSelfUserId();
+        const myChannelId = this._getMediaEngineContext()?.channelId || null;
+        for (const vs of voiceStates) {
+            if (!vs) continue;
+            const userId = vs.userId || this.extractUserId(vs);
+            if (!userId || userId === selfId) continue;
+            const newChannelId = vs.channelId || null;
+            if (newChannelId && myChannelId && newChannelId === myChannelId && this.shouldHide(userId)) {
+                if (!this._mutedBlockedUserIds) this._mutedBlockedUserIds = new Set;
+                this._setBlockedUserLocalMute(userId, true);
+                this._mutedBlockedUserIds.add(userId);
+            } else if (newChannelId !== myChannelId) {
+                this._releaseVoiceMuteForUser(userId);
             }
         }
     }
@@ -6953,6 +7151,24 @@ return false;
         if (!channelId) return null;
         return document.querySelector(`[data-list-item-id*="channels___${channelId}"]`) || document.querySelector(`[data-list-item-id*="${channelId}"]`);
     }
+    _findVoiceTimerAnchor(channelRow) {
+        if (!channelRow) return null;
+        const link = channelRow.matches?.('[data-list-item-id*="channels"]') ? channelRow : channelRow.querySelector?.('[data-list-item-id*="channels"]');
+        return link || channelRow;
+    }
+    _DEFAULT_FAKE_TIMER_STYLE() {
+        return {
+            fontFamily: "var(--font-display, inherit)",
+            fontSize: "12px",
+            fontWeight: "500",
+            fontVariantNumeric: "tabular-nums",
+            lineHeight: "16px",
+            color: "var(--text-positive, #23a55a)",
+            letterSpacing: "normal",
+            margin: "0",
+            padding: "0 2px"
+        };
+    }
     _showFakeVoiceTimer(channelRow, channelId) {
         let state = this._voiceFakeTimers.get(channelId);
         if (!state) {
@@ -6963,40 +7179,45 @@ return false;
             state.active = true;
         }
         const timerContainer = channelRow.querySelector('[class*="tabularNumbers"]');
-        if (!timerContainer) {
-            return;
+        if (timerContainer) {
+            if (timerContainer.dataset.hiddenBlocked === "true") {
+                this.restoreElement(timerContainer);
+            }
+            const visibleTimerSpan = timerContainer.querySelector('span[aria-hidden="true"]') || timerContainer;
+            if (!state.styleSnapshot) {
+                const computed = window.getComputedStyle(visibleTimerSpan);
+                state.styleSnapshot = {
+                    fontFamily: computed.fontFamily,
+                    fontSize: computed.fontSize,
+                    fontWeight: computed.fontWeight,
+                    fontVariantNumeric: computed.fontVariantNumeric,
+                    lineHeight: computed.lineHeight,
+                    color: computed.color,
+                    letterSpacing: computed.letterSpacing,
+                    margin: computed.margin,
+                    padding: computed.padding
+                };
+            }
+            if (!visibleTimerSpan.hasAttribute("data-nmb-prev-style")) {
+                visibleTimerSpan.setAttribute("data-nmb-prev-style", visibleTimerSpan.getAttribute("style") || "");
+            }
+            visibleTimerSpan.dataset.hiddenBlocked = "true";
+            visibleTimerSpan.dataset.nmbReason = "voice-timer-faked";
+            visibleTimerSpan.style.cssText = this.hideStyles;
+            this.hiddenElements.add(visibleTimerSpan);
         }
-        if (timerContainer.dataset.hiddenBlocked === "true") {
-            this.restoreElement(timerContainer);
-        }
-        const visibleTimerSpan = timerContainer.querySelector('span[aria-hidden="true"]') || timerContainer;
-        if (!state.styleSnapshot) {
-            const computed = window.getComputedStyle(visibleTimerSpan);
-            state.styleSnapshot = {
-                fontFamily: computed.fontFamily,
-                fontSize: computed.fontSize,
-                fontWeight: computed.fontWeight,
-                fontVariantNumeric: computed.fontVariantNumeric,
-                lineHeight: computed.lineHeight,
-                color: computed.color,
-                letterSpacing: computed.letterSpacing,
-                margin: computed.margin,
-                padding: computed.padding
-            };
-        }
-        const computedSnapshot = state.styleSnapshot;
-        if (!visibleTimerSpan.hasAttribute("data-nmb-prev-style")) {
-            visibleTimerSpan.setAttribute("data-nmb-prev-style", visibleTimerSpan.getAttribute("style") || "");
-        }
-        visibleTimerSpan.dataset.hiddenBlocked = "true";
-        visibleTimerSpan.dataset.nmbReason = "voice-timer-faked";
-        visibleTimerSpan.style.cssText = this.hideStyles;
-        this.hiddenElements.add(visibleTimerSpan);
-        let fakeEl = timerContainer.querySelector('[data-nmb-fake-timer="true"]');
+        const computedSnapshot = state.styleSnapshot || this._DEFAULT_FAKE_TIMER_STYLE();
+        const anchor = this._findVoiceTimerAnchor(channelRow);
+        if (!anchor) return;
+        let fakeEl = channelRow.querySelector('[data-nmb-fake-timer="true"]');
         if (!fakeEl) {
             fakeEl = document.createElement("span");
             fakeEl.setAttribute("data-nmb-fake-timer", "true");
-            visibleTimerSpan.insertAdjacentElement("afterend", fakeEl);
+            if (timerContainer) {
+                (timerContainer.querySelector('span[aria-hidden="true"]') || timerContainer).insertAdjacentElement("afterend", fakeEl);
+            } else {
+                anchor.appendChild(fakeEl);
+            }
         }
         fakeEl.style.cssText = `
             font-family: ${computedSnapshot.fontFamily};
@@ -7040,6 +7261,19 @@ return false;
             }
         });
     }
+    _channelContainsSelf(channelId, states) {
+        try {
+            const selfId = this._getSelfUserId();
+            if (!selfId) return false;
+            if (Array.isArray(states) && states.length) {
+                return states.some(state => this.extractUserId(state) === selfId);
+            }
+            const mySelectedVoiceChannel = this.modules.SelectedChannelStore?.getVoiceChannelId?.();
+            return Boolean(mySelectedVoiceChannel && mySelectedVoiceChannel === channelId);
+        } catch (_) {
+            return false;
+        }
+    }
     fixVoiceChannelIconColors() {
         document.querySelectorAll('[data-list-item-id*="channels"], [class*="voiceChannel"], [class*="linkTop"], [class*="linkBottom"]').forEach(row => {
             const channelRow = row.closest?.('[data-list-item-id*="channels"]') || row.closest?.("li") || row;
@@ -7052,7 +7286,12 @@ return false;
             const isHiddenOnly = allHidden || activeOnlyByDom;
             const hasBlockedUsers = anyBlocked || activeOnlyByDom;
             const isMixedChannel = states.length > 0 && anyBlocked && !allHidden;
-            const fakeResetExists = this._voiceFakeTimers.has(channelId);
+            let fakeResetExists = this._voiceFakeTimers.has(channelId);
+            const selfHereWithOnlyBlocked = isHiddenOnly && !isMixedChannel && this._channelContainsSelf(channelId, states);
+            if (this.settings.places.voiceChannels && !fakeResetExists && selfHereWithOnlyBlocked) {
+                this._resetFakeVoiceTimer(channelId);
+                fakeResetExists = true;
+            }
             if (!isHiddenOnly && !hasBlockedUsers) {
                 this.restoreVoiceChannelIcon(channelRow);
                 this.restoreVoiceChannelTimer(channelRow);
@@ -7333,7 +7572,7 @@ return false;
         el.removeAttribute("data-nmb-prev-text");
     }
     patchSound() {
-        if (!this.settings.behavior.muteVoiceJoinLeaveSound) return;
+        if (!this.settings.behavior.muteVoiceJoinLeaveSound && !this.settings.behavior.muteBlockedVoiceAudio) return;
         const SoundUtils = this.modules.SoundUtils;
         if (!SoundUtils) return;
         const playSoundKey = this._soundPlayKey || "playSound";
@@ -7343,20 +7582,25 @@ return false;
         this.patches.push(BdApi.Patcher.instead(this.pluginName, SoundUtils, playSoundKey, function(context, args, originalMethod) {
             const soundType = args[0];
             const isVoiceEvent = [ "disconnect", "user_join", "user_leave", "user_moved", "stream_started", "stream_ended", "activity_launch" ].includes(soundType);
-            if (!isVoiceEvent || !self.settings.behavior.muteVoiceJoinLeaveSound) {
+            if (!isVoiceEvent) {
                 return originalMethod.apply(context, args);
             }
             if (soundType === "stream_started" || soundType === "stream_ended") {
+                if (!self.settings.behavior.muteBlockedVoiceAudio) return originalMethod.apply(context, args);
                 const streamerId = self._lastStreamerId;
                 if (!streamerId) return originalMethod.apply(context, args);
                 if (self.shouldHide(streamerId)) return;
                 return originalMethod.apply(context, args);
             }
             if (soundType === "activity_launch") {
+                if (!self.settings.behavior.muteVoiceJoinLeaveSound) return originalMethod.apply(context, args);
                 const participantIds = self._lastActivityParticipantIds;
                 if (!participantIds || !participantIds.size) return originalMethod.apply(context, args);
                 const allBlocked = [ ...participantIds ].every(id => self.shouldHide(id));
                 if (allBlocked) return;
+                return originalMethod.apply(context, args);
+            }
+            if (!self.settings.behavior.muteVoiceJoinLeaveSound) {
                 return originalMethod.apply(context, args);
             }
             let channelId = null;
@@ -7429,14 +7673,74 @@ return false;
                 return;
             }
             if (action.type === "VOICE_CHANNEL_EFFECT_SEND") {
-                if (!self.settings.behavior.muteVoiceJoinLeaveSound) return;
+                if (!self.settings.behavior.muteBlockedVoiceAudio) return;
                 const senderId = action.userId;
                 if (senderId && self.shouldHide(senderId)) {
                     action.type = "_BYEBLOCKED_SUPPRESSED_VOICE_CHANNEL_EFFECT_SEND";
                 }
                 return;
             }
+            if (self._isChannelStatusUpdateAction(action)) {
+                try {
+                    self._handleChannelStatusUpdateAction(action);
+                } catch (_) {}
+                return;
+            }
         }));
+    }
+    _isChannelStatusUpdateAction(action) {
+        if (!action || typeof action !== "object") return false;
+        const type = String(action.type || "");
+        if (!/CHANNEL_STATUS|VOICE_STATUS|VOICE_CHANNEL_STATUS/i.test(type)) return false;
+        const channelId = action.channelId || action.channel_id || action.id;
+        return Boolean(channelId) && ("status" in action || "channelStatus" in action);
+    }
+    _handleChannelStatusUpdateAction(action) {
+        const channelId = action.channelId || action.channel_id || action.id;
+        const status = action.status !== undefined ? action.status : action.channelStatus;
+        if (!channelId) return;
+        if (!this._blockedChannelStatuses) this._blockedChannelStatuses = new Map;
+        if (!status) {
+            this._blockedChannelStatuses.delete(channelId);
+            this._restoreChannelStatusText(channelId);
+            return;
+        }
+        const hasBlockedInChannel = this._channelHasBlockedMember(channelId);
+        if (hasBlockedInChannel) {
+            this._blockedChannelStatuses.set(channelId, status);
+            this._suppressChannelStatusText(channelId);
+        } else {
+            this._blockedChannelStatuses.delete(channelId);
+            this._restoreChannelStatusText(channelId);
+        }
+    }
+    _channelHasBlockedMember(channelId) {
+        try {
+            const states = this.getRawVoiceStatesForChannel(channelId) || [];
+            return states.some(state => this.shouldHide(this.extractUserId(state)));
+        } catch (_) {
+            return false;
+        }
+    }
+    _suppressChannelStatusText(channelId) {
+        if (!this.settings.places.voiceChannels) return;
+        const row = this._findChannelRowById(channelId);
+        if (!row) return;
+        const statusEl = row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]');
+        if (statusEl && statusEl.dataset?.hiddenBlocked !== "true") {
+            this.hideElement(statusEl, "channel-status", false);
+        }
+    }
+    _restoreChannelStatusText(channelId) {
+        const row = this._findChannelRowById(channelId);
+        if (!row) return;
+        row.querySelectorAll('[data-hidden-blocked="true"][data-nmb-reason="channel-status"]').forEach(el => this.restoreElement(el));
+    }
+    _resyncBlockedChannelStatuses() {
+        if (!this._blockedChannelStatuses || !this._blockedChannelStatuses.size) return;
+        for (const channelId of this._blockedChannelStatuses.keys()) {
+            this._suppressChannelStatusText(channelId);
+        }
     }
     _handlePinAdd(action) {
         try {
@@ -7860,6 +8164,19 @@ return false;
                         this.toast("ðŸ”„ Please reload the plugin for changes to take effect.", "warn");
                     }
                 }
+                if (section === "behavior" && key === "muteBlockedVoiceAudio") {
+                    if (next) {
+                        setTimeout(() => {
+                            this.patchVoiceMute();
+                            this.patchSound();
+                            this.patchSoundboardEffects();
+                            this.toast("ðŸ”‡ Blocked users' voice audio will now be muted.", "info");
+                        }, 200);
+                    } else {
+                        this._releaseAllVoiceMutes();
+                        this.toast("ðŸ”„ Please reload the plugin for changes to take effect.", "warn");
+                    }
+                }
                 if (section === "behavior" && key === "suppressTaskbarBadge") {
                     this._refreshTaskbarBadge();
                 }
@@ -7888,6 +8205,7 @@ return false;
             events: "Scheduled events (hide events created by blocked users)",
             autoCheckUpdates: "Auto-check updates on startup",
             muteVoiceJoinLeaveSound: "Silence join/leave sounds for blocked users",
+            muteBlockedVoiceAudio: "Mute blocked users' voice/mic audio in calls",
             suppressTaskbarBadge: "Hide taskbar & tray badge for blocked-only activity"
         };
         const rows = Object.keys(this.settings[section]).map(key => {
