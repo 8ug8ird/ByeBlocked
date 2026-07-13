@@ -2,193 +2,257 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.3.2
+ * @version 2.3.3
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
-module.exports = class ByeBlocked {
-    static VERSION="2.3.2";
-    static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
-    static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
-    constructor() {
-        this.pluginName = "ByeBlocked";
-        this.observer = null;
-        this.scanInterval = null;
-        this.scanTimeout = null;
-        this.refreshTimeout = null;
-        this.saveTimeout = null;
-        this._moduleRetryTimeout = null;
-        
-        this.relationshipChangeHandler = null;
-        this._channelPinsChangeHandler = null;
-        this._channelSwitchChangeHandler = null;
-        this._lastWatchedChannelId = null;
-        this._forumRetryScheduled = false;
-        this._readStateRecheckScheduled = false;
-        this._readStateRecheckInFlight = false;
-        this.isRunning = false;
-        this.guildChangeHandler = null;
-        this.routerChangeHandler = null;
-        this._routerUnsubscribe = null;
-        this._refreshDebounce = null;
-        this._chatContentObserver = null;
-        this.patches = [];
-        this.hiddenElements = new Set;
-        this.hiddenParents = new Set;
-        this.modules = {};
-        this.originalVoiceMethods = {};
-        this._soundPlayKey = null;
-        this.settings = this.loadSettings();
-        this._updateState = {
-            status: "idle",
-            latestVersion: null,
-            remoteText: null
-        };
-        this._updateNotice = null;
-        this._lastNotifiedVersion = null;
-        this._periodicCheckInterval = null;
-        this._lastCheckTimestamp = this.loadLastCheck();
-        this._storePatched = false;
-        this._readStatePatched = false;
-        this._taskbarBadgePatched = false;
-        this._taskbarElectronPatched = false;
-        this._forumPostComponentPatched = false;
-        this._messagesWrapPatched = false;
-        this._rawGetMessages = null;
-        this._updateResetTimer = null;
-        this._oldUnblockedConnectedUsers = [];
-        this._muteTimeout = null;
-        this._lastStreamerId = null;
-        this._dispatcherToken = null;
-        this._lastActivityParticipantIds = new Set;
-        this._inviteSuggestionsPatched = false;
-        this._privateChannelStorePatched = false;
-        this._mentionAutocompletePatched = false;
-        this._activePostsPopoverPatched = false;
-        this._lastScanDomTime = 0;
-        this._lastContextMessageId = null;
-        this._reactorModalPassTimer = null;
-        this._contextMenuHandler = null;
-        this._menuPortalObserver = null;
-        this._roleSettingsClickHandler = null;
-        this._blockedOnlyReadChannels = new Set;
-        this._blockedReadCache = this.loadBlockedReadCache();
-        this._notificationDispatcherPatched = false;
-        this._blockedPinnedMessageIds = this.loadBlockedPinnedIds();
-        this._pinPinnerByMessageId = this.loadPinPinnerCache();
-        this._pendingPinsByChannel = new Map;
-        this._channelPinsStorePatched = false;
-        this._pinFluxPatched = false;
-        this._soundboardPatched = false;
-        this._guildMembersPagePatched = false;
-        this._guildMemberStorePatched = false;
-        this._eventsSidebarUnreadPatched = false;
-        this._memberListRowPatched = false;
-        this._stageRenderComponentPatched = false;
-        this._activityPanelComponentPatched = false;
-        this._callGridPatched = false;
-        this._blockedMsgGroupPatched = false;
-        this._voiceChannelMemberIds = new Map;
-        this._voiceFakeTimers = new Map;
-        this._voiceFakeTimerTick = null;
-        this._voiceMutePatched = false;
-        this._mutedBlockedUserIds = new Set;
-        this._localMuteKey = null;
-        this._localVolumeKey = null;
-        this._blockedChannelStatuses = new Map;
-        
 
-        this._historyPatchActive = false;
-        this._origPushState = null;
-        this._origReplaceState = null;
-        this._storeResolveCache = {};
-        this.hideStyles = `\n            display: none !important;\n            width: 0 !important;\n            height: 0 !important;\n            min-width: 0 !important;\n            min-height: 0 !important;\n            max-width: 0 !important;\n            max-height: 0 !important;\n            flex: 0 0 0 !important;\n            padding: 0 !important;\n            margin: 0 !important;\n            border: 0 !important;\n            overflow: hidden !important;\n            position: absolute !important;\n            opacity: 0 !important;\n            pointer-events: none !important;\n            transform: scale(0) !important;\n            visibility: hidden !important;\n            line-height: 0 !important;\n            font-size: 0 !important;\n            contain: size style !important;\n        `;
+class ModuleResolver {
+    constructor() { this._cache = {}; }
+    getStore(...names) {
+        for (const n of names) { try { const s = BdApi.Webpack.getStore(n); if (s) return s; } catch (_) {} }
+        return this._byHeuristic(names[0]);
     }
-    _wpGetStore(...names) {
-        for (const name of names) {
-            try {
-                const store = BdApi.Webpack.getStore(name);
-                if (store) return store;
-            } catch (_) {}
-        }
-        return this._wpGetStoreByHeuristic(names[0]);
-    }
-    _wpGetStoreByHeuristic(hintName) {
-        if (!hintName) return null;
-        const cacheKey = `store:${hintName}`;
-        if (this._storeResolveCache && this._storeResolveCache[cacheKey]) return this._storeResolveCache[cacheKey];
+    _byHeuristic(hint) {
+        if (!hint) return null;
+        const k = 'st:' + hint;
+        if (this._cache[k]) return this._cache[k];
+        const t = hint.replace(/store$/i, '').toLowerCase();
         try {
-            const stores = this._wpGetModule(m => m && typeof m === "object" && typeof m.addChangeListener === "function" && typeof m.getState === "function");
+            const stores = this.get(m => m && typeof m === 'object' && typeof m.addChangeListener === 'function' && typeof m.getState === 'function');
             if (!stores) return null;
-            const allStores = Array.isArray(stores) ? stores : [stores];
-            for (const mod of allStores) {
-                const name = mod.getName?.() || mod.constructor?.displayName || mod.constructor?.name || "";
-                if (name.toLowerCase().includes(hintName.toLowerCase().replace(/store$/i, ""))) {
-                    if (!this._storeResolveCache) this._storeResolveCache = {};
-                    this._storeResolveCache[cacheKey] = mod;
-                    return mod;
-                }
+            const all = Array.isArray(stores) ? stores : [stores];
+            for (const mod of all) {
+                const n = (mod.getName?.() || mod.constructor?.displayName || mod.constructor?.name || '').toLowerCase();
+                if (n.includes(t)) return this._cache[k] = mod;
             }
-            for (const mod of allStores) {
+            for (const mod of all) {
                 try {
                     const state = mod.getState();
-                    if (state && typeof state === "object") {
-                        for (const key of Object.keys(state)) {
-                            if (key.toLowerCase().includes(hintName.toLowerCase().replace(/store$/i, "").replace(/^./, c => c.toLowerCase()))) {
-                                if (!this._storeResolveCache) this._storeResolveCache = {};
-                                this._storeResolveCache[cacheKey] = mod;
-                                return mod;
-                            }
-                        }
-                    }
+                    if (state && typeof state === 'object')
+                        for (const key of Object.keys(state))
+                            if (key.toLowerCase().includes(t.replace(/^./, c => c.toLowerCase()))) return this._cache[k] = mod;
                 } catch (_) {}
             }
         } catch (_) {}
         return null;
     }
-    _wpGetModule(filter, opts) {
-        try {
-            return BdApi.Webpack.getModule(filter, opts);
-        } catch (_) {
-            return null;
-        }
+    get(f, o) { try { return BdApi.Webpack.getModule(f, o); } catch (_) { return null; } }
+    getBySource(s, o) { try { return BdApi.Webpack.getBySource(s, o); } catch (_) { return null; } }
+    getWithKey(f) { try { return BdApi.Webpack.getModuleWithKey(f); } catch (_) { return null; } }
+    findByKeys(...keys) {
+        for (const key of keys) { try { const m = BdApi.Webpack.getByKeys(key); if (m) return m; } catch (_) {} }
+        try { const m = this.get(mod => mod && typeof mod === 'object' && keys.every(k => k in mod)); if (m) return m; } catch (_) {}
+        try { return BdApi.Webpack.getByKeys(...keys); } catch (_) { return null; }
     }
-    _wpGetBySource(source, opts) {
-        try {
-            return BdApi.Webpack.getBySource(source, opts);
-        } catch (_) {
-            return null;
-        }
+    findFnKey(mod, ...needles) {
+        if (!mod || typeof mod !== 'object') return null;
+        try { for (const [k, v] of Object.entries(mod)) { if (typeof v !== 'function') continue; if (needles.every(n => v.toString().includes(n))) return k; } } catch (_) {}
+        return null;
     }
-    _wpGetModuleWithKey(filter) {
-        try {
-            return BdApi.Webpack.getModuleWithKey(filter);
-        } catch (_) {
-            return null;
-        }
+    findFnKeyFuzzy(mod, ...needles) {
+        if (!mod || typeof mod !== 'object') return null;
+        try { let best = null, bs = 0; for (const [k, v] of Object.entries(mod)) { if (typeof v !== 'function') continue; const s = needles.filter(n => v.toString().includes(n)).length; if (s > bs) { bs = s; best = k; } if (s === needles.length) return k; } return best; } catch (_) { return null; }
     }
-    _safePatch(name, fn) {
+    getBySourceAny(...sources) { for (const s of sources) { try { const m = BdApi.Webpack.getBySource(s); if (m) return m; } catch (_) {} } return null; }
+}
+class PatchManager {
+    constructor(p) { this.p = p; }
+    before(t, m, fn) { try { if (!t?.[m]) return; BdApi.Patcher.before(this.p.pluginName, t, m, fn); } catch (_) {} }
+    after(t, m, fn) { try { if (!t?.[m]) return; BdApi.Patcher.after(this.p.pluginName, t, m, fn); } catch (_) {} }
+    instead(t, m, fn) { try { if (!t?.[m]) return; BdApi.Patcher.instead(this.p.pluginName, t, m, fn); } catch (_) {} }
+    safe(l, fn) { try { fn(); return true; } catch (err) { this._logFail(l, err); return false; } }
+    cleanup() { try { BdApi.Patcher.unpatchAll(this.p.pluginName); } catch (_) {} }
+    _logFail(l, err) {
         try {
-            fn();
-            return true;
-        } catch (err) {
-            this._nmbLogPatchFailure(name, err);
-            return false;
-        }
-    }
-    _nmbLogPatchFailure(name, err) {
-        try {
-            this._nmbStartupFailures = this._nmbStartupFailures || [];
-            this._nmbStartupFailures.push({
-                name: name,
-                message: err?.message || String(err),
-                time: Date.now()
-            });
-            if (this._nmbStartupFailures.length === 1) {
-                this.toast(`âš ï¸ ByeBlocked: parte de uma funcionalidade (${name}) nÃ£o pÃ´de iniciar. Provavelmente o Discord mudou algo â€” o resto do plugin continua ativo. Veja o console para detalhes.`, "warn");
-            }
+            this.p._nmbStartupFailures = this.p._nmbStartupFailures || [];
+            this.p._nmbStartupFailures.push({ name: l, message: err?.message || String(err), time: Date.now() });
+            if (this.p._nmbStartupFailures.length === 1)
+                this.p.toast('ByeBlocked: parte de uma funcionalidade (' + l + ') nao pode iniciar. Provavelmente o Discord mudou algo - o resto do plugin continua ativo. Veja o console para detalhes.', 'warn');
         } catch (_) {}
     }
+}
+
+function _locale(locale, dict) { return dict[locale] || dict[locale.split('-')[0]] || dict.en; }
+function _getLocale() { try { return (document.documentElement?.lang || navigator.language || 'en').toLowerCase(); } catch (_) { return 'en'; } }
+function _makeDict(pt, en) { return { 'pt-br': pt, pt: pt, 'en-us': en, en: en }; }
+
+module.exports = class ByeBlocked {
+    static VERSION="2.3.3";
+    static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
+    static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
+    static EVENTS_LOCALE = _makeDict(
+        { title: 'N\u00e3o h\u00e1 eventos futuros.', subtitle: 'Agende um evento para qualquer atividade planejada no seu servidor.', tip_prefix: 'Voc\u00ea pode dar permiss\u00e3o para outras pessoas criarem eventos em ', tip_link: 'configura\u00e7\u00f5es do servidor > cargos' },
+        { title: 'No upcoming events.', subtitle: 'Schedule an event for any planned activity in your server.', tip_prefix: 'You can give other people permission to create events in ', tip_link: 'server settings > roles' }
+    );
+    static PINS_LOCALE = _makeDict(
+        { body: 'Este canal n\u00e3o tem<br>mensagens fixadas... por enquanto.', tip_label: 'Fica a dica:', tip_text: 'Usu\u00e1rios com a permiss\u00e3o \u201cGerenciar Mensagens\u201d podem fixar uma mensagem no menu de contexto.' },
+        { body: "This channel doesn't have<br>any pinned messages... yet.", tip_label: 'Pro tip:', tip_text: 'Users with the "Manage Messages" permission can pin a message from the context menu.' }
+    );
+    static TOPICS_LOCALE = _makeDict(
+        { title: 'N\u00e3o h\u00e1 t\u00f3picos.', subtitle: 'Mantenha o foco em uma conversa com um t\u00f3pico \u2014 um canal de texto tempor\u00e1rio.', button: 'Criar t\u00f3pico' },
+        { title: 'There are no threads.', subtitle: 'Stay focused on a conversation with a thread \u2014 a temporary text channel.', button: 'Create Thread' }
+    );
+    static FORUM_LOCALE = _makeDict(
+        { title: 'Seja o primeiro a come\u00e7ar essa conversa!', subtitle: 'Sobre o que voc\u00ea quer postar em #{channel}?' },
+        { title: 'Be the first to start this conversation!', subtitle: 'What do you want to post about in #{channel}?' }
+    );
+    static CHANNEL_STATUS_LOCALE = _makeDict(
+        'Status oculto (bloqueado)',
+        'Status hidden (blocked)'
+    );
+    static STAGE_LOCALE = _makeDict(
+        { title: 'Sem pedidos', body: 'Os pedidos para falar ser\u00e3o mostrados aqui.' },
+        { title: 'No requests', body: 'Requests to speak will show up here.' }
+    );
+    static SETTINGS_LABELS = {
+        blocked: 'Blocked users',
+        ignored: 'Muted/ignored users',
+        messages: 'Messages & chat',
+        memberList: 'Member list & members page',
+        voiceChannels: 'Voice & Stage channels (including activity panel, streams)',
+        groupDms: 'Group DMs',
+        autocomplete: 'Autocomplete & suggestions (mentions, invite picker)',
+        reactions: 'Message reactions',
+        events: 'Scheduled events (hide events created by blocked users)',
+        autoCheckUpdates: 'Auto-check updates on startup',
+        muteVoiceJoinLeaveSound: 'Silence join/leave sounds for blocked users',
+        muteBlockedVoiceAudio: 'Mute blocked users\' voice/mic audio in calls',
+        suppressTaskbarBadge: 'Hide taskbar & tray badge for blocked-only activity'
+    };
+    constructor() {
+        this.pluginName = 'ByeBlocked';
+        this.isRunning = false;
+        
+        this._r = new ModuleResolver();
+        this.modules = {};
+        this.hiddenElements = new Set;
+        this.hiddenParents = new Set;
+        this.observer = null;
+        
+        this.settings = this.loadSettings();
+        
+        this._updateState = { status: 'idle', latestVersion: null, remoteText: null };
+        this._updateNotice = null;
+        this._lastNotifiedVersion = null;
+        this._periodicCheckInterval = null;
+        this._updateResetTimer = null;
+        this._lastCheckTimestamp = this.loadLastCheck();
+        
+        this.scanInterval = null;
+        this.scanTimeout = null;
+        this.refreshTimeout = null;
+        this.saveTimeout = null;
+        this._refreshDebounce = null;
+        this._moduleRetryTimeout = null;
+        this._muteTimeout = null;
+        this._reactorModalPassTimer = null;
+        this._guildSwitchWaitTimeout = null;
+        
+        for (const flag of ['store','readState','taskbarBadge','taskbarElectron','forumPostComponent',
+            'messagesWrap','inviteSuggestions','privateChannelStore','mentionAutocomplete',
+            'activePostsPopover','notificationDispatcher','channelPinsStore','pinFlux',
+            'soundboard','guildMembersPage','guildMemberStore','eventsSidebarUnread',
+            'memberListRow','stageRenderComponent','activityPanelComponent','callGrid',
+            'blockedMsgGroup','voiceMute','guildScheduledEventStore']) {
+            this['_' + flag + 'Patched'] = this['_' + flag] || false;
+        }
+        
+        this._voiceChannelMemberIds = new Map;
+        this._voiceFakeTimers = new Map;
+        this._voiceFakeTimerTick = null;
+        this._mutedBlockedUserIds = new Set;
+        this._blockedChannelStatuses = new Map;
+
+        this._channelStatusAuthors = new Map;
+        this._oldUnblockedConnectedUsers = [];
+        this._lastStreamerId = null;
+        this._lastActivityParticipantIds = new Set;
+        this.originalVoiceMethods = {};
+        this._soundPlayKey = null;
+        this._localMuteKey = null;
+        this._localVolumeKey = null;
+        
+        this._blockedPinnedMessageIds = this.loadBlockedPinnedIds();
+        this._pinPinnerByMessageId = this.loadPinPinnerCache();
+        this._pendingPinsByChannel = new Map;
+        this._channelPinsStorePatched = false;
+        this._pinFluxPatched = false;
+        
+        this._blockedOnlyReadChannels = new Set;
+        this._blockedReadCache = this.loadBlockedReadCache();
+        this._readStateRecheckScheduled = false;
+        this._readStateRecheckInFlight = false;
+        this._readStateRecheckTimer = null;
+        this._readStateReloadRecheckTimers = null;
+        this._rawGetMessages = null;
+        
+        this._historyPatchActive = false;
+        this._origPushState = null;
+        this._origReplaceState = null;
+        this._storeResolveCache = {};
+        
+        this.relationshipChangeHandler = null;
+        this._channelPinsChangeHandler = null;
+        this._channelSwitchChangeHandler = null;
+        this.guildChangeHandler = null;
+        this.routerChangeHandler = null;
+        this._routerUnsubscribe = null;
+        this._roleSettingsClickHandler = null;
+        this._reactionClickHandler = null;
+        this._contextMenuHandler = null;
+        this._menuPortalObserver = null;
+        this._threadsStoreChangeHandler = null;
+        this._threadStoreChangeHandler = null;
+        this._channelStoreChangeHandler = null;
+        
+        this._lastWatchedChannelId = null;
+        this._forumRetryScheduled = false;
+        this._lastScanDomTime = 0;
+        this._lastContextMessageId = null;
+        
+        this._patcher = new PatchManager(this);
+    }
+    get hideStyles() { return 'display: none !important;width: 0 !important;height: 0 !important;min-width: 0 !important;min-height: 0 !important;max-width: 0 !important;max-height: 0 !important;flex: 0 0 0 !important;padding: 0 !important;margin: 0 !important;border: 0 !important;overflow: hidden !important;position: absolute !important;opacity: 0 !important;pointer-events: none !important;transform: scale(0) !important;visibility: hidden !important;line-height: 0 !important;font-size: 0 !important;contain: size style !important;'; }
+    _wpGetStore(...names) { return this._r ? this._r.getStore(...names) : this._wpGetStoreLegacy(...names); }
+    _wpGetStoreLegacy(...names) {
+        for (const n of names) { try { const s = BdApi.Webpack.getStore(n); if (s) return s; } catch (_) {} }
+        return this._wpGetStoreByHeuristic(names[0]);
+    }
+    _wpGetStoreByHeuristic(h) {
+        if (!h) return null;
+        const ck = 'store:' + h;
+        if (this._storeResolveCache?.[ck]) return this._storeResolveCache[ck];
+        try {
+            const stores = this._wpGetModule(m => m && typeof m === 'object' && typeof m.addChangeListener === 'function' && typeof m.getState === 'function');
+            if (!stores) return null;
+            const all = Array.isArray(stores) ? stores : [stores];
+            const t = h.replace(/store$/i, '').toLowerCase();
+            for (const mod of all) {
+                const n = (mod.getName?.() || mod.constructor?.displayName || mod.constructor?.name || '').toLowerCase();
+                if (n.includes(t)) { if (!this._storeResolveCache) this._storeResolveCache = {}; return this._storeResolveCache[ck] = mod; }
+            }
+            for (const mod of all) {
+                try {
+                    const state = mod.getState();
+                    if (state && typeof state === 'object')
+                        for (const key of Object.keys(state))
+                            if (key.toLowerCase().includes(t.replace(/^./, c => c.toLowerCase()))) { if (!this._storeResolveCache) this._storeResolveCache = {}; return this._storeResolveCache[ck] = mod; }
+                } catch (_) {}
+            }
+        } catch (_) {}
+        return null;
+    }
+    _wpGetModule(f, o) { return this._r ? this._r.get(f, o) : (() => { try { return BdApi.Webpack.getModule(f, o); } catch (_) { return null; } })(); }
+    _wpGetBySource(s, o) { return this._r ? this._r.getBySource(s, o) : (() => { try { return BdApi.Webpack.getBySource(s, o); } catch (_) { return null; } })(); }
+    _wpGetModuleWithKey(f) { return this._r ? this._r.getWithKey(f) : (() => { try { return BdApi.Webpack.getModuleWithKey(f); } catch (_) { return null; } })(); }
+    _wpGetModuleByKeys(...keys) { return this._r ? this._r.findByKeys(...keys) : this._wpGetModuleByKeysLegacy(...keys); }
+    _wpGetModuleByKeysLegacy(...keys) {
+        for (const key of keys) { try { const mod = BdApi.Webpack.getByKeys(key); if (mod) return mod; } catch (_) {} }
+        try { const mod = BdApi.Webpack.getModule(m => m && typeof m === 'object' && keys.every(k => k in m)); if (mod) return mod; } catch (_) {}
+        try { return BdApi.Webpack.getByKeys(...keys); } catch (_) { return null; }
+    }
+    _wpGetModuleBySourceAny(...sources) { return this._r ? this._r.getBySourceAny(...sources) : (() => { for (const s of sources) { try { const m = BdApi.Webpack.getBySource(s); if (m) return m; } catch (_) {} } return null; })(); }
     _wpFindFnKey(mod, ...needles) {
         if (!mod || typeof mod !== "object") return null;
         try {
@@ -245,64 +309,38 @@ module.exports = class ByeBlocked {
         }
         return null;
     }
-    _wpPatchRenderBySourceHeuristic(shouldSuppress, matchingStrings, label) {
+    _wpPatchRenderBySourceHeuristic(shouldSuppress, matchingStrings) {
         const self = this;
-        const patched = this._wpPatchRenderByHeuristic(m => {
-            if (typeof m !== "function") return false;
-            try {
-                const src = Function.prototype.toString.call(m);
-                return matchingStrings.some(s => src.includes(s));
-            } catch (_) { return false; }
-        }, shouldSuppress, label);
-        if (!patched) {
-            try {
-                const alt = this._wpGetModuleWithKey(m => {
-                    if (typeof m !== "function") return false;
-                    try {
-                        const src = m.toString();
-                        return matchingStrings.some(s => src.includes(s));
-                    } catch (_) { return false; }
-                });
-                if (alt?.[0] && alt[1]) {
-                    const [mod, key] = alt;
-                    self.patches.push(BdApi.Patcher.instead(self.pluginName, mod, key, function(ctx, args, orig) {
-                        try {
-                            const props = args?.[0] || ctx?.props;
-                            if (shouldSuppress(props, ctx, args)) return null;
-                        } catch (_) {}
-                        return orig.apply(ctx, args);
-                    }));
-                    return true;
-                }
-            } catch (_) {}
-        }
-        return patched;
-    }
-    _wpPatchRenderByHeuristic(moduleFilter, shouldSuppress, label) {
-        const self = this;
-        const patched = [];
-        const tryPatch = (target, method, getProps) => {
-            if (!target?.[method] || typeof target[method] !== "function") return false;
-            self.patches.push(BdApi.Patcher.instead(self.pluginName, target, method, function(ctx, args, orig) {
+        const doPatch = (mod, key, getProps) => {
+            if (!mod?.[key] || typeof mod[key] !== "function") return false;
+            self.patchInstead(mod, key, function(ctx, args, orig) {
                 try {
                     const props = getProps ? getProps(ctx, args) : args?.[0] || ctx?.props;
                     if (shouldSuppress(props, ctx, args)) return null;
                 } catch (_) {}
                 return orig.apply(ctx, args);
-            }));
-            patched.push(method);
+            });
             return true;
         };
+        const srcFilter = m => {
+            if (typeof m !== "function") return false;
+            try {
+                const src = Function.prototype.toString.call(m);
+                return matchingStrings.some(s => src.includes(s));
+            } catch (_) { return false; }
+        };
         try {
-            const mod = this._wpGetModule(moduleFilter, {
-                searchExports: true
-            });
-            if (!mod) return false;
-            if (tryPatch(mod.prototype, "render", () => null)) {} else if (tryPatch(mod, "default", (ctx, args) => args?.[0])) {} else {
-                const found = this._wpGetModuleWithKey(m => moduleFilter(m));
-                if (found?.[0] && found[1]) tryPatch(found[0], found[1], (ctx, args) => args?.[0]);
+            const mod = this._wpGetModule(srcFilter, { searchExports: true });
+            if (mod) {
+                if (doPatch(mod.prototype, "render", () => null)) return true;
+                if (doPatch(mod, "default", (ctx, args) => args?.[0])) return true;
             }
-            if (patched.length) return true;
+        } catch (_) {}
+        try {
+            const found = this._wpGetModuleWithKey(srcFilter);
+            if (found?.[0] && found[1]) {
+                return doPatch(found[0], found[1], (ctx, args) => args?.[0]);
+            }
         } catch (_) {}
         return false;
     }
@@ -1113,8 +1151,8 @@ module.exports = class ByeBlocked {
         }
     }
     _bootstrapBlockedUnreadSuppression() {
-        if (!this.settings.places?.messages || !this._readStateHelpers) return;
-        const helpers = this._readStateHelpers;
+        if (!this.settings.places?.messages) return;
+        const helpers = this._getReadStateHelpers();
         let changed = false;
         this._forEachKnownChannel((channelId, channel) => {
             if (!this._channelHasRawUnread(channelId)) return;
@@ -1230,7 +1268,7 @@ module.exports = class ByeBlocked {
             }
         }
         const gcs = this.modules.GuildChannelStore;
-        const helpers = this._readStateHelpers;
+        const helpers = gcs ? this._getReadStateHelpers() : null;
         if (gcs && helpers) {
             try {
                 const groups = gcs.getChannels?.(guildId);
@@ -1264,36 +1302,21 @@ module.exports = class ByeBlocked {
         this.modules.ElectronModule = electron;
         const self = this;
         const badgeBefore = (_, args) => self._filterBadgeArgs(args);
-        BdApi.Patcher.before(this.pluginName, electron, "setBadge", badgeBefore);
-        this.patches.push(() => {
-            try {
-                BdApi.Patcher.unpatch(this.pluginName, electron, "setBadge");
-            } catch (_) {}
-        });
+        this._patcher.before(electron, "setBadge", badgeBefore);
         try {
             const nativeApp = typeof DiscordNative !== "undefined" ? DiscordNative?.app : null;
             if (nativeApp?.setBadgeCount) {
-                BdApi.Patcher.before(this.pluginName, nativeApp, "setBadgeCount", badgeBefore);
-                this.patches.push(() => {
-                    try {
-                        BdApi.Patcher.unpatch(this.pluginName, nativeApp, "setBadgeCount");
-                    } catch (_) {}
-                });
+                this._patcher.before(nativeApp, "setBadgeCount", badgeBefore);
             }
         } catch (_) {}
         try {
             const altElectron = this._wpGetModuleByKeys("setSystemTrayApplications", "setBadge");
             if (altElectron?.setBadge && altElectron !== electron) {
-                BdApi.Patcher.before(this.pluginName, altElectron, "setBadge", badgeBefore);
-                this.patches.push(() => {
-                    try {
-                        BdApi.Patcher.unpatch(this.pluginName, altElectron, "setBadge");
-                    } catch (_) {}
-                });
+                this._patcher.before(altElectron, "setBadge", badgeBefore);
             }
         } catch (_) {}
         if (typeof electron.setSystemTrayIcon === "function") {
-            BdApi.Patcher.before(this.pluginName, electron, "setSystemTrayIcon", (_, args) => {
+            this._patcher.before(electron, "setSystemTrayIcon", (_, args) => {
                 if (!self._taskbarBadgeEnabled()) return;
                 if (!self._readStatePatched) {
                     if (args[0] === "UNREAD") args[0] = "DEFAULT";
@@ -1302,11 +1325,6 @@ module.exports = class ByeBlocked {
                 if (args[0] !== "UNREAD") return;
                 const count = self._recomputeTaskbarBadgeCount();
                 if (!count) args[0] = "DEFAULT";
-            });
-            this.patches.push(() => {
-                try {
-                    BdApi.Patcher.unpatch(this.pluginName, electron, "setSystemTrayIcon");
-                } catch (_) {}
             });
         }
         this._taskbarElectronPatched = true;
@@ -1407,7 +1425,7 @@ module.exports = class ByeBlocked {
     _handleNavigation() {
         if (!this.isRunning) return;
         this._cancelAllNavTimers();
-        this.observer?.disconnect();
+        this._observerFramePending = false;
         this._injectGuildSwitchGuard();
         if (this.settings.places.events) {
             try {
@@ -1525,6 +1543,9 @@ module.exports = class ByeBlocked {
         this._observerFramePending = false;
         this.observer = new MutationObserver(mutations => {
             if (!this._isRelevantMutation(mutations)) return;
+            if (this.isRunning && this.settings?.places?.voiceChannels) {
+                try { this._fastHideChannelStatusFromMutations(mutations); } catch (_) {}
+            }
             if (this.isRunning && this.settings.places?.reactions) {
                 try { this._fastHideReactionsFromMutations(mutations); } catch (_) {}
             }
@@ -1551,7 +1572,8 @@ module.exports = class ByeBlocked {
         const voiceTimerRule = this.settings.places.voiceChannels ? `\n            [data-list-item-id*="channels"] [class*="timer"],\n            [data-list-item-id*="channels"] [class*="voiceTimer"],\n            [data-list-item-id*="channels"] [role="timer"],\n            [data-list-item-id*="channels"] [class*="tabularNumbers"],\n            [class*="voiceChannel"] [class*="timer"],\n            [class*="voiceChannel"] [class*="voiceTimer"],\n            [class*="voiceChannel"] [role="timer"],\n            [class*="voiceChannel"] [class*="tabularNumbers"] {\n                visibility: hidden !important;\n            }\n        ` : "";
         const stageIconGuardRule = this.settings.places.voiceChannels ? `\n            [data-list-item-id*="channels"] [class*="iconLive"],\n            [class*="voiceChannel"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n            }\n        ` : "";
         const eventsGuardRule = this.settings.places.events ? `\n            li:has([data-list-item-id^="channels___upcoming-events-"]) {\n                visibility: hidden !important;\n            }\n        ` : "";
-        style.textContent = `\n            [class*="messageGroupBlocked"],\n            [class*="blockedSystemMessage"],\n            li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),\n            li[class*="messageListItem"]:has([class*="blockedSystemMessage"]) {\n                display: none !important;\n                height: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${voiceTimerRule}\n            ${stageIconGuardRule}\n            ${eventsGuardRule}\n        `;
+        const channelStatusGuardRule = "";
+        style.textContent = `\n            [class*="messageGroupBlocked"],\n            [class*="blockedSystemMessage"],\n            li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),\n            li[class*="messageListItem"]:has([class*="blockedSystemMessage"]) {\n                display: none !important;\n                height: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${voiceTimerRule}\n            ${stageIconGuardRule}\n            ${eventsGuardRule}\n            ${channelStatusGuardRule}\n        `;
         document.head.appendChild(style);
     }
     _removeGuildSwitchGuard() {
@@ -1572,16 +1594,6 @@ module.exports = class ByeBlocked {
                 self._handleNavigation();
             };
             this._historyPatchActive = true;
-this.patches.push(() => {
-                if (this._historyPatchActive) {
-                    history.pushState = this._origPushState;
-                    history.replaceState = this._origReplaceState;
-                    this._historyPatchActive = false;
-                    this._origPushState = null;
-                    this._origReplaceState = null;
-                    this._storeResolveCache = {};
-                }
-            });
         } catch (_) {}
     }
     start(_retryAttempt = 0) {
@@ -1589,7 +1601,7 @@ this.patches.push(() => {
         this.isRunning = true;
         window.__byeBlocked = this;
         this._injectGuildSwitchGuard();
-        this._safePatch("resolveModules", () => this.resolveModules());
+        this._patcher.safe('resolveModules', () => this.resolveModules());
         if (!this.modules.RelationshipStore?.isBlocked) {
             const maxAttempts = 12;
             if (_retryAttempt < maxAttempts) {
@@ -1600,32 +1612,33 @@ this.patches.push(() => {
                 return;
             }
             this.isRunning = false;
-            this.toast("ByeBlocked: nÃ£o foi possÃ­vel localizar o RelationshipStore do Discord apÃ³s vÃ¡rias tentativas. O Discord provavelmente mudou algo â€” verifique se hÃ¡ uma atualizaÃ§Ã£o do plugin.", "error");
+            this.toast('ByeBlocked: nao foi possivel localizar o RelationshipStore do Discord apos varias tentativas. O Discord provavelmente mudou algo - verifique se ha uma atualizacao do plugin.', 'error');
             return;
         }
         clearTimeout(this._moduleRetryTimeout);
-        this._safePatch("patchReadState", () => this.patchReadState());
-        this._safePatch("scheduleReadStateReloadRechecks", () => this._scheduleReadStateReloadRechecks());
-        this._safePatch("addStyles", () => this.addStyles());
-        this._safePatch("patchStores", () => this.patchStores());
-        this._safePatch("patchChannelPinsStore", () => this.patchChannelPinsStore());
-        this._safePatch("patchPinFlux", () => this.patchPinFlux());
-        this._safePatch("patchPrivateChannelStore", () => this.patchPrivateChannelStore());
-        this._safePatch("patchGuildScheduledEventStore", () => this.patchGuildScheduledEventStore());
-        this._safePatch("patchEventsSidebarUnread", () => this.patchEventsSidebarUnread());
-        this._safePatch("patchGuildMemberStore", () => this.patchGuildMemberStore());
-        this._safePatch("patchActivePostsPopoverComponent", () => this.patchActivePostsPopoverComponent());
-        this._safePatch("patchReactions", () => this.patchReactions());
-        this._safePatch("patchRelationshipUpdates", () => this.patchRelationshipUpdates());
-        this._safePatch("patchBlockedMessageGroup", () => this.patchBlockedMessageGroup());
-        this._safePatch("patchMessagesWrapComponent", () => this.patchMessagesWrapComponent());
-        this._safePatch("patchForumPostComponent", () => this.patchForumPostComponent());
-        this._safePatch("patchCallGridParticipants", () => this.patchCallGridParticipants());
-        this._safePatch("patchMessageStore", () => this.patchMessageStore());
-        this._safePatch("restartObserver", () => this._restartObserver());
-        this._safePatch("startReactionClickWatcher", () => this._startReactionClickWatcher());
-        this._safePatch("startChannelSwitchWatcher", () => this._startChannelSwitchWatcher());
-        this._safePatch("seedVoiceChannelMembers", () => this._seedVoiceChannelMembers());
+        const p = this._patcher;
+        p.safe('patchReadState', () => this.patchReadState());
+        p.safe('scheduleReadStateReloadRechecks', () => this._scheduleReadStateReloadRechecks());
+        p.safe('addStyles', () => this.addStyles());
+        p.safe('patchStores', () => this.patchStores());
+        p.safe('patchChannelPinsStore', () => this.patchChannelPinsStore());
+        p.safe('patchPinFlux', () => this.patchPinFlux());
+        p.safe('patchPrivateChannelStore', () => this.patchPrivateChannelStore());
+        p.safe('patchGuildScheduledEventStore', () => this.patchGuildScheduledEventStore());
+        p.safe('patchEventsSidebarUnread', () => this.patchEventsSidebarUnread());
+        p.safe('patchGuildMemberStore', () => this.patchGuildMemberStore());
+        p.safe('patchActivePostsPopoverComponent', () => this.patchActivePostsPopoverComponent());
+        p.safe('patchReactions', () => this.patchReactions());
+        p.safe('patchRelationshipUpdates', () => this.patchRelationshipUpdates());
+        p.safe('patchBlockedMessageGroup', () => this.patchBlockedMessageGroup());
+        p.safe('patchMessagesWrapComponent', () => this.patchMessagesWrapComponent());
+        p.safe('patchForumPostComponent', () => this.patchForumPostComponent());
+        p.safe('patchCallGridParticipants', () => this.patchCallGridParticipants());
+        p.safe('patchMessageStore', () => this.patchMessageStore());
+        p.safe('restartObserver', () => this._restartObserver());
+        p.safe('startReactionClickWatcher', () => this._startReactionClickWatcher());
+        p.safe('startChannelSwitchWatcher', () => this._startChannelSwitchWatcher());
+        p.safe('seedVoiceChannelMembers', () => this._seedVoiceChannelMembers());
         this.scanInterval = setInterval(() => this.queueScan(), 4e3);
         this.queueRefresh();
         this._waitForChatReady(0);
@@ -1641,21 +1654,19 @@ this.patches.push(() => {
             this._periodicCheckInterval = setInterval(() => this.checkForUpdatesAuto(), 72e5);
         }
         setTimeout(() => {
-            this._safePatch("patchInviteSuggestions", () => this.patchInviteSuggestions());
-            this._safePatch("patchMentionAutocomplete", () => this.patchMentionAutocomplete());
-            this._safePatch("patchGuildMembersPageRow", () => this.patchGuildMembersPageRow());
-            this._safePatch("patchMemberListRow", () => this.patchMemberListRow());
-            this._safePatch("patchSoundboardEffects", () => this.patchSoundboardEffects());
-            if (this.settings.behavior.muteVoiceJoinLeaveSound || this.settings.behavior.muteBlockedVoiceAudio) {
-                this._safePatch("patchSound", () => this.patchSound());
-            }
-            if (this.settings.behavior.muteBlockedVoiceAudio) {
-                this._safePatch("patchVoiceMute", () => this.patchVoiceMute());
-            }
+            p.safe('patchInviteSuggestions', () => this.patchInviteSuggestions());
+            p.safe('patchMentionAutocomplete', () => this.patchMentionAutocomplete());
+            p.safe('patchGuildMembersPageRow', () => this.patchGuildMembersPageRow());
+            p.safe('patchMemberListRow', () => this.patchMemberListRow());
+            p.safe('patchSoundboardEffects', () => this.patchSoundboardEffects());
+            if (this.settings.behavior.muteVoiceJoinLeaveSound || this.settings.behavior.muteBlockedVoiceAudio)
+                p.safe('patchSound', () => this.patchSound());
+            if (this.settings.behavior.muteBlockedVoiceAudio)
+                p.safe('patchVoiceMute', () => this.patchVoiceMute());
         }, 2e3);
         setTimeout(() => {
-            this._safePatch("patchStageRenderComponent", () => this.patchStageRenderComponent());
-            this._safePatch("patchActivityPanelComponent", () => this.patchActivityPanelComponent());
+            p.safe('patchStageRenderComponent', () => this.patchStageRenderComponent());
+            p.safe('patchActivityPanelComponent', () => this.patchActivityPanelComponent());
         }, 3e3);
         this._patchHistoryApi();
         this._roleSettingsClickHandler = event => {
@@ -1734,6 +1745,12 @@ this.patches.push(() => {
         }
         this._menuPortalObserver?.disconnect();
         this._menuPortalObserver = null;
+        if (this._statusModalClickHandler) {
+            document.removeEventListener("click", this._statusModalClickHandler, true);
+            this._statusModalClickHandler = null;
+        }
+        this._statusModalObserver?.disconnect();
+        this._statusModalObserver = null;
         clearInterval(this.scanInterval);
         clearTimeout(this.scanTimeout);
         clearTimeout(this.refreshTimeout);
@@ -1748,6 +1765,7 @@ this.patches.push(() => {
         this._voiceFakeTimers.clear();
         this._voiceChannelMemberIds.clear();
         this._blockedChannelStatuses?.clear();
+        this._channelStatusAuthors?.clear();
         try {
             this._releaseAllVoiceMutes();
         } catch (_) {}
@@ -1782,14 +1800,7 @@ this.patches.push(() => {
         this._channelSwitchChangeHandler = null;
         this._lastWatchedChannelId = null;
         this._forumRetryScheduled = false;
-        for (const unpatch of this.patches.splice(0)) {
-            try {
-                unpatch();
-            } catch (_) {}
-        }
-        try {
-            BdApi.Patcher.unpatchAll(this.pluginName);
-        } catch (_) {}
+        this._patcher?.cleanup();
         this.restoreAllElements();
         this.removeStyles();
         this._removeNotice();
@@ -1806,29 +1817,24 @@ this.patches.push(() => {
             this._historyPatchActive = false;
         }
         if (this._routerUnsubscribe) {
-            try {
-                this._routerUnsubscribe();
-            } catch (_) {}
+            try { this._routerUnsubscribe(); } catch (_) {}
             this._routerUnsubscribe = null;
         }
-        this._storePatched = false;
-        this._readStatePatched = false;
-        this._taskbarBadgePatched = false;
-        this._taskbarElectronPatched = false;
-        this._notificationDispatcherPatched = false;
+        for (const flag of ['store','readState','taskbarBadge','taskbarElectron','notificationDispatcher',
+            'forumPostComponent','messagesWrap','inviteSuggestions','privateChannelStore',
+            'mentionAutocomplete','activePostsPopover','channelPinsStore','pinFlux',
+            'soundboard','guildMembersPage','guildMemberStore','eventsSidebarUnread',
+            'memberListRow','stageRenderComponent','activityPanelComponent','callGrid',
+            'blockedMsgGroup','voiceMute','guildScheduledEventStore','reactions']) {
+            this['_' + flag + 'Patched'] = false;
+        }
         if (this._blockedOnlyReadChannels) this._blockedOnlyReadChannels.clear();
-        this._forumPostComponentPatched = false;
-        this._messagesWrapPatched = false;
         this._rawGetMessages = null;
         this.modules.ElectronModule = null;
         this._oldUnblockedConnectedUsers = [];
         this._soundPlayKey = null;
         this._lastStreamerId = null;
         this._lastActivityParticipantIds = new Set;
-        this._inviteSuggestionsPatched = false;
-        this._privateChannelStorePatched = false;
-        this._mentionAutocompletePatched = false;
-        this._activePostsPopoverPatched = false;
         this._guildMembersPagePatched = false;
         this._guildMemberStorePatched = false;
         this._eventsSidebarUnreadPatched = false;
@@ -1997,15 +2003,15 @@ this.patches.push(() => {
     }
     _registerModuleRefresh() {
         try {
-            BdApi.Patcher.after(this.pluginName, this, "resolveModules", () => {
+            this._patcher.after(this, "resolveModules", () => {
                 this._resolveDispatcher();
                 this._resolveMessagesGet();
                 this._resolveSoundUtils();
                 if (!this._guildScheduledEventStorePatched) {
-                    this._safePatch("patchGuildScheduledEventStore", () => this.patchGuildScheduledEventStore());
+                    this._patcher.safe("patchGuildScheduledEventStore", () => this.patchGuildScheduledEventStore());
                 }
                 if (!this._eventsSidebarUnreadPatched) {
-                    this._safePatch("patchEventsSidebarUnread", () => this.patchEventsSidebarUnread());
+                    this._patcher.safe("patchEventsSidebarUnread", () => this.patchEventsSidebarUnread());
                 }
             });
         } catch (_) {}
@@ -2339,7 +2345,7 @@ this.patches.push(() => {
             return;
         }
         const self = this;
-        this.patches.push(BdApi.Patcher.after(this.pluginName, mod, key, function(_, args, result) {
+        this.patchAfter(mod, key, function(_, args, result) {
             if (!self.settings.places.autocomplete) return result;
             if (!result) return result;
             const filterUser = u => {
@@ -2350,7 +2356,7 @@ this.patches.push(() => {
             if (Array.isArray(result?.results)) result.results = result.results.filter(filterUser);
             if (Array.isArray(result?.users)) result.users = result.users.filter(filterUser);
             return result;
-        }));
+        });
         this._mentionAutocompletePatched = true;
     }
     patchActivePostsPopoverComponent() {
@@ -2367,7 +2373,7 @@ this.patches.push(() => {
                 if (oid && self.shouldHide(oid)) return true;
             }
 return false;
-            }, ["row__", "thread", "active"], "Active posts popover row");
+            }, ["row__", "thread", "active"]);
         if (patched) this._activePostsPopoverPatched = true;
     }
     patchGuildMembersPageRow(attempt = 0) {
@@ -2376,7 +2382,7 @@ return false;
         const patched = this._wpPatchRenderBySourceHeuristic(props => {
             const userId = self.extractUserId(props);
             return !!(userId && self.shouldHide(userId));
-        }, ["memberRow", "guildMember", "joinedAt", "userId"], "Guild members page row");
+        }, ["memberRow", "guildMember", "joinedAt", "userId"]);
         if (patched) {
             this._guildMembersPagePatched = true;
         } else if (attempt < 10) {
@@ -2389,7 +2395,7 @@ return false;
         const patched = this._wpPatchRenderBySourceHeuristic(props => {
             const userId = props?.user?.id || self.extractUserId(props);
             return !!(userId && self.shouldHide(userId));
-        }, ["nameplate", "hideClanTag", "colorRoleName", "shouldAnimateStatus"], "Member list row (sidebar)");
+        }, ["nameplate", "hideClanTag", "colorRoleName", "shouldAnimateStatus"]);
         if (patched) {
             this._memberListRowPatched = true;
         } else if (attempt < 10) {
@@ -2535,7 +2541,7 @@ return false;
                 const src = proto.render.toString();
                 if (!src.includes("speaker") && !src.includes("listener") && !src.includes("participant")) continue;
                 if (!src.includes("user") && !src.includes("userId")) continue;
-                self.patches.push(BdApi.Patcher.instead(self.pluginName, proto, "render", function(ctx, args, orig) {
+                self.patchInstead(proto, "render", function(ctx, args, orig) {
                     try {
                         const props = args?.[0] || ctx?.props;
                         if (!props) return orig.apply(ctx, args);
@@ -2543,7 +2549,7 @@ return false;
                         if (uid && self.settings.places.voiceChannels && self.shouldHide(uid)) return null;
                     } catch (_) {}
                     return orig.apply(ctx, args);
-                }));
+                });
                 return true;
             }
             return false;
@@ -2575,7 +2581,7 @@ return false;
             const val = m[k];
             const proto = typeof val === "function" ? val.prototype : val;
             if (proto?.render) {
-                self.patches.push(BdApi.Patcher.instead(self.pluginName, proto, "render", function(ctx, args, orig) {
+                self.patchInstead(proto, "render", function(ctx, args, orig) {
                     try {
                         const props = args?.[0] || ctx?.props;
                         if (props?.user?.id && self.settings.places.voiceChannels && self.shouldHide(props.user.id)) return null;
@@ -2583,7 +2589,7 @@ return false;
                         if (uid && self.settings.places.voiceChannels && self.shouldHide(uid)) return null;
                     } catch (_) {}
                     return orig.apply(ctx, args);
-                }));
+                });
                 this._stageRenderComponentPatched = true;
             }
         }
@@ -2602,7 +2608,7 @@ return false;
             });
         }, { searchExports: true });
         if (mod?.prototype?.render) {
-            this.patches.push(BdApi.Patcher.instead(this.pluginName, mod.prototype, "render", function(ctx, args, orig) {
+            this.patchInstead(mod.prototype, "render", function(ctx, args, orig) {
                 try {
                     const props = args?.[0] || ctx?.props;
                     if (!props) return orig.apply(ctx, args);
@@ -2617,7 +2623,7 @@ return false;
                     }
                 } catch (_) {}
                 return orig.apply(ctx, args);
-            }));
+            });
             this._activityPanelComponentPatched = true;
             return;
         }
@@ -2636,7 +2642,7 @@ return false;
             const val = m[k];
             const proto = typeof val === "function" ? val.prototype : val;
             if (proto?.render) {
-                self.patches.push(BdApi.Patcher.instead(self.pluginName, proto, "render", function(ctx, args, orig) {
+                this.patchInstead(proto, "render", function(ctx, args, orig) {
                     try {
                         const props = args?.[0] || ctx?.props;
                         if (props?.users && Array.isArray(props.users) && self.settings.places.voiceChannels) {
@@ -2644,7 +2650,7 @@ return false;
                         }
                     } catch (_) {}
                     return orig.apply(ctx, args);
-                }));
+                });
                 this._activityPanelComponentPatched = true;
             }
         }
@@ -2711,16 +2717,16 @@ return false;
                 searchExports: true
             });
             if (CardModule?.prototype?.render && looksLikeForumCardFn(CardModule.prototype.render)) {
-                this.patches.push(BdApi.Patcher.instead(this.pluginName, CardModule.prototype, "render", function(context, args, original) {
+                this.patchInstead(CardModule.prototype, "render", function(context, args, original) {
                     const result = beforeRender(context, [ context.props ]);
                     return result === null ? null : original.apply(context, args);
-                }));
+                });
                 patchedAny = true;
             } else if (CardModule?.default && looksLikeForumCardFn(CardModule.default)) {
-                this.patches.push(BdApi.Patcher.instead(this.pluginName, CardModule, "default", function(context, args, original) {
+                this.patchInstead(CardModule, "default", function(context, args, original) {
                     const result = beforeRender(context, args);
                     return result === null ? null : original.apply(context, args);
-                }));
+                });
                 patchedAny = true;
             }
         } catch (_) {}
@@ -2734,10 +2740,10 @@ return false;
                 });
                 if (result) {
                     const [moduleObj, key] = result;
-                    this.patches.push(BdApi.Patcher.instead(this.pluginName, moduleObj, key, function(context, args, original) {
+                    this.patchInstead(moduleObj, key, function(context, args, original) {
                         const result = beforeRender(context, args);
                         return result === null ? null : original.apply(context, args);
-                    }));
+                    });
                     patchedAny = true;
                 }
             } catch (_) {}
@@ -2750,9 +2756,7 @@ return false;
         try {
             const BlockedMessageGroup = BdApi.Webpack.getModule(m => m?.displayName === "BlockedMessageGroup" || m?.name === "BlockedMessageGroup" || m?.prototype?.render?.toString?.().includes("MESSAGE_GROUP_BLOCKED") || typeof m === "function" && m.toString && m.toString().includes("messageGroupSpacing"));
             if (BlockedMessageGroup?.prototype?.render) {
-                this.patches.push(BdApi.Patcher.instead(this.pluginName, BlockedMessageGroup.prototype, "render", () => {
-                    return null;
-                }));
+                this.patchInstead(BlockedMessageGroup.prototype, "render", () => null);
                 return;
             }
         } catch (_) {}
@@ -2769,9 +2773,7 @@ return false;
             });
             if (result) {
                 const [moduleObj, key] = result;
-                this.patches.push(BdApi.Patcher.instead(this.pluginName, moduleObj, key, () => {
-                    return null;
-                }));
+                this.patchInstead(moduleObj, key, () => null);
                 return;
             }
         } catch (_) {}
@@ -2786,9 +2788,7 @@ return false;
                     try {
                         const src = Function.prototype.toString.call(val);
                         if (BLOCKED_STRINGS.some(s => src.includes(s))) {
-                            this.patches.push(BdApi.Patcher.instead(this.pluginName, m, key, () => {
-                                return null;
-                            }));
+                            this.patchInstead(m, key, () => null);
                             patched = true;
                         }
                     } catch (_) {}
@@ -2851,7 +2851,7 @@ return false;
         try {
             const MessagesWrap = BdApi.Webpack.getModule(m => m?.displayName === "MessagesWrap" || m?.name === "MessagesWrap" || m?.prototype?.render?.toString?.().includes("MessagesWrap"));
             if (MessagesWrap?.prototype?.render) {
-                this.patches.push(BdApi.Patcher.before(this.pluginName, MessagesWrap.prototype, "render", context => applyFilterToProps(context?.props)));
+                this.patchBefore(MessagesWrap.prototype, "render", context => applyFilterToProps(context?.props));
                 this._messagesWrapPatched = true;
                 return;
             }
@@ -2927,7 +2927,7 @@ return false;
             if (!info) return false;
             try {
                 if (info.prop) {
-                    BdApi.Patcher.before(self.pluginName, info.holder, info.prop, (_, args) => self._filterCallGridProps(args?.[0]));
+                    self._patcher.before(info.holder, info.prop, (_, args) => self._filterCallGridProps(args?.[0]));
                 } else {
                     return false;
                 }
@@ -2955,7 +2955,7 @@ return false;
                             break;
                         }
                     } else {
-                        BdApi.Patcher.before(self.pluginName, raw, key, (_, args) => self._filterCallGridProps(args?.[0]));
+                        self._patcher.before(raw, key, (_, args) => self._filterCallGridProps(args?.[0]));
                         patchedAny = true;
                         break;
                     }
@@ -2973,7 +2973,7 @@ return false;
                     if (info && info.prop) {
                         patchedAny = patchHolder(info);
                     } else if (info) {
-                        BdApi.Patcher.before(self.pluginName, moduleObj, key, (_, args) => self._filterCallGridProps(args?.[0]));
+                        self._patcher.before(moduleObj, key, (_, args) => self._filterCallGridProps(args?.[0]));
                         patchedAny = true;
                     }
                 }
@@ -3021,7 +3021,7 @@ return false;
         const Dispatcher = this.modules.Dispatcher;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") return;
         const self = this;
-        this.patches.push(BdApi.Patcher.before(this.pluginName, Dispatcher, "dispatch", function(_, args) {
+        this.patchBefore(Dispatcher, "dispatch", function(_, args) {
             if (!self.settings.places?.messages) return;
             const action = args?.[0];
             if (!action || typeof action !== "object") return;
@@ -3044,217 +3044,136 @@ return false;
                 self._forceReadStateRecheck(true);
                 self.queueScan();
             }
-        }));
+        });
         this._pinFluxPatched = true;
+    }
+    _getChannelMessages(channelId) {
+        try {
+            const raw = this._rawGetMessages;
+            const ret = raw ? raw(channelId) : this.modules.MessageStore?.getMessages?.(channelId);
+            if (Array.isArray(ret)) return ret;
+            if (Array.isArray(ret?._array)) return ret._array;
+            if (ret instanceof Map) return Array.from(ret.values());
+            if (ret && typeof ret === 'object') return Object.values(ret);
+        } catch (_) {}
+        return [];
+    }
+    _getAuthorId(msg) { return msg?.author?.id || msg?.authorId || msg?.user?.id; }
+    _isBlockedMessage(msg) {
+        if (!msg) return false;
+        if (msg.blocked === true) return true;
+        const authorId = this._getAuthorId(msg);
+        return !!(authorId && this.shouldHide(authorId));
+    }
+    _flattenThreadEntries(list) {
+        if (!list) return [];
+        if (Array.isArray(list)) return list;
+        return Object.values(list).flatMap(v => Array.isArray(v) ? v : [v]);
+    }
+    _getThreadOwnerId(threadOrId) {
+        if (!threadOrId) return null;
+        if (typeof threadOrId === 'object') {
+            const direct = threadOrId.ownerId || threadOrId.owner_id || threadOrId.thread?.ownerId || threadOrId.thread?.owner_id || threadOrId.channel?.ownerId || threadOrId.channel?.owner_id;
+            if (direct) return direct;
+            threadOrId = threadOrId.id || threadOrId.channel?.id;
+        }
+        if (!threadOrId) return null;
+        try {
+            const ch = this.modules.ChannelStore?.getChannel?.(threadOrId);
+            return ch?.ownerId || ch?.owner_id || null;
+        } catch (_) { return null; }
+    }
+    _isForumParentChannel(channelId) {
+        try { return this.modules.ChannelStore?.getChannel?.(channelId)?.type === 15; } catch (_) { return false; }
+    }
+    _collectThreadsForParent(channelId, guildId) {
+        const seen = new Map;
+        const add = thread => { if (!thread) return; const id = thread?.id || thread?.channel?.id; if (id && !seen.has(id)) seen.set(id, thread); };
+        try { const fn = this.modules.ChannelStore?.getAllThreadsForParent; if (typeof fn === 'function') { const t = fn.call(this.modules.ChannelStore, channelId); if (Array.isArray(t)) t.forEach(add); } } catch (_) {}
+        try { const ts = this.modules.ThreadStore; if (typeof ts?.getThreadsForParent === 'function') { const a = guildId ? [guildId, channelId] : [channelId]; const r = ts.getThreadsForParent(...a); if (Array.isArray(r)) r.forEach(add); else if (r && typeof r === 'object') Object.values(r).forEach(add); } } catch (_) {}
+        try { const ajs = this.modules.ActiveJoinedThreadsStore; if (ajs) { const a = guildId ? [guildId, channelId] : [channelId]; this._flattenThreadEntries(ajs.getActiveJoinedThreadsForParent?.(...a)).forEach(add); this._flattenThreadEntries(ajs.getActiveUnjoinedThreadsForParent?.(...a)).forEach(add); } } catch (_) {}
+        return Array.from(seen.values());
+    }
+    _resolveForumActivityOwnerId(parentChannelId, activityId) {
+        if (!activityId) return null;
+        let ownerId = this._getThreadOwnerId(activityId);
+        if (ownerId) return ownerId;
+        const parent = this.modules.ChannelStore?.getChannel?.(parentChannelId);
+        const guildId = parent?.guild_id;
+        const threads = this._collectThreadsForParent(parentChannelId, guildId);
+        for (const thread of threads) {
+            const tId = thread?.id || thread?.channel?.id;
+            const lmId = thread?.lastMessageId || thread?.channel?.lastMessageId;
+            if (tId !== activityId && lmId !== activityId) continue;
+            ownerId = this._getThreadOwnerId(thread);
+            if (ownerId) return ownerId;
+        }
+        try { const gm = this.modules.MessageStore?.getMessage; if (typeof gm === 'function') { for (const thread of threads) { const tId = thread?.id || thread?.channel?.id; if (!tId) continue; const msg = gm(tId, activityId); if (msg) return this._getAuthorId(msg); } const pm = gm(parentChannelId, activityId); if (pm) return this._getAuthorId(pm); } } catch (_) {}
+        try { const msg = this._getChannelMessages(parentChannelId).find(m => m?.id === activityId); if (msg) return this._getAuthorId(msg); } catch (_) {}
+        for (const thread of threads) { const tId = thread?.id || thread?.channel?.id; if (!tId) continue; try { const msg = this._getChannelMessages(tId).find(m => m?.id === activityId); if (msg) return this._getAuthorId(msg); } catch (_) {} }
+        if (guildId && this.modules.GuildChannelStore?.getChannels) {
+            try { const groups = this.modules.GuildChannelStore.getChannels(guildId); const entries = groups ? Object.values(groups).flat() : []; for (const entry of entries) { const ch = entry?.channel || entry; if (!ch?.id || ch.parent_id !== parentChannelId) continue; if (ch.id !== activityId && ch.lastMessageId !== activityId) continue; ownerId = ch.ownerId || ch.owner_id; if (ownerId) return ownerId; } } catch (_) {}
+        }
+        return null;
+    }
+    _hasVisibleUnreadThreadsFromStore(channelId, guildId) {
+        const ajs = this.modules.ActiveJoinedThreadsStore;
+        if (!ajs) return null;
+        try { const a = guildId ? [guildId, channelId] : [channelId]; const vu = [...this._flattenThreadEntries(ajs.getActiveJoinedUnreadThreadsForParent?.(...a)), ...this._flattenThreadEntries(ajs.getActiveUnjoinedUnreadThreadsForParent?.(...a))]; return vu.length > 0; } catch (_) { return null; }
+    }
+    _hasVisibleForumActivity(channelId) {
+        try {
+            if (this._hasBlockedOnlyReadActivity(channelId)) return false;
+            if (!this._isForumParentChannel(channelId)) return null;
+            const rs = this.modules.ReadStateStore;
+            const ackId = rs.ackMessageId ? rs.ackMessageId(channelId) : null;
+            const lastId = rs.lastMessageId ? rs.lastMessageId(channelId) : null;
+            if (!this._snowflakeGreater(lastId, ackId)) return false;
+            const parent = this.modules.ChannelStore?.getChannel?.(channelId);
+            const guildId = parent?.guild_id;
+            const threads = this._collectThreadsForParent(channelId, guildId);
+            if (threads.length) {
+                for (const thread of threads) {
+                    const ownerId = this._getThreadOwnerId(thread);
+                    const actId = thread?.lastMessageId || thread?.channel?.lastMessageId || thread?.id;
+                    if (!this._snowflakeGreater(actId, ackId)) continue;
+                    if (!ownerId) continue;
+                    if (!this.shouldHide(ownerId)) return true;
+                }
+                const aoId = this._resolveForumActivityOwnerId(channelId, lastId);
+                if (aoId) return !this.shouldHide(aoId);
+                return false;
+            }
+            const aoId = this._resolveForumActivityOwnerId(channelId, lastId);
+            if (aoId) return !this.shouldHide(aoId);
+            const vu = this._hasVisibleUnreadThreadsFromStore(channelId, guildId);
+            if (vu === true) return true;
+            if (vu === false) return false;
+            try { if (rs.getUnreadCount?.(channelId) === 0) return false; } catch (_) {}
+            return null;
+        } catch (_) { return null; }
     }
     patchReadState() {
         this._ensureTaskbarElectronPatch();
         if (!this.modules.ReadStateStore) return;
         if (this._readStatePatched) return;
         const self = this;
-        const getChannelMessages = channelId => {
-            try {
-                const rawGetMessages = self._rawGetMessages;
-                const ret = rawGetMessages ? rawGetMessages(channelId) : self.modules.MessageStore?.getMessages?.(channelId);
-                if (Array.isArray(ret)) return ret;
-                if (Array.isArray(ret?._array)) return ret._array;
-                if (ret instanceof Map) return Array.from(ret.values());
-                if (ret && typeof ret === "object") return Object.values(ret);
-            } catch (_) {}
-            return [];
-        };
-        const getAuthorId = msg => msg?.author?.id || msg?.authorId || msg?.user?.id;
-        const isBlockedMessage = msg => {
-            if (!msg) return false;
-            if (msg.blocked === true) return true;
-            const authorId = getAuthorId(msg);
-            return !!(authorId && self.shouldHide(authorId));
-        };
         this.patchAfter(this.modules.ReadStateStore, "getUnreadCount", function(_, args, ret) {
             if (!self.settings.places?.messages) return ret;
             if (!ret || typeof ret !== "number" || ret <= 0) return ret;
             const channelId = args?.[0];
             if (!channelId) return ret;
             try {
-                const messages = getChannelMessages(channelId).slice().reverse();
+                const messages = self._getChannelMessages(channelId).slice().reverse();
                 let hiddenCount = 0;
                 for (let i = 0; i < ret && i < messages.length; i++) {
-                    if (isBlockedMessage(messages[i])) hiddenCount++; else break;
+                    if (self._isBlockedMessage(messages[i])) hiddenCount++; else break;
                 }
                 return ret - hiddenCount;
             } catch (_) {
                 return ret;
             }
         });
-        const snowflakeGreater = (a, b) => {
-            if (!a) return false;
-            if (!b) return true;
-            try {
-                return BigInt(a) > BigInt(b);
-            } catch (_) {
-                return String(a) > String(b);
-            }
-        };
-        const FORUM_CHANNEL_TYPE = 15;
-        const flattenThreadEntries = list => {
-            if (!list) return [];
-            if (Array.isArray(list)) return list;
-            return Object.values(list).flatMap(v => Array.isArray(v) ? v : [ v ]);
-        };
-        const getThreadOwnerId = threadOrId => {
-            if (!threadOrId) return null;
-            if (typeof threadOrId === "object") {
-                const direct = threadOrId.ownerId || threadOrId.owner_id || threadOrId.thread?.ownerId || threadOrId.thread?.owner_id || threadOrId.channel?.ownerId || threadOrId.channel?.owner_id;
-                if (direct) return direct;
-                threadOrId = threadOrId.id || threadOrId.channel?.id;
-            }
-            if (!threadOrId) return null;
-            try {
-                const ch = self.modules.ChannelStore?.getChannel?.(threadOrId);
-                return ch?.ownerId || ch?.owner_id || null;
-            } catch (_) {
-                return null;
-            }
-        };
-        const isForumParentChannel = channelId => {
-            try {
-                return self.modules.ChannelStore?.getChannel?.(channelId)?.type === FORUM_CHANNEL_TYPE;
-            } catch (_) {
-                return false;
-            }
-        };
-        const collectThreadsForParent = (channelId, guildId) => {
-            const seen = new Map;
-            const add = thread => {
-                if (!thread) return;
-                const id = thread?.id || thread?.channel?.id;
-                if (id && !seen.has(id)) seen.set(id, thread);
-            };
-            try {
-                const fn = self.modules.ChannelStore?.getAllThreadsForParent;
-                if (typeof fn === "function") {
-                    const threads = fn.call(self.modules.ChannelStore, channelId);
-                    if (Array.isArray(threads)) threads.forEach(add);
-                }
-            } catch (_) {}
-            try {
-                const ts = self.modules.ThreadStore;
-                if (typeof ts?.getThreadsForParent === "function") {
-                    const args = guildId ? [ guildId, channelId ] : [ channelId ];
-                    const ret = ts.getThreadsForParent(...args);
-                    if (Array.isArray(ret)) ret.forEach(add); else if (ret && typeof ret === "object") Object.values(ret).forEach(add);
-                }
-            } catch (_) {}
-            try {
-                const ajs = self.modules.ActiveJoinedThreadsStore;
-                if (ajs) {
-                    const args = guildId ? [ guildId, channelId ] : [ channelId ];
-                    flattenThreadEntries(ajs.getActiveJoinedThreadsForParent?.(...args)).forEach(add);
-                    flattenThreadEntries(ajs.getActiveUnjoinedThreadsForParent?.(...args)).forEach(add);
-                }
-            } catch (_) {}
-            return Array.from(seen.values());
-        };
-        const resolveForumActivityOwnerId = (parentChannelId, activityId) => {
-            if (!activityId) return null;
-            let ownerId = getThreadOwnerId(activityId);
-            if (ownerId) return ownerId;
-            const parent = self.modules.ChannelStore?.getChannel?.(parentChannelId);
-            const guildId = parent?.guild_id;
-            const threads = collectThreadsForParent(parentChannelId, guildId);
-            for (const thread of threads) {
-                const threadId = thread?.id || thread?.channel?.id;
-                const lastMsgId = thread?.lastMessageId || thread?.channel?.lastMessageId;
-                if (threadId !== activityId && lastMsgId !== activityId) continue;
-                ownerId = getThreadOwnerId(thread);
-                if (ownerId) return ownerId;
-            }
-            try {
-                const getMessage = self.modules.MessageStore?.getMessage;
-                if (typeof getMessage === "function") {
-                    for (const thread of threads) {
-                        const threadId = thread?.id || thread?.channel?.id;
-                        if (!threadId) continue;
-                        const msg = getMessage(threadId, activityId);
-                        if (msg) return getAuthorId(msg);
-                    }
-                    const parentMsg = getMessage(parentChannelId, activityId);
-                    if (parentMsg) return getAuthorId(parentMsg);
-                }
-            } catch (_) {}
-            try {
-                const msg = getChannelMessages(parentChannelId).find(m => m?.id === activityId);
-                if (msg) return getAuthorId(msg);
-            } catch (_) {}
-            for (const thread of threads) {
-                const threadId = thread?.id || thread?.channel?.id;
-                if (!threadId) continue;
-                try {
-                    const msg = getChannelMessages(threadId).find(m => m?.id === activityId);
-                    if (msg) return getAuthorId(msg);
-                } catch (_) {}
-            }
-            if (guildId && self.modules.GuildChannelStore?.getChannels) {
-                try {
-                    const channelGroups = self.modules.GuildChannelStore.getChannels(guildId);
-                    const allEntries = channelGroups ? Object.values(channelGroups).flat() : [];
-                    for (const entry of allEntries) {
-                        const ch = entry?.channel || entry;
-                        if (!ch?.id || ch.parent_id !== parentChannelId) continue;
-                        if (ch.id !== activityId && ch.lastMessageId !== activityId) continue;
-                        ownerId = ch.ownerId || ch.owner_id;
-                        if (ownerId) return ownerId;
-                    }
-                } catch (_) {}
-            }
-            return null;
-        };
-        const hasVisibleUnreadThreadsFromStore = (channelId, guildId) => {
-            const ajs = self.modules.ActiveJoinedThreadsStore;
-            if (!ajs) return null;
-            try {
-                const args = guildId ? [ guildId, channelId ] : [ channelId ];
-                const visibleUnread = [ ...flattenThreadEntries(ajs.getActiveJoinedUnreadThreadsForParent?.(...args)), ...flattenThreadEntries(ajs.getActiveUnjoinedUnreadThreadsForParent?.(...args)) ];
-                return visibleUnread.length > 0;
-            } catch (_) {
-                return null;
-            }
-        };
-        const hasVisibleForumActivity = channelId => {
-            try {
-                if (self._hasBlockedOnlyReadActivity(channelId)) return false;
-                if (!isForumParentChannel(channelId)) return null;
-                const ackId = self.modules.ReadStateStore.ackMessageId ? self.modules.ReadStateStore.ackMessageId(channelId) : null;
-                const lastActivityId = self.modules.ReadStateStore.lastMessageId ? self.modules.ReadStateStore.lastMessageId(channelId) : null;
-                if (!snowflakeGreater(lastActivityId, ackId)) return false;
-                const parent = self.modules.ChannelStore?.getChannel?.(channelId);
-                const guildId = parent?.guild_id;
-                const threads = collectThreadsForParent(channelId, guildId);
-                if (threads.length) {
-                    for (const thread of threads) {
-                        const ownerId = getThreadOwnerId(thread);
-                        const activityId = thread?.lastMessageId || thread?.channel?.lastMessageId || thread?.id;
-                        if (!snowflakeGreater(activityId, ackId)) continue;
-                        if (!ownerId) continue;
-                        if (!self.shouldHide(ownerId)) return true;
-                    }
-                    const activityOwnerId = resolveForumActivityOwnerId(channelId, lastActivityId);
-                    if (activityOwnerId) return !self.shouldHide(activityOwnerId);
-                    return false;
-                }
-                const activityOwnerId = resolveForumActivityOwnerId(channelId, lastActivityId);
-                if (activityOwnerId) return !self.shouldHide(activityOwnerId);
-                const visibleUnread = hasVisibleUnreadThreadsFromStore(channelId, guildId);
-                if (visibleUnread === true) return true;
-                if (visibleUnread === false) return false;
-                try {
-                    if (self.modules.ReadStateStore.getUnreadCount?.(channelId) === 0) return false;
-                } catch (_) {}
-                return null;
-            } catch (_) {
-                return null;
-            }
-        };
         this.patchInstead(this.modules.ReadStateStore, "hasUnread", function(ctx, args, orig) {
             const channelId = args?.[0];
             if (channelId && self.settings.places?.messages && self._hasBlockedOnlyReadActivity(channelId)) return false;
@@ -3263,20 +3182,17 @@ return false;
             if (!self.settings.places?.messages) return ret;
             if (!channelId) return ret;
             try {
-                if (isForumParentChannel(channelId)) {
-                    const forumResult = hasVisibleForumActivity(channelId);
+                if (self._isForumParentChannel(channelId)) {
+                    const forumResult = self._hasVisibleForumActivity(channelId);
                     if (forumResult !== null) return forumResult;
                 }
                 const store = self.modules.ReadStateStore;
                 const oldestUnreadId = store.getOldestUnreadMessageId ? store.getOldestUnreadMessageId(channelId) : null;
-                const messages = getChannelMessages(channelId);
+                const messages = self._getChannelMessages(channelId);
                 if (!messages.length) {
-                    const forumResult = hasVisibleForumActivity(channelId);
+                    const forumResult = self._hasVisibleForumActivity(channelId);
                     if (forumResult !== null) return forumResult;
-                    const blockedOnly = self._resolveUnreadFromBlockedOnly(channelId, store, self._readStateHelpers || {
-                        isBlockedMessage: isBlockedMessage,
-                        resolveForumActivityOwnerId: resolveForumActivityOwnerId
-                    });
+                    const blockedOnly = self._resolveUnreadFromBlockedOnly(channelId, store, self._getReadStateHelpers());
                     if (blockedOnly === false) return false;
                     return ret;
                 }
@@ -3284,20 +3200,17 @@ return false;
                     const idx = messages.findIndex(m => m?.id === oldestUnreadId);
                     if (idx !== -1) {
                         const unreadSlice = messages.slice(idx);
-                        const anyVisibleUnread = unreadSlice.some(m => !isBlockedMessage(m));
+                        const anyVisibleUnread = unreadSlice.some(m => !self._isBlockedMessage(m));
                         return anyVisibleUnread;
                     }
                 }
                 const lastMessageId = store.lastMessageId ? store.lastMessageId(channelId) : null;
                 const lastMessage = lastMessageId ? messages.find(m => m?.id === lastMessageId) : null;
-                if (lastMessage && isBlockedMessage(lastMessage)) {
-                    const anyVisibleUnread = messages.some(m => !isBlockedMessage(m));
+                if (lastMessage && self._isBlockedMessage(lastMessage)) {
+                    const anyVisibleUnread = messages.some(m => !self._isBlockedMessage(m));
                     if (!anyVisibleUnread) return false;
                 }
-                const blockedOnly = self._resolveUnreadFromBlockedOnly(channelId, store, self._readStateHelpers || {
-                    isBlockedMessage: isBlockedMessage,
-                    resolveForumActivityOwnerId: resolveForumActivityOwnerId
-                });
+                const blockedOnly = self._resolveUnreadFromBlockedOnly(channelId, store, self._getReadStateHelpers());
                 if (blockedOnly === false) return false;
                 return ret;
             } catch (_) {
@@ -3314,19 +3227,16 @@ return false;
                 if (!self.settings.places?.messages) return ret;
                 if (!channelId) return ret;
                 try {
-                    if (isForumParentChannel(channelId)) {
-                        const forumResult = hasVisibleForumActivity(channelId);
+                    if (self._isForumParentChannel(channelId)) {
+                        const forumResult = self._hasVisibleForumActivity(channelId);
                         if (forumResult !== null) return forumResult;
                     }
-                    const messages = getChannelMessages(channelId);
+                    const messages = self._getChannelMessages(channelId);
                     if (!messages.length) {
-                        const forumResult = hasVisibleForumActivity(channelId);
+                        const forumResult = self._hasVisibleForumActivity(channelId);
                         if (forumResult !== null) return forumResult;
                         const store = self.modules.ReadStateStore;
-                        const blockedOnly = self._resolveUnreadFromBlockedOnly(channelId, store, self._readStateHelpers || {
-                            isBlockedMessage: isBlockedMessage,
-                            resolveForumActivityOwnerId: resolveForumActivityOwnerId
-                        });
+                        const blockedOnly = self._resolveUnreadFromBlockedOnly(channelId, store, self._getReadStateHelpers());
                         if (blockedOnly === false) return false;
                     }
                     return ret;
@@ -3335,36 +3245,27 @@ return false;
                 }
             });
         }
-        const channelCountsAsGuildUnread = channelId => {
-            const rs = self.modules.ReadStateStore;
-            if (!rs || !channelId) return false;
-            if (typeof rs.hasTrackedUnread === "function" && rs.hasTrackedUnread(channelId)) return true;
-            if (typeof rs.hasUnreadOrMentions === "function" && rs.hasUnreadOrMentions(channelId)) return true;
-            return !!rs.hasUnread?.(channelId);
-        };
-        if (this.modules.GuildReadStateStore && this.modules.GuildChannelStore) {
-            this.patchInstead(this.modules.GuildReadStateStore, "hasUnread", function(ctx, args, orig) {
-                const ret = orig.apply(ctx, args);
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                const guildId = args?.[0];
-                if (!guildId) return ret;
-                try {
-                    const channels = self.modules.GuildChannelStore.getChannels?.(guildId);
-                    const selectable = channels?.SELECTABLE;
-                    if (!Array.isArray(selectable)) {
-                        if (self._guildHasBlockedOnlyUnread(guildId)) return false;
-                        return ret;
-                    }
-                    const visible = selectable.map(entry => entry?.channel?.id).filter(Boolean).some(channelCountsAsGuildUnread);
-                    if (visible) return true;
+        this.patchInstead(this.modules.GuildReadStateStore, "hasUnread", function(ctx, args, orig) {
+            const ret = orig.apply(ctx, args);
+            if (!ret) return ret;
+            if (!self.settings.places?.messages) return ret;
+            const guildId = args?.[0];
+            if (!guildId) return ret;
+            try {
+                const channels = self.modules.GuildChannelStore.getChannels?.(guildId);
+                const selectable = channels?.SELECTABLE;
+                if (!Array.isArray(selectable)) {
                     if (self._guildHasBlockedOnlyUnread(guildId)) return false;
-                    return false;
-                } catch (_) {
                     return ret;
                 }
-            });
-        }
+                const visible = selectable.map(entry => entry?.channel?.id).filter(Boolean).some(cid => self._channelCountsAsGuildUnread(cid));
+                if (visible) return true;
+                if (self._guildHasBlockedOnlyUnread(guildId)) return false;
+                return false;
+            } catch (_) {
+                return ret;
+            }
+        });
         this.patchAfter(this.modules.ReadStateStore, "hasUnreadPins", function(_, args, ret) {
             if (!ret) return ret;
             if (!self.settings.places?.messages) return ret;
@@ -3408,118 +3309,26 @@ return false;
         const threadsStore = this.modules.ActiveJoinedThreadsStore;
         if (threadsStore) {
             const getThreadOwnerId = thread => thread?.ownerId || thread?.owner_id || thread?.thread?.ownerId || thread?.thread?.owner_id;
-            const isBlockedThreadEntry = entry => {
-                const ownerId = getThreadOwnerId(entry);
-                return !!(ownerId && self.shouldHide(ownerId));
-            };
+            const isBlockedThreadEntry = entry => !!(getThreadOwnerId(entry) && self.shouldHide(getThreadOwnerId(entry)));
             const filterThreadList = list => {
-                if (Array.isArray(list)) return list.filter(entry => !isBlockedThreadEntry(entry));
-                if (list && typeof list === "object") {
+                if (Array.isArray(list)) return list.filter(e => !isBlockedThreadEntry(e));
+                if (list && typeof list === 'object') {
                     const out = {};
                     for (const [key, val] of Object.entries(list)) {
-                        if (Array.isArray(val)) {
-                            const filtered = val.filter(entry => !isBlockedThreadEntry(entry));
-                            if (filtered.length) out[key] = filtered;
-                        } else if (val && typeof val === "object" && ("ownerId" in val || "owner_id" in val)) {
-                            if (!isBlockedThreadEntry(val)) out[key] = val;
-                        } else {
-                            out[key] = val;
-                        }
+                        if (Array.isArray(val)) { const f = val.filter(e => !isBlockedThreadEntry(e)); if (f.length) out[key] = f; }
+                        else if (val && typeof val === 'object' && ('ownerId' in val || 'owner_id' in val)) { if (!isBlockedThreadEntry(val)) out[key] = val; }
+                        else out[key] = val;
                     }
                     return out;
                 }
                 return list;
             };
-            this.patchAfter(threadsStore, "getActiveJoinedUnreadThreadsForParent", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
-            this.patchAfter(threadsStore, "getActiveJoinedUnreadThreadsForGuild", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
-            this.patchAfter(threadsStore, "getActiveUnjoinedUnreadThreadsForParent", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
-            this.patchAfter(threadsStore, "getActiveUnjoinedUnreadThreadsForGuild", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
-            this.patchAfter(threadsStore, "getActiveJoinedThreadsForParent", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
-            this.patchAfter(threadsStore, "getActiveJoinedThreadsForGuild", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
-            this.patchAfter(threadsStore, "getActiveJoinedRelevantThreadsForParent", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
-            this.patchAfter(threadsStore, "getActiveJoinedRelevantThreadsForGuild", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
-            this.patchAfter(threadsStore, "getActiveUnjoinedThreadsForParent", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
-            this.patchAfter(threadsStore, "getActiveUnjoinedThreadsForGuild", function(_, args, ret) {
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                try {
-                    return filterThreadList(ret);
-                } catch (_) {
-                    return ret;
-                }
-            });
+            const filterWrapper = (_, args, ret) => {
+                if (!ret || !self.settings.places?.messages) return ret;
+                try { return filterThreadList(ret); } catch (_) { return ret; }
+            };
+            const THREAD_LIST_METHODS = ['getActiveJoinedUnreadThreadsForParent','getActiveJoinedUnreadThreadsForGuild','getActiveUnjoinedUnreadThreadsForParent','getActiveUnjoinedUnreadThreadsForGuild','getActiveJoinedThreadsForParent','getActiveJoinedThreadsForGuild','getActiveJoinedRelevantThreadsForParent','getActiveJoinedRelevantThreadsForGuild','getActiveUnjoinedThreadsForParent','getActiveUnjoinedThreadsForGuild'];
+            for (const m of THREAD_LIST_METHODS) { if (typeof threadsStore[m] === 'function') this.patchAfter(threadsStore, m, filterWrapper); }
             this.patchAfter(threadsStore, "getActiveThreadCount", function(_, args, ret) {
                 if (!ret || typeof ret !== "number" || ret <= 0) return ret;
                 if (!self.settings.places?.messages) return ret;
@@ -3631,7 +3440,7 @@ return false;
             }
             const Dispatcher = self.modules.Dispatcher;
             if (Dispatcher && typeof Dispatcher.dispatch === "function") {
-                self.patches.push(BdApi.Patcher.before(self.pluginName, Dispatcher, "dispatch", (_, args) => {
+                self.patchBefore(Dispatcher, "dispatch", (_, args) => {
                     if (!self.settings.places?.messages) return;
                     const action = args?.[0];
                     if (!action || typeof action !== "object") return;
@@ -3674,40 +3483,34 @@ return false;
                     if (ackChannelId && (action.type === "CHANNEL_ACK" || action.type === "ACK_MESSAGES" || action.type === "THREAD_ACK")) {
                         self._clearBlockedOnlyReadActivity(ackChannelId);
                     }
-                }));
+                });
                 self._notificationDispatcherPatched = true;
             }
         }
         this._readStatePatched = true;
-        self._readStateHelpers = {
-            getChannelMessages: getChannelMessages,
-            isBlockedMessage: isBlockedMessage,
-            isForumParentChannel: isForumParentChannel,
-            hasVisibleForumActivity: hasVisibleForumActivity,
-            resolveForumActivityOwnerId: resolveForumActivityOwnerId
-        };
         self._applyBlockedReadCacheOnStartup();
         self._bootstrapBlockedUnreadSuppression();
         self._refreshTaskbarBadge();
     }
-    patchBefore(target, method, callback) {
-        try {
-            if (!target?.[method]) return;
-            this.patches.push(BdApi.Patcher.before(this.pluginName, target, method, callback));
-        } catch (_) {}
+    _getReadStateHelpers() {
+        return {
+            getChannelMessages: cid => this._getChannelMessages(cid),
+            isBlockedMessage: msg => this._isBlockedMessage(msg),
+            isForumParentChannel: cid => this._isForumParentChannel(cid),
+            hasVisibleForumActivity: cid => this._hasVisibleForumActivity(cid),
+            resolveForumActivityOwnerId: (p, a) => this._resolveForumActivityOwnerId(p, a)
+        };
     }
-    patchInstead(target, method, callback) {
-        try {
-            if (!target?.[method]) return;
-            this.patches.push(BdApi.Patcher.instead(this.pluginName, target, method, callback));
-        } catch (_) {}
+    _channelCountsAsGuildUnread(channelId) {
+        const rs = this.modules.ReadStateStore;
+        if (!rs || !channelId) return false;
+        if (typeof rs.hasTrackedUnread === 'function' && rs.hasTrackedUnread(channelId)) return true;
+        if (typeof rs.hasUnreadOrMentions === 'function' && rs.hasUnreadOrMentions(channelId)) return true;
+        return !!rs.hasUnread?.(channelId);
     }
-    patchAfter(target, method, callback) {
-        try {
-            if (!target?.[method]) return;
-            this.patches.push(BdApi.Patcher.after(this.pluginName, target, method, callback));
-        } catch (_) {}
-    }
+    patchBefore(target, method, callback) { this._patcher?.before(target, method, callback); }
+    patchInstead(target, method, callback) { this._patcher?.instead(target, method, callback); }
+    patchAfter(target, method, callback) { this._patcher?.after(target, method, callback); }
     filterVoiceStates(value) {
         if (!value) return value;
         if (Array.isArray(value)) {
@@ -3846,18 +3649,10 @@ return false;
             const dispatcherBroken = !this.modules.Dispatcher || typeof this.modules.Dispatcher.dispatch !== "function";
             const msgStoreBroken = !this._rawGetMessages && (!this.modules.MessageStore || typeof this.modules.MessageStore.getMessages !== "function");
             if (storeBroken || observerBroken || dispatcherBroken || msgStoreBroken) {
-                if (storeBroken) {
-                    this._safePatch("watchdog:resolveModules", () => this.resolveModules());
-                }
-                if (dispatcherBroken) {
-                    this._safePatch("watchdog:resolveDispatcher", () => this._resolveDispatcher());
-                }
-                if (msgStoreBroken) {
-                    this._safePatch("watchdog:resolveMessagesGet", () => this._resolveMessagesGet());
-                }
-                if (observerBroken || storeBroken) {
-                    this._safePatch("watchdog:restartObserver", () => this._restartObserver());
-                }
+                if (storeBroken) { this._patcher.safe("watchdog:resolveModules", () => this.resolveModules()); }
+                if (dispatcherBroken) { this._patcher.safe("watchdog:resolveDispatcher", () => this._resolveDispatcher()); }
+                if (msgStoreBroken) { this._patcher.safe("watchdog:resolveMessagesGet", () => this._resolveMessagesGet()); }
+                if (observerBroken || storeBroken) { this._patcher.safe("watchdog:restartObserver", () => this._restartObserver()); }
             }
         } catch (_) {}
     }
@@ -3896,6 +3691,7 @@ return false;
         };
         document.addEventListener("click", this._reactionClickHandler, true);
         this._startContextMenuWatcher();
+        this._startChannelStatusModalWatcher();
     }
     _startContextMenuWatcher() {
         if (this._contextMenuHandler) return;
@@ -3972,6 +3768,65 @@ return false;
             childList: true,
             subtree: true
         });
+    }
+    _startChannelStatusModalWatcher() {
+        if (this._statusModalClickHandler) return;
+
+        this._statusModalClickHandler = event => {
+            try {
+                const trigger = event.target?.closest?.('[class*="statusDiv" i][role="button"], [class*="channelStatus" i][role="button"], [class*="voiceChannelStatus" i][role="button"]');
+                if (!trigger) return;
+                const row = trigger.closest('[data-list-item-id*="channels"]');
+                const channelId = row ? this.findChannelId(row) : null;
+                if (channelId) this._lastClickedStatusChannelId = channelId;
+            } catch (_) {}
+        };
+        document.addEventListener("click", this._statusModalClickHandler, true);
+
+        if (!this._statusModalObserver) {
+            this._statusModalObserver = new MutationObserver(mutations => {
+                if (!this.settings.places.voiceChannels) return;
+                for (let m = 0; m < mutations.length; m++) {
+                    const added = mutations[m].addedNodes;
+                    for (let n = 0; n < added.length; n++) {
+                        const node = added[n];
+                        if (node.nodeType !== 1) continue;
+                        const editor = node.matches?.('[data-slate-editor="true"]')
+                            ? node
+                            : node.querySelector?.('[data-slate-editor="true"]');
+                        if (editor) this._maybeClearBlockedStatusEditor(editor);
+                    }
+                }
+            });
+            this._statusModalObserver.observe(document.body, { childList: true, subtree: true });
+        }
+    }
+    _maybeClearBlockedStatusEditor(editor) {
+        try {
+            if (editor.dataset?.nmbStatusChecked === "true") return;
+            editor.dataset.nmbStatusChecked = "true";
+            const channelId = this._lastClickedStatusChannelId
+                || this.modules.SelectedChannelStore?.getVoiceChannelId?.()
+                || this.modules.SelectedChannelStore?.getChannelId?.();
+            if (!channelId) return;
+
+            const blockedStatusText = this._blockedChannelStatuses?.get(channelId);
+            if (!blockedStatusText) return;
+
+            const verifyAndClear = () => {
+                if (!document.contains(editor)) return;
+                const currentText = (editor.textContent || "").trim();
+                if (currentText !== blockedStatusText.trim()) return;
+                editor.focus();
+                const range = document.createRange();
+                range.selectNodeContents(editor);
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+                document.execCommand("delete");
+            };
+            setTimeout(verifyAndClear, 30);
+        } catch (_) {}
     }
     _watchReactorsModalContent(modalRoot) {
         try {
@@ -4293,30 +4148,8 @@ return false;
             }
         } catch (_) {}
     }
-    _findLocalizedForumEmptyText() {
-        const locale = this._getClientLocale();
-        const ptBr = "Seja o primeiro a comeÃ§ar essa conversa!";
-        const enUs = "Be the first to start this conversation!";
-        const dict = {
-            "pt-br": ptBr,
-            pt: ptBr,
-            "en-us": enUs,
-            en: enUs
-        };
-        return dict[locale] || dict[locale.split("-")[0]] || enUs;
-    }
-    _findLocalizedForumEmptySubtitle(channelName) {
-        const locale = this._getClientLocale();
-        const ptBr = `Sobre o que vocÃª quer postar em #${channelName}?`;
-        const enUs = `What do you want to post about in #${channelName}?`;
-        const dict = {
-            "pt-br": ptBr,
-            pt: ptBr,
-            "en-us": enUs,
-            en: enUs
-        };
-        return dict[locale] || dict[locale.split("-")[0]] || enUs;
-    }
+    _findLocalizedForumEmptyText() { return _locale(_getLocale(), ByeBlocked.FORUM_LOCALE).title; }
+    _findLocalizedForumEmptySubtitle(channelName) { return _locale(_getLocale(), ByeBlocked.FORUM_LOCALE).subtitle.replace('{channel}', channelName); }
     _syncForumEmptyState(listRoot, shouldShowEmpty) {
         const contentContainer = listRoot.querySelector('.content_d125d2, [class*="content_"]') || listRoot;
         let placeholder = contentContainer.querySelector(":scope > .nmb-injected-forum-empty");
@@ -4484,28 +4317,7 @@ return false;
     static get EMPTY_DM_SKELETON_SVG() {
         return '<svg width="184" height="428" viewBox="0 0 184 428" class="empty__99e7c" data-nmb-injected-skeleton="true">' + '<rect x="40" y="6" width="144" height="20" rx="10"></rect><circle cx="16" cy="16" r="16"></circle>' + '<rect x="40" y="50" width="144" height="20" rx="10" opacity="0.9"></rect><circle cx="16" cy="60" r="16" opacity="0.9"></circle>' + '<rect x="40" y="94" width="144" height="20" rx="10" opacity="0.8"></rect><circle cx="16" cy="104" r="16" opacity="0.8"></circle>' + '<rect x="40" y="138" width="144" height="20" rx="10" opacity="0.7"></rect><circle cx="16" cy="148" r="16" opacity="0.7"></circle>' + '<rect x="40" y="182" width="144" height="20" rx="10" opacity="0.6"></rect><circle cx="16" cy="192" r="16" opacity="0.6"></circle>' + '<rect x="40" y="226" width="144" height="20" rx="10" opacity="0.5"></rect><circle cx="16" cy="236" r="16" opacity="0.5"></circle>' + '<rect x="40" y="270" width="144" height="20" rx="10" opacity="0.4"></rect><circle cx="16" cy="280" r="16" opacity="0.4"></circle>' + '<rect x="40" y="314" width="144" height="20" rx="10" opacity="0.3"></rect><circle cx="16" cy="324" r="16" opacity="0.3"></circle>' + '<rect x="40" y="358" width="144" height="20" rx="10" opacity="0.2"></rect><circle cx="16" cy="368" r="16" opacity="0.2"></circle>' + '<rect x="40" y="402" width="144" height="20" rx="10" opacity="0.1"></rect><circle cx="16" cy="412" r="16" opacity="0.1"></circle>' + "</svg>";
     }
-    static get TOPICS_EMPTY_TRANSLATIONS() {
-        const ptBr = {
-            title: "NÃ£o hÃ¡ tÃ³picos.",
-            subtitle: "Mantenha o foco em uma conversa com um tÃ³pico â€” um canal de texto temporÃ¡rio.",
-            button: "Criar tÃ³pico"
-        };
-        const enUs = {
-            title: "There are no threads.",
-            subtitle: "Stay focused on a conversation with a thread â€” a temporary text channel.",
-            button: "Create Thread"
-        };
-        return {
-            "pt-br": ptBr,
-            pt: ptBr,
-            "en-us": enUs,
-            en: enUs
-        };
-    }
-    _findLocalizedTopicsEmptyText() {
-        const locale = this._getClientLocale();
-        return ByeBlocked.TOPICS_EMPTY_TRANSLATIONS[locale] || ByeBlocked.TOPICS_EMPTY_TRANSLATIONS[locale.split("-")[0]] || ByeBlocked.TOPICS_EMPTY_TRANSLATIONS.en;
-    }
+    _findLocalizedTopicsEmptyText() { return _locale(_getLocale(), ByeBlocked.TOPICS_LOCALE); }
     _buildTopicsEmptySkeletonHtml() {
         const t = this._findLocalizedTopicsEmptyText();
         return `<div class="nmb-injected-topic-empty container__1b24f">\n                    <div class="iconContainer__1b24f">\n                        <div class="icon__1b24f">\n                            <svg aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="36" height="36" fill="none" viewBox="0 0 24 24">\n                                <path d="M12 2.81a1 1 0 0 1 0-1.41l.36-.36a1 1 0 0 1 1.41 0l9.2 9.2a1 1 0 0 1 0 1.4l-.7.7a1 1 0 0 1-1.3.13l-9.54-6.72a1 1 0 0 1-.08-1.58l1-1L12 2.8ZM12 21.2a1 1 0 0 1 0 1.41l-.35.35a1 1 0 0 1-1.41 0l-9.2-9.19a1 1 0 0 1 0-1.41l.7-.7a1 1 0 0 1 1.3-.12l9.54 6.72a1 1 0 0 1 .07 1.58l-1 1 .35.36ZM15.66 16.8a1 1 0 0 1-1.38.28l-8.49-5.66A1 1 0 1 1 6.9 9.76l8.49 5.65a1 1 0 0 1 .27 1.39ZM17.1 14.25a1 1 0 1 0 1.11-1.66L9.73 6.93a1 1 0 0 0-1.11 1.66l8.49 5.66Z" fill="currentColor"></path>\n                            </svg>\n                        </div>\n                        <svg class="stars__1b24f" aria-hidden="true" role="img" width="104" height="80" viewBox="0 0 104 80" fill="none">\n                            <path d="M95.6718 1.80634C95.6718 0.808724 94.863 0 93.8654 0C92.8678 0 92.0591 0.808724 92.0591 1.80634V3.64278C92.0591 4.64039 92.8678 5.44911 93.8654 5.44911C94.863 5.44911 95.6718 4.64039 95.6718 3.64278V1.80634Z" fill="#ADF3FF"></path>\n                            <path d="M95.6713 16.3574C95.6713 15.3598 94.8625 14.5511 93.8649 14.5511C92.8673 14.5511 92.0586 15.3598 92.0586 16.3574V18.1939C92.0586 19.1915 92.8673 20.0002 93.8649 20.0002C94.8625 20.0002 95.6713 19.1915 95.6713 18.1939V16.3574Z" fill="#ADF3FF"></path>\n                            <path d="M102.194 11.8412C103.191 11.8412 104 11.0325 104 10.0349C104 9.03724 103.191 8.22852 102.194 8.22852H100.357C99.3596 8.22852 98.5509 9.03724 98.5509 10.0349C98.5509 11.0325 99.3596 11.8412 100.357 11.8412H102.194Z" fill="#ADF3FF"></path>\n                            <path d="M87.6434 11.7413C88.641 11.7413 89.4497 10.9325 89.4497 9.93494C89.4497 8.93733 88.641 8.1286 87.6434 8.1286H85.8069C84.8093 8.1286 84.0006 8.93733 84.0006 9.93494C84.0006 10.9325 84.8093 11.7413 85.8069 11.7413H87.6434Z" fill="#ADF3FF"></path>\n                            <path d="M11.1501 74.4573L15.3147 73.0684C15.5192 72.9747 15.6925 72.8241 15.814 72.6347C15.9354 72.4454 16 72.225 16 72C16 71.775 15.9354 71.5546 15.814 71.3653C15.6925 71.1759 15.5192 71.0253 15.3147 70.9316L11.1501 69.5427C10.8657 69.4142 10.6378 69.1862 10.5094 68.9016L9.01446 64.7348C8.94423 64.521 8.80835 64.3349 8.62619 64.203C8.44403 64.071 8.22488 64 7.99999 64C7.77511 64 7.55597 64.071 7.37381 64.203C7.19165 64.3349 7.05576 64.521 6.98554 64.7348L5.49057 68.9016C5.36216 69.1862 5.13433 69.4142 4.84986 69.5427L0.685276 70.9316C0.480802 71.0253 0.307523 71.1759 0.186045 71.3653C0.0645662 71.5546 0 71.775 0 72C0 72.225 0.0645662 72.4454 0.186045 72.6347C0.307523 72.8241 0.480802 72.9747 0.685276 73.0684L4.84986 74.4573C5.0011 74.5032 5.1387 74.5858 5.25046 74.6976C5.36222 74.8094 5.44469 74.9471 5.49057 75.0984L6.98554 79.2652C7.05576 79.479 7.19165 79.6651 7.37381 79.797C7.55597 79.929 7.77511 80 7.99999 80C8.22488 80 8.44403 79.929 8.62619 79.797C8.80835 79.6651 8.94423 79.479 9.01446 79.2652L10.5094 75.0984C10.5553 74.9471 10.6378 74.8094 10.7495 74.6976C10.8613 74.5858 10.9989 74.5032 11.1501 74.4573Z" fill="#FFD01A"></path>\n                        </svg>\n                    </div>\n                    <h2 class="defaultColor__4bd52 heading-xl/semibold_cf4812 defaultColor__5345c header__1b24f" data-text-variant="heading-xl/semibold">${t.title}</h2>\n                    <div class="text-md/normal_cf4812" data-text-variant="text-md/normal" style="color: var(--text-default);">${t.subtitle}</div>\n                    <div data-button-hoisted-classname-wrapper="true" class="cta__1b24f">\n                        <button data-mana-component="button" role="button" class="button_a22cb0 md_a22cb0 primary_a22cb0 hasText_a22cb0" type="button">\n                            <div class="buttonChildrenWrapper_a22cb0">\n                                <div class="buttonChildren_a22cb0">\n                                    <span class="lineClamp1__4bd52 text-md/medium_cf4812" data-text-variant="text-md/medium">${t.button}</span>\n                                </div>\n                            </div>\n                        </button>\n                    </div>\n                </div>`;
@@ -4684,6 +4496,31 @@ return false;
         if (!found) return;
         this.fixReactionCounts();
         this.hideBlockedReactors();
+    }
+    _fastHideChannelStatusFromMutations(mutations) {
+        for (let m = 0; m < mutations.length; m++) {
+            const added = mutations[m].addedNodes;
+            for (let n = 0; n < added.length; n++) {
+                const node = added[n];
+                if (node.nodeType !== 1) continue;
+                const sel = '[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]';
+                if (node.matches?.(sel)) {
+                    if (!node.dataset?.nmbStatusSafe && !node.dataset?.nmbStatusOverridden) {
+                        node.dataset.nmbStatusOverridden = "true";
+                    }
+                    continue;
+                }
+                if (typeof node.querySelectorAll === 'function') {
+                    const els = node.querySelectorAll(sel);
+                    for (let e = 0; e < els.length; e++) {
+                        const el = els[e];
+                        if (!el.dataset?.nmbStatusSafe && !el.dataset?.nmbStatusOverridden) {
+                            el.dataset.nmbStatusOverridden = "true";
+                        }
+                    }
+                }
+            }
+        }
     }
     _fastHideFromMutations(mutations) {
         const places = this.settings.places;
@@ -5666,14 +5503,7 @@ return false;
     hideStageSpeakerRequests() {
         try {
             const headingRe = /^(Pedidos para falar|Requests to Speak)(\s*[â€”-]\s*\d+)?$/i;
-            const emptyStateText = {
-                "pt-br": { title: "Sem pedidos", body: "Os pedidos para falar serÃ£o mostrados aqui." },
-                pt: { title: "Sem pedidos", body: "Os pedidos para falar serÃ£o mostrados aqui." },
-                "en-us": { title: "No requests", body: "Requests to speak will show up here." },
-                en: { title: "No requests", body: "Requests to speak will show up here." }
-            };
-            const locale = this._getClientLocale?.() || "en";
-            const t = emptyStateText[locale] || emptyStateText[locale.split("-")[0]] || emptyStateText.en;
+            const t = _locale(_getLocale(), ByeBlocked.STAGE_LOCALE);
             const headings = document.querySelectorAll('[class*="listTitle__"]');
             let anyPanelProcessed = false;
             let totalVisible = 0;
@@ -5821,32 +5651,8 @@ return false;
         }
         this.fixGuildMembersPageCount();
     }
-    static get EVENTS_EMPTY_TRANSLATIONS() {
-        const ptBr = {
-            title: "NÃ£o hÃ¡ eventos futuros.",
-            subtitle: "Agende um evento para qualquer atividade planejada no seu servidor.",
-            tip_prefix: "VocÃª pode dar permissÃ£o para outras pessoas criarem eventos em ",
-            tip_link: "configuraÃ§Ãµes do servidor > cargos"
-        };
-        const enUs = {
-            title: "No upcoming events.",
-            subtitle: "Schedule an event for any planned activity in your server.",
-            tip_prefix: "You can give other people permission to create events in ",
-            tip_link: "server settings > roles"
-        };
-        return {
-            "pt-br": ptBr,
-            pt: ptBr,
-            "en-us": enUs,
-            en: enUs
-        };
-    }
-    _findLocalizedEventsEmptyText() {
-        const locale = this._getClientLocale();
-        return ByeBlocked.EVENTS_EMPTY_TRANSLATIONS[locale] || ByeBlocked.EVENTS_EMPTY_TRANSLATIONS[locale.split("-")[0]] || ByeBlocked.EVENTS_EMPTY_TRANSLATIONS.en;
-    }
     _buildEventsEmptySkeletonHtml() {
-        const t = this._findLocalizedEventsEmptyText();
+        const t = _locale(_getLocale(), ByeBlocked.EVENTS_LOCALE);
         return `<div class="nmb-injected-events-empty container__710ee">\n                    <img alt="" class="sparkleIcon__05cdc sparkleBottom__05cdc" src="/assets/3a6a08a976f34e04.svg">\n                    <div class="circle__710ee">\n                        <svg class="icon__710ee" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="none" viewBox="0 0 24 24">\n                            <path fill="currentColor" d="M7 1a1 1 0 0 1 1 1v.75c0 .14.11.25.25.25h7.5c.14 0 .25-.11.25-.25V2a1 1 0 1 1 2 0v.75c0 .14.11.25.25.25H19a3 3 0 0 1 3 3 1 1 0 0 1-1 1H3a1 1 0 0 1-1-1 3 3 0 0 1 3-3h.75c.14 0 .25-.11.25-.25V2a1 1 0 0 1 1-1Z"></path>\n                            <path fill="currentColor" fill-rule="evenodd" d="M2 10a1 1 0 0 1 1-1h18a1 1 0 0 1 1 1v9a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-9Zm3.5 2a.5.5 0 0 0-.5.5v3c0 .28.22.5.5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3Z" clip-rule="evenodd"></path>\n                        </svg>\n                    </div>\n                    <img alt="" class="sparkleIcon__05cdc sparkleTop__05cdc" src="/assets/30d1720360dd2c40.svg">\n                    <h2 class="heading-xl/semibold_cf4812 defaultColor__5345c title__710ee" data-text-variant="heading-xl/semibold" style="color: var(--text-strong);">${t.title}</h2>\n                    <div class="text-sm/normal_cf4812 subtitle__710ee" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.subtitle}</div>\n                    <div class="text-sm/normal_cf4812 roleTip__710ee" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.tip_prefix}<strong><a class="anchor_edefb8 anchorUnderlineOnHover_edefb8" role="link" tabindex="0" data-nmb-open-role-settings="true">${t.tip_link}</a></strong>.</div>\n                </div>`;
     }
     hideBlockedEvents() {
@@ -6779,44 +6585,10 @@ return false;
             this._syncPinnedEmptyState(root, totalGroups > 0 && hiddenGroups === totalGroups);
         }
     }
-    _getClientLocale() {
-        try {
-            const lang = document.documentElement?.lang || navigator.language || "en";
-            return lang.toLowerCase();
-        } catch (_) {
-            return "en";
-        }
-    }
-    static get PINS_EMPTY_TRANSLATIONS() {
-        const ptBr = {
-            body: "Este canal n\u00e3o tem<br>mensagens fixadas... por enquanto.",
-            tip_label: "Fica a dica:",
-            tip_text: "Usu\u00e1rios com a permiss\u00e3o \u201cGerenciar Mensagens\u201d podem fixar uma mensagem no menu de contexto."
-        };
-        const enUs = {
-            body: "This channel doesn't have<br>any pinned messages... yet.",
-            tip_label: "Pro tip:",
-            tip_text: 'Users with the "Manage Messages" permission can pin a message from the context menu.'
-        };
-        return {
-            "pt-br": ptBr,
-            pt: ptBr,
-            "en-us": enUs,
-            en: enUs
-        };
-    }
-    _findLocalizedPinsEmptyText() {
-        const locale = this._getClientLocale();
-        const dict = ByeBlocked.PINS_EMPTY_TRANSLATIONS[locale] || ByeBlocked.PINS_EMPTY_TRANSLATIONS[locale.split("-")[0]];
-        return dict?.body || null;
-    }
+    _findLocalizedPinsEmptyText() { return (_locale(_getLocale(), ByeBlocked.PINS_LOCALE) || {}).body || null; }
     _findLocalizedPinsTipText() {
-        const locale = this._getClientLocale();
-        const dict = ByeBlocked.PINS_EMPTY_TRANSLATIONS[locale] || ByeBlocked.PINS_EMPTY_TRANSLATIONS[locale.split("-")[0]];
-        return dict ? {
-            label: dict.tip_label,
-            text: dict.tip_text
-        } : null;
+        const d = _locale(_getLocale(), ByeBlocked.PINS_LOCALE);
+        return d ? { label: d.tip_label, text: d.tip_text } : null;
     }
     _syncPinnedEmptyState(listRoot, shouldShowEmpty) {
         let placeholder = listRoot.querySelector(":scope > .nmb-pins-empty-placeholder");
@@ -6905,15 +6677,27 @@ return false;
     }
     _seedBlockedChannelStatuses() {
         try {
+            if (!this._channelStatusAuthors) this._channelStatusAuthors = new Map;
             document.querySelectorAll('[data-list-item-id*="channels"]').forEach(row => {
                 const channelId = this.findChannelId(row);
                 if (!channelId) return;
                 const statusEl = row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]');
                 if (!statusEl || !statusEl.textContent?.trim()) return;
-                if (this._channelHasBlockedMember(channelId)) {
+                if (this._isChannelStatusPlaceholder(statusEl)) {
+                    statusEl.dataset.nmbStatusSafe = "true";
+                    return;
+                }
+
+                if (!this._channelStatusAuthors.has(channelId)) {
+                    this._channelStatusAuthors.set(channelId, this._channelHasBlockedMember(channelId));
+                }
+                if (this._channelStatusBelongsToBlocked(channelId)) {
                     if (!this._blockedChannelStatuses) this._blockedChannelStatuses = new Map;
                     this._blockedChannelStatuses.set(channelId, statusEl.textContent.trim());
                     this._suppressChannelStatusText(channelId);
+                } else {
+                    statusEl.dataset.nmbStatusSafe = "true";
+                    delete statusEl.dataset.nmbStatusOverridden;
                 }
             });
         } catch (_) {}
@@ -6947,10 +6731,15 @@ return false;
                 if (oldSet && !oldSet.size) prevMembers.delete(oldChannelId);
             }
             if (this.shouldHide(userId)) {
-                try {
-                    if (oldChannelId) this._reevaluateChannelStatusVisibility(oldChannelId);
-                    if (newChannelId) this._reevaluateChannelStatusVisibility(newChannelId);
-                } catch (_) {}
+
+                const _oldChId = oldChannelId, _newChId = newChannelId;
+                setTimeout(() => {
+                    if (!this.isRunning) return;
+                    try {
+                        if (_oldChId) this._reevaluateChannelStatusVisibility(_oldChId);
+                        if (_newChId) this._reevaluateChannelStatusVisibility(_newChId);
+                    } catch (_) {}
+                }, 0);
             }
             if (selfId && userId === selfId && !newChannelId) {
                 this._voiceFakeTimers.delete(oldChannelId);
@@ -6990,11 +6779,21 @@ return false;
         if (!channelId || !this.settings.places.voiceChannels) return;
         const row = this._findChannelRowById(channelId);
         if (!row) return;
-        const statusEl = row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]');
-        const hasBlocked = this._channelHasBlockedMember(channelId);
         if (!this._blockedChannelStatuses) this._blockedChannelStatuses = new Map;
-        if (hasBlocked) {
-            const currentText = statusEl?.dataset?.hiddenBlocked === "true"
+        if (!this._channelStatusAuthors) this._channelStatusAuthors = new Map;
+        const statusEl = row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]');
+        if (this._isChannelStatusPlaceholder(statusEl)) {
+            this._blockedChannelStatuses.delete(channelId);
+            this._channelStatusAuthors.delete(channelId);
+            if (statusEl) statusEl.dataset.nmbStatusSafe = "true";
+            return;
+        }
+
+        const belongsToBlocked = this._channelStatusBelongsToBlocked(channelId);
+        if (belongsToBlocked) {
+
+            this._channelStatusAuthors.set(channelId, true);
+            const currentText = statusEl?.dataset?.nmbStatusOverridden === "true"
                 ? this._blockedChannelStatuses.get(channelId)
                 : statusEl?.textContent?.trim();
             if (currentText) {
@@ -7002,8 +6801,10 @@ return false;
                 this._suppressChannelStatusText(channelId);
             }
         } else {
+            this._channelStatusAuthors.set(channelId, false);
             this._blockedChannelStatuses.delete(channelId);
             this._restoreChannelStatusText(channelId);
+            if (statusEl) statusEl.dataset.nmbStatusSafe = "true";
         }
     }
     _getMediaEngineContext() {
@@ -7078,7 +6879,7 @@ return false;
         this._voiceMutePatched = true;
         this._mutedBlockedUserIds = this._mutedBlockedUserIds || new Set;
         const self = this;
-        this.patches.push(BdApi.Patcher.before(this.pluginName, Dispatcher, "dispatch", function(context, args) {
+        this.patchBefore(Dispatcher, "dispatch", function(context, args) {
             const action = args[0];
             if (!action || typeof action !== "object") return;
             if (action.type === "VOICE_STATE_UPDATES" && Array.isArray(action.voiceStates)) {
@@ -7086,7 +6887,7 @@ return false;
                     self._handleVoiceStateUpdatesForMute(action.voiceStates);
                 } catch (_) {}
             }
-        }));
+        });
         try {
             const ctx = this._getMediaEngineContext();
             if (ctx?.channelId) this._applyVoiceMuteForChannel(ctx.channelId);
@@ -7579,7 +7380,7 @@ return false;
         if (typeof SoundUtils[playSoundKey] !== "function") return;
         const RTCUtils = this.modules.RTCConnectionUtils;
         const self = this;
-        this.patches.push(BdApi.Patcher.instead(this.pluginName, SoundUtils, playSoundKey, function(context, args, originalMethod) {
+        this.patchInstead(SoundUtils, playSoundKey, function(context, args, originalMethod) {
             const soundType = args[0];
             const isVoiceEvent = [ "disconnect", "user_join", "user_leave", "user_moved", "stream_started", "stream_ended", "activity_launch" ].includes(soundType);
             if (!isVoiceEvent) {
@@ -7636,7 +7437,7 @@ return false;
             const allChangedAreBlocked = changedIds.every(id => self.shouldHide(id));
             if (allChangedAreBlocked) return;
             return originalMethod.apply(context, args);
-        }));
+        });
     }
     patchSoundboardEffects() {
         if (this._soundboardPatched) return;
@@ -7644,7 +7445,7 @@ return false;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") return;
         this._soundboardPatched = true;
         const self = this;
-        this.patches.push(BdApi.Patcher.before(this.pluginName, Dispatcher, "dispatch", function(context, args) {
+        this.patchBefore(Dispatcher, "dispatch", function(context, args) {
             const action = args[0];
             if (!action || typeof action !== "object") return;
             if (action.type === "VOICE_STATE_UPDATES" && Array.isArray(action.voiceStates)) {
@@ -7686,7 +7487,7 @@ return false;
                 } catch (_) {}
                 return;
             }
-        }));
+        });
     }
     _isChannelStatusUpdateAction(action) {
         if (!action || typeof action !== "object") return false;
@@ -7700,18 +7501,35 @@ return false;
         const status = action.status !== undefined ? action.status : action.channelStatus;
         if (!channelId) return;
         if (!this._blockedChannelStatuses) this._blockedChannelStatuses = new Map;
+        if (!this._channelStatusAuthors) this._channelStatusAuthors = new Map;
         if (!status) {
             this._blockedChannelStatuses.delete(channelId);
+            this._channelStatusAuthors.delete(channelId);
             this._restoreChannelStatusText(channelId);
             return;
         }
-        const hasBlockedInChannel = this._channelHasBlockedMember(channelId);
-        if (hasBlockedInChannel) {
+
+        const hasBlockedNow = this._channelHasBlockedMember(channelId);
+        if (hasBlockedNow) {
+            this._channelStatusAuthors.set(channelId, true);
             this._blockedChannelStatuses.set(channelId, status);
             this._suppressChannelStatusText(channelId);
         } else {
+            this._channelStatusAuthors.delete(channelId);
             this._blockedChannelStatuses.delete(channelId);
             this._restoreChannelStatusText(channelId);
+        }
+    }
+
+    _channelStatusBelongsToBlocked(channelId) {
+        try {
+            if (this._channelStatusAuthors?.has(channelId)) {
+                return this._channelStatusAuthors.get(channelId) === true;
+            }
+
+            return this._channelHasBlockedMember(channelId);
+        } catch (_) {
+            return false;
         }
     }
     _channelHasBlockedMember(channelId) {
@@ -7722,25 +7540,50 @@ return false;
             return false;
         }
     }
+    _isChannelStatusPlaceholder(statusEl) {
+        if (!statusEl) return true;
+
+        if (statusEl.dataset?.nmbStatusOverridden === "true") return false;
+        try {
+
+            const text = (statusEl.textContent || "").trim().toLowerCase();
+            if (!text) return true;
+            const placeholderTexts = [ "definir um status do canal", "set a channel status" ];
+            if (placeholderTexts.some(p => text.includes(p))) return true;
+            if (statusEl.querySelector('svg, [class*="pencil" i], [class*="edit" i]')) return true;
+            if (statusEl.closest('[role="button"]') && statusEl.querySelector('button, [role="button"]')) return true;
+        } catch (_) {}
+        return false;
+    }
     _suppressChannelStatusText(channelId) {
         if (!this.settings.places.voiceChannels) return;
         const row = this._findChannelRowById(channelId);
         if (!row) return;
         const statusEl = row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]');
-        if (statusEl && statusEl.dataset?.hiddenBlocked !== "true") {
-            this.hideElement(statusEl, "channel-status", false);
-        }
+        if (this._isChannelStatusPlaceholder(statusEl)) return;
+        if (!statusEl) return;
+
+        statusEl.dataset.nmbStatusOverridden = "true";
+        delete statusEl.dataset.nmbStatusSafe;
     }
     _restoreChannelStatusText(channelId) {
         const row = this._findChannelRowById(channelId);
         if (!row) return;
+        row.querySelectorAll('[data-nmb-status-overridden="true"]').forEach(el => {
+            delete el.dataset.nmbStatusOverridden;
+            el.dataset.nmbStatusSafe = "true";
+        });
         row.querySelectorAll('[data-hidden-blocked="true"][data-nmb-reason="channel-status"]').forEach(el => this.restoreElement(el));
     }
     _resyncBlockedChannelStatuses() {
-        if (!this._blockedChannelStatuses || !this._blockedChannelStatuses.size) return;
-        for (const channelId of this._blockedChannelStatuses.keys()) {
-            this._suppressChannelStatusText(channelId);
+
+        if (this._blockedChannelStatuses && this._blockedChannelStatuses.size) {
+            for (const channelId of this._blockedChannelStatuses.keys()) {
+                this._suppressChannelStatusText(channelId);
+            }
         }
+
+        try { this._seedBlockedChannelStatuses(); } catch (_) {}
     }
     _handlePinAdd(action) {
         try {
@@ -7855,7 +7698,7 @@ return false;
             }
         }
         const self = this;
-        this.patches.push(BdApi.Patcher.after(this.pluginName, mod, key, function(context, args, result) {
+        this.patchAfter(mod, key, function(context, args, result) {
             if (!self.settings.places.autocomplete) return result;
             if (!result || !Array.isArray(result.rows)) return result;
             result.rows = result.rows.filter(row => {
@@ -7875,7 +7718,7 @@ return false;
                 return true;
             });
             return result;
-        }));
+        });
         this._inviteSuggestionsPatched = true;
     }
     patchReactions(attempt = 1) {
@@ -7887,6 +7730,13 @@ return false;
                 this.modules.ReactionsStore = getStore("ReactionsStore", "MessageReactionsStore");
                 this.patchReactions(attempt + 1);
             }, 2e3);
+            return;
+        }
+        if (!this._reactionsPatched) {
+            this.patchAfter(store, "getReactions", (_, __, result) => {
+                return this._filterReactionUsers(result);
+            });
+            this._reactionsPatched = true;
         }
     }
     fixReactionCounts() {
@@ -8101,7 +7951,7 @@ return false;
         const hideBlockedBanner = this.settings.places.messages ? `\n            [class*="messageGroupBlocked"],\n            [class*="blockedSystemMessage"],\n            [class*="groupStart"]:has([class*="blocked"]),\n            li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),\n            li[class*="messageListItem"]:has([class*="blockedSystemMessage"]),\n            li[class*="messageListItem"]:has([class*="blocked"][class*="message"]),\n            [class*="messageListItem"]:has([class*="messageGroupBlocked"]) {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n        ` : "";
         const eventsSidebarNameRule = this.settings.places.events ? `\n            li:has([data-list-item-id^="channels___upcoming-events-"]) {\n                visibility: hidden !important;\n            }\n            li:has([data-list-item-id^="channels___upcoming-events-"]):has([data-nmb-events-ready="true"]) {\n                visibility: visible !important;\n            }\n        ` : "";
         const noticeButtonStyles = `\n            .bd-notice button,\n            .bd-notice .bd-button,\n            .bd-notice [class*="button"],\n            .bd-notice [role="button"] {\n                background: transparent !important;\n                border: 1px solid var(--text-muted) !important;\n                color: var(--text-normal) !important;\n                transition: background 0.15s, border-color 0.15s !important;\n            }\n            .bd-notice button:hover,\n            .bd-notice .bd-button:hover,\n            .bd-notice [class*="button"]:hover,\n            .bd-notice [role="button"]:hover {\n                background: rgba(255, 255, 255, 0.08) !important;\n                border-color: var(--brand-experiment) !important;\n                color: var(--text-normal) !important;\n            }\n        `;
-        BdApi.DOM.addStyle(this.pluginName, `\n            [data-hidden-blocked="true"],\n            [data-hidden-blocked="true"] * { ${this.hideStyles} }\n            h1[data-nmb-header-hidden="true"] {\n                font-size: 0 !important;\n                line-height: 0 !important;\n            }\n            h1[data-nmb-header-hidden="true"] [data-nmb-header-overlay="true"] {\n                font-size: var(--nmb-header-restore-size, 20px) !important;\n                line-height: var(--nmb-header-restore-line-height, normal) !important;\n            }\n            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-header-minimal {\n                display: flex;\n                align-items: baseline;\n                gap: 10px;\n                margin-bottom: 12px;\n                padding-bottom: 10px;\n                border-bottom: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-plugin-name { font-size: 22px; font-weight: 700; color: var(--header-primary); }\n            .nmb-version { font-size: 15px; color: var(--text-muted); font-weight: 500; }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 8px;\n                margin-top: 28px;\n                padding: 12px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-btn-icon { width: 14px; height: 14px; flex-shrink: 0; }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-checking .nmb-btn-icon { animation: nmb-spin 0.8s linear infinite; }\n            @keyframes nmb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n\n            ${noticeButtonStyles}\n        `);
+        BdApi.DOM.addStyle(this.pluginName, `\n            [data-hidden-blocked="true"],\n            [data-hidden-blocked="true"] * { ${this.hideStyles} }\n            h1[data-nmb-header-hidden="true"] {\n                font-size: 0 !important;\n                line-height: 0 !important;\n            }\n            h1[data-nmb-header-hidden="true"] [data-nmb-header-overlay="true"] {\n                font-size: var(--nmb-header-restore-size, 20px) !important;\n                line-height: var(--nmb-header-restore-line-height, normal) !important;\n            }\n            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [data-nmb-status-overridden="true"] {\n                display: none !important;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-header-minimal {\n                display: flex;\n                align-items: baseline;\n                gap: 10px;\n                margin-bottom: 12px;\n                padding-bottom: 10px;\n                border-bottom: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-plugin-name { font-size: 22px; font-weight: 700; color: var(--header-primary); }\n            .nmb-version { font-size: 15px; color: var(--text-muted); font-weight: 500; }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 8px;\n                margin-top: 28px;\n                padding: 12px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-btn-icon { width: 14px; height: 14px; flex-shrink: 0; }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-checking .nmb-btn-icon { animation: nmb-spin 0.8s linear infinite; }\n            @keyframes nmb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n\n            ${noticeButtonStyles}\n        `);
     }
     removeStyles() {
         try {
@@ -8119,7 +7969,7 @@ return false;
     getSettingsPanel() {
         const panel = document.createElement("div");
         panel.className = "nmb-panel";
-        panel.innerHTML = `\n            <div class="nmb-header-minimal">\n                <span class="nmb-plugin-name">\n                    <span class="nmb-version"> v${ByeBlocked.VERSION}</span>\n                </span>\n            </div>\n            ${this.renderSettingsGroup("types", "Hide users by type", true)}\n            ${this.renderSettingsGroup("places", "Where to hide", true)}\n            ${this.renderSettingsGroup("behavior", "Behavior", true)}\n            <div class="nmb-actions">\n                <button class="nmb-update-btn" data-nmb-update-btn>\n                    <svg class="nmb-btn-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">\n                        <path d="M14 2v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>\n                        <path d="M13.5 7A5.5 5.5 0 1 1 10.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>\n                    </svg>\n                    <span class="nmb-btn-label">Check for updates</span>\n                </button>\n                <span class="nmb-last-check" data-nmb-last-check>Last check: ${this._formatDate(this._lastCheckTimestamp)}</span>\n            </div>\n        `;
+        panel.innerHTML = `\n            <div class="nmb-header-minimal">\n                <span class="nmb-plugin-name">\n                    <span class="nmb-version"> v${ByeBlocked.VERSION}</span>\n                </span>\n            </div>\n            ${this._renderSettingsSection("types", "Hide users by type", true)}\n            ${this._renderSettingsSection("places", "Where to hide", true)}\n            ${this._renderSettingsSection("behavior", "Behavior", true)}\n            <div class="nmb-actions">\n                <button class="nmb-update-btn" data-nmb-update-btn>\n                    <svg class="nmb-btn-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">\n                        <path d="M14 2v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>\n                        <path d="M13.5 7A5.5 5.5 0 1 1 10.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>\n                    </svg>\n                    <span class="nmb-btn-label">Check for updates</span>\n                </button>\n                <span class="nmb-last-check" data-nmb-last-check>Last check: ${this._formatDate(this._lastCheckTimestamp)}</span>\n            </div>\n        `;
         if (this._updateState.status === "available") {
             this._renderUpdateBtn(panel);
         } else {
@@ -8131,59 +7981,7 @@ return false;
                 this._renderUpdateBtn(panel);
             }
         }
-        panel.addEventListener("click", event => {
-            const updateBtn = event.target.closest("[data-nmb-update-btn]");
-            if (updateBtn) {
-                if (this._updateState.status === "available" && this._updateState.remoteText) {
-                    this._autoInstall(this._updateState.latestVersion, this._updateState.remoteText, panel);
-                } else {
-                    this.checkForUpdates(panel, false);
-                }
-                return;
-            }
-            const header = event.target.closest(".nmb-section-header");
-            if (header) {
-                header.closest(".nmb-section")?.classList.toggle("is-open");
-                return;
-            }
-            const switchEl = event.target.closest(".nmb-switch");
-            if (switchEl) {
-                const {section: section, key: key} = switchEl.dataset;
-                const next = !this.settings[section][key];
-                this.settings[section][key] = next;
-                switchEl.classList.toggle("is-on", next);
-                this.saveSettings();
-                if (section === "behavior" && key === "muteVoiceJoinLeaveSound") {
-                    if (next) {
-                        setTimeout(() => {
-                            this.patchSound();
-                            this.patchSoundboardEffects();
-                            this.toast("ðŸ”Š Voice sound suppression activated.", "info");
-                        }, 1e3);
-                    } else {
-                        this.toast("ðŸ”„ Please reload the plugin for changes to take effect.", "warn");
-                    }
-                }
-                if (section === "behavior" && key === "muteBlockedVoiceAudio") {
-                    if (next) {
-                        setTimeout(() => {
-                            this.patchVoiceMute();
-                            this.patchSound();
-                            this.patchSoundboardEffects();
-                            this.toast("ðŸ”‡ Blocked users' voice audio will now be muted.", "info");
-                        }, 200);
-                    } else {
-                        this._releaseAllVoiceMutes();
-                        this.toast("ðŸ”„ Please reload the plugin for changes to take effect.", "warn");
-                    }
-                }
-                if (section === "behavior" && key === "suppressTaskbarBadge") {
-                    this._refreshTaskbarBadge();
-                }
-                this.queueRefresh();
-                return;
-            }
-        });
+        panel.addEventListener("click", event => this._onSettingsPanelClick(event, panel));
         setTimeout(() => {
             panel.scrollIntoView({
                 block: "start",
@@ -8192,26 +7990,59 @@ return false;
         }, 50);
         return panel;
     }
-    renderSettingsGroup(section, title, openByDefault = false) {
-        const labels = {
-            blocked: "Blocked users",
-            ignored: "Muted/ignored users",
-            messages: "Messages & chat",
-            memberList: "Member list & members page",
-            voiceChannels: "Voice & Stage channels (including activity panel, streams)",
-            groupDms: "Group DMs",
-            autocomplete: "Autocomplete & suggestions (mentions, invite picker)",
-            reactions: "Message reactions",
-            events: "Scheduled events (hide events created by blocked users)",
-            autoCheckUpdates: "Auto-check updates on startup",
-            muteVoiceJoinLeaveSound: "Silence join/leave sounds for blocked users",
-            muteBlockedVoiceAudio: "Mute blocked users' voice/mic audio in calls",
-            suppressTaskbarBadge: "Hide taskbar & tray badge for blocked-only activity"
-        };
-        const rows = Object.keys(this.settings[section]).map(key => {
-            const isOn = this.settings[section][key];
-            return `\n                <div class="nmb-row">\n                    <div class="nmb-row-label-wrap">\n                        <span class="nmb-row-label">${labels[key] || key}</span>\n                    </div>\n                    <div class="nmb-switch ${isOn ? "is-on" : ""}" data-section="${section}" data-key="${key}">\n                        <div class="nmb-switch-knob"></div>\n                    </div>\n                </div>\n            `;
-        }).join("");
+    _onSettingsPanelClick(event, panel) {
+        const updateBtn = event.target.closest("[data-nmb-update-btn]");
+        if (updateBtn) {
+            if (this._updateState.status === "available" && this._updateState.remoteText) {
+                this._autoInstall(this._updateState.latestVersion, this._updateState.remoteText, panel);
+            } else {
+                this.checkForUpdates(panel, false);
+            }
+            return;
+        }
+        const header = event.target.closest(".nmb-section-header");
+        if (header) {
+            header.closest(".nmb-section")?.classList.toggle("is-open");
+            return;
+        }
+        const switchEl = event.target.closest(".nmb-switch");
+        if (switchEl) {
+            this._onSettingsToggle(switchEl);
+        }
+    }
+    _onSettingsToggle(switchEl) {
+        const { section, key } = switchEl.dataset;
+        const next = !this.settings[section][key];
+        this.settings[section][key] = next;
+        switchEl.classList.toggle("is-on", next);
+        this.saveSettings();
+        if (section === "behavior" && key === "muteVoiceJoinLeaveSound") {
+            if (next) {
+                setTimeout(() => { this.patchSound(); this.patchSoundboardEffects(); this.toast("Voice sound suppression activated.", "info"); }, 1e3);
+            } else {
+                this.toast("Please reload the plugin for changes to take effect.", "warn");
+            }
+        }
+        if (section === "behavior" && key === "muteBlockedVoiceAudio") {
+            if (next) {
+                setTimeout(() => { this.patchVoiceMute(); this.patchSound(); this.patchSoundboardEffects(); this.toast("Blocked users' voice audio will now be muted.", "info"); }, 200);
+            } else {
+                this._releaseAllVoiceMutes();
+                this.toast("Please reload the plugin for changes to take effect.", "warn");
+            }
+        }
+        if (section === "behavior" && key === "suppressTaskbarBadge") {
+            this._refreshTaskbarBadge();
+        }
+        this.queueRefresh();
+    }
+    _renderSettingsSection(section, title, openByDefault = false) {
+        const rows = Object.keys(this.settings[section]).map(key => this._renderSettingsRow(key, section)).join("");
         return `\n            <section class="nmb-section ${openByDefault ? "is-open" : ""}">\n                <div class="nmb-section-header">\n                    <p class="nmb-section-title">${title}</p>\n                    <svg class="nmb-chevron" viewBox="0 0 24 24" fill="none">\n                        <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>\n                    </svg>\n                </div>\n                <div class="nmb-section-body">\n                    <div class="nmb-section-body-inner">${rows}</div>\n                </div>\n            </section>\n        `;
+    }
+    _renderSettingsRow(key, section) {
+        const isOn = this.settings[section][key];
+        const label = ByeBlocked.SETTINGS_LABELS[key] || key;
+        return `\n                <div class="nmb-row">\n                    <div class="nmb-row-label-wrap">\n                        <span class="nmb-row-label">${label}</span>\n                    </div>\n                    <div class="nmb-switch ${isOn ? "is-on" : ""}" data-section="${section}" data-key="${key}">\n                        <div class="nmb-switch-knob"></div>\n                    </div>\n                </div>\n            `;
     }
 };
