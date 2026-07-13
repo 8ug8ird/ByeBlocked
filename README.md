@@ -1,14 +1,15 @@
-# ByeBlocked
+<div align="center">
+
+### ByeBlocked
+
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-plugin-5865F2)](https://betterdiscord.app)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
-<div style="display: flex; justify-content: center; gap: 10px;">
-  <img src="assets/Screenshot_1.png" alt="ByeBlocked Settings" width="49%">
-  <img src="assets/Screenshot_2.png" alt="ByeBlocked Settings" width="49%">
-</div>
-<br>
+**Remove blocked and ignored users from your Discord view**
 
-Remove blocked and ignored users from your Discord view
+<img src="assets/Discord_ubFapzaaLs-output.gif" width="800">
+
+</div>
 
 ## Features
 
@@ -19,6 +20,8 @@ Remove blocked and ignored users from your Discord view
 - **Notifications** - Suppresses the taskbar/tray badge when unread activity is only from blocked users
 
 ## Installation
+
+Requires [BetterDiscord](https://betterdiscord.app) installed.
 
 1. Download [`ByeBlocked.plugin.js`](https://github.com/8ug8ird/ByeBlocked/releases/latest/download/ByeBlocked.plugin.js)
 2. Go to **Settings > Plugins > Open Plugins Folder**
