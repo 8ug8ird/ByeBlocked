@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.3.3
+ * @version 2.3.4
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -78,7 +78,7 @@ function _getLocale() { try { return (document.documentElement?.lang || navigato
 function _makeDict(pt, en) { return { 'pt-br': pt, pt: pt, 'en-us': en, en: en }; }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.3.3";
+    static VERSION="2.3.4";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static EVENTS_LOCALE = _makeDict(
@@ -1022,6 +1022,16 @@ module.exports = class ByeBlocked {
             if (guildReadState && typeof guildReadState.emitChange === "function") guildReadState.emitChange();
         } catch (_) {}
         this._refreshTaskbarBadge();
+    }
+    _emitVoiceStateChanges() {
+        try {
+            const voiceStore = this.modules.SortedVoiceStateStore;
+            if (voiceStore && typeof voiceStore.emitChange === "function") voiceStore.emitChange();
+        } catch (_) {}
+        try {
+            const stageStore = this.modules.StageChannelParticipantStore;
+            if (stageStore && typeof stageStore.emitChange === "function") stageStore.emitChange();
+        } catch (_) {}
     }
     _taskbarBadgeEnabled() {
         return !!(this.settings.places?.messages && this.settings.behavior?.suppressTaskbarBadge);
@@ -2655,17 +2665,35 @@ return false;
             }
         }
     }
+    _onRelationshipChanged() {
+        this.queueRefresh();
+        this._shouldHideCache = new Map;
+        if (this.settings.places.voiceChannels) {
+            this._emitVoiceStateChanges();
+            try { this.hideVoiceUsers(); } catch (_) {}
+        }
+        if (this.settings.places.memberList) {
+            try { this.hideMemberRows(); } catch (_) {}
+            const retry = () => {
+                this._shouldHideCache = new Map;
+                try { this.hideMemberRows(); } catch (_) {}
+            };
+            requestAnimationFrame(retry);
+            setTimeout(retry, 60);
+            setTimeout(retry, 200);
+        }
+    }
     patchRelationshipUpdates() {
         this.relationshipChangeHandler = () => {
-            this.queueRefresh();
             this._forceReadStateRecheck();
+            this._onRelationshipChanged();
         };
         try {
             this.modules.RelationshipStore?.addChangeListener?.(this.relationshipChangeHandler);
         } catch (_) {}
         const utils = this.modules.RelationshipUtils;
-        if (utils?.addRelationship) this.patchAfter(utils, "addRelationship", () => this.queueRefresh());
-        if (utils?.removeRelationship) this.patchAfter(utils, "removeRelationship", () => this.queueRefresh());
+        if (utils?.addRelationship) this.patchAfter(utils, "addRelationship", () => this._onRelationshipChanged());
+        if (utils?.removeRelationship) this.patchAfter(utils, "removeRelationship", () => this._onRelationshipChanged());
     }
     patchForumPostComponent() {
         if (!this.settings.places.messages) return;
@@ -4534,7 +4562,7 @@ return false;
                 this._fastHideNode(node);
                 const qsa = node.querySelectorAll;
                 if (qsa) {
-                    const descendants = qsa.call(node, 'li[class*="messageListItem"], [class*="messageListItem"], [data-list-item-id^="pins__"], [class*="memberRow"], [role="listitem"][data-list-item-id]');
+                    const descendants = qsa.call(node, 'li[class*="messageListItem"], [class*="messageListItem"], [data-list-item-id^="pins__"], [class*="memberRow"], [role="listitem"][data-list-item-id], [class*="voiceUser"]');
                     for (let d = 0; d < descendants.length; d++) {
                         this._fastHideNode(descendants[d]);
                     }
@@ -4645,6 +4673,18 @@ return false;
                     } catch (_) {}
                     return;
                 }
+            }
+        }
+        if (this.settings.places.voiceChannels && el.matches?.('[class*="voiceUser"]')) {
+            const userId = this.findUserId(el);
+            if (userId && this.shouldHide(userId)) {
+                const row = el.closest('[class*="draggable__"]') || el.closest("li") || el;
+                if (!this.isVoiceChannelShell(row)) this.hideElement(row, "fast-voice-user", userId); else this.hideElement(el, "fast-voice-user", userId);
+                try {
+                    this.fixVoiceCounters();
+                    this.fixMemberGroupCounts();
+                } catch (_) {}
+                return;
             }
         }
         if (el.matches?.('[data-list-item-id^="pins__"]') || el.querySelector?.('[data-list-item-id^="pins__"]')) {
@@ -5139,15 +5179,26 @@ return false;
         this.hiddenElements.clear();
         this.hiddenParents.clear();
     }
+    _reapOrphanedVoiceWrappers() {
+        const hiddenInner = document.querySelectorAll('[class*="voiceUser"][data-hidden-blocked="true"]');
+        for (let i = 0; i < hiddenInner.length; i++) {
+            const inner = hiddenInner[i];
+            const wrapper = inner.closest('[class*="draggable__"]') || inner.closest("li");
+            if (wrapper && wrapper !== inner && wrapper.dataset?.hiddenBlocked !== "true") {
+                this.hideElement(wrapper, "voice-user-orphan-wrapper", inner.dataset?.nmbUserId || null);
+            }
+        }
+    }
     hideVoiceUsers() {
         const els = document.querySelectorAll('[class*="voiceUser"]:not([data-hidden-blocked="true"]), [class*="voiceUsers"] [data-list-item-id]:not([data-hidden-blocked="true"]), [class*="listItem"][data-list-item-id]:not([data-hidden-blocked="true"])');
         for (let i = 0; i < els.length; i++) {
             const el = els[i];
             const userId = this.findUserId(el);
             if (!this.shouldHide(userId)) continue;
-            const row = el.closest("li") || el;
+            const row = el.closest('[class*="draggable__"]') || el.closest("li") || el;
             if (!this.isVoiceChannelShell(row)) this.hideElement(row, "voice-user", userId); else this.hideElement(el, "voice-user", userId);
         }
+        this._reapOrphanedVoiceWrappers();
         this.fixVoiceCounters();
         this.hideStageUsers();
         this.fixStageAudienceCount();
@@ -5650,6 +5701,7 @@ return false;
             }
         }
         this.fixGuildMembersPageCount();
+        try { this.fixMemberGroupCounts(); } catch (_) {}
     }
     _buildEventsEmptySkeletonHtml() {
         const t = _locale(_getLocale(), ByeBlocked.EVENTS_LOCALE);
@@ -6508,9 +6560,11 @@ return false;
     countVisibleMembersAfter(header) {
         let count = 0;
         let sawMember = false;
+        let sawAnySibling = false;
         let next = header.nextElementSibling;
         while (next) {
             if (this.isMemberGroupHeader(next)) break;
+            sawAnySibling = true;
             if (next.dataset?.hiddenBlocked === "true") { next = next.nextElementSibling; continue; }
             const userId = this.findUserId(next);
             if (userId) {
@@ -6519,7 +6573,14 @@ return false;
             }
             next = next.nextElementSibling;
         }
-        return sawMember ? count : null;
+        if (sawMember) return count;
+        if (sawAnySibling && this._headerReportsNonZeroCount(header)) return 0;
+        return null;
+    }
+    _headerReportsNonZeroCount(header) {
+        const text = (header.textContent || "").trim();
+        const match = text.match(/[\u2013\u2014]\s*(\d+)\s*$/);
+        return !!(match && parseInt(match[1], 10) > 0);
     }
     updateMemberGroupVisibleCount(header, count) {
         const headerDiv = header.querySelector('[class*="membersGroupHeader"]') || header;
