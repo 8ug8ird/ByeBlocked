@@ -27,7 +27,17 @@ Requires [BetterDiscord](https://betterdiscord.app) installed.
 2. Go to **Settings > Plugins > Open Plugins Folder**
 3. Drop the file in and enable it
 
+## Feedback
+
+Found a bug or an edge case?
+
+Feel free to open an [Issue](https://github.com/8ug8ird/ByeBlocked/issues). Feedback, feature requests, and implementation ideas are always welcome.
+
+<br>
+
 > [!WARNING]
 > BetterDiscord goes against Discord's ToS. Use at your own risk.
+
+<br>
 
 MIT © [8ug8ird](https://github.com/8ug8ird) 🐦
