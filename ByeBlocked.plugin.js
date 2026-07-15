@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.3.4
+ * @version 2.3.5
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -78,7 +78,7 @@ function _getLocale() { try { return (document.documentElement?.lang || navigato
 function _makeDict(pt, en) { return { 'pt-br': pt, pt: pt, 'en-us': en, en: en }; }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.3.4";
+    static VERSION="2.3.5";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static EVENTS_LOCALE = _makeDict(
@@ -3605,6 +3605,35 @@ return false;
             return false;
         }
     }
+    _startShortLivedMessageObserver() {
+        try {
+            if (this._shortLivedMsgObserver) {
+                this._shortLivedMsgObserver.disconnect();
+                this._shortLivedMsgObserver = null;
+            }
+            clearTimeout(this._shortLivedMsgObserverTimeout);
+            const container = document.querySelector('[class*="scroller"][class*="messages"], [data-list-id*="chat-messages"]')
+                || document.querySelector('[class*="chatContent"]')
+                || document.body;
+            if (!container) return;
+            let pending = false;
+            const observer = new MutationObserver(() => {
+                if (pending || !this.isRunning) return;
+                pending = true;
+                requestAnimationFrame(() => {
+                    pending = false;
+                    if (!this.isRunning) return;
+                    try { this.hideMessages(); } catch (_) {}
+                });
+            });
+            observer.observe(container, { childList: true, subtree: true });
+            this._shortLivedMsgObserver = observer;
+            this._shortLivedMsgObserverTimeout = setTimeout(() => {
+                try { observer.disconnect(); } catch (_) {}
+                if (this._shortLivedMsgObserver === observer) this._shortLivedMsgObserver = null;
+            }, 1500);
+        } catch (_) {}
+    }
     _startChannelSwitchWatcher() {
         if (this._channelSwitchChangeHandler) return;
         const store = this.modules.SelectedChannelStore;
@@ -3614,12 +3643,25 @@ return false;
             const channelId = store.getChannelId?.() || null;
             if (channelId === this._lastWatchedChannelId) return;
             this._lastWatchedChannelId = channelId;
+            if (this.settings.places.messages) {
+                try { this.hideMessages(); } catch (_) {}
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        if (!this.isRunning) return;
+                        try { this.hideMessages(); } catch (_) {}
+                    });
+                });
+                this._startShortLivedMessageObserver();
+            }
             const delays = [ 50, 250, 600 ];
             for (let d = 0; d < delays.length; d++) {
                 setTimeout(() => {
                     if (!this.isRunning) return;
                     try {
-                        if (this.settings.places.messages) this.hideForumPosts();
+                        if (this.settings.places.messages) {
+                            this.hideMessages();
+                            this.hideForumPosts();
+                        }
                         if (this.settings.places.memberList) this.hideMemberRows();
                         if (this.settings.places.groupDms || this.settings.places.messages) this.hidePrivateChannels();
                         if (this.settings.places.reactions) {
