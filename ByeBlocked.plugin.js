@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.3.6
+ * @version 2.4.0
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -64,12 +64,7 @@ class PatchManager {
     safe(l, fn) { try { fn(); return true; } catch (err) { this._logFail(l, err); return false; } }
     cleanup() { try { BdApi.Patcher.unpatchAll(this.p.pluginName); } catch (_) {} }
     _logFail(l, err) {
-        try {
-            this.p._nmbStartupFailures = this.p._nmbStartupFailures || [];
-            this.p._nmbStartupFailures.push({ name: l, message: err?.message || String(err), time: Date.now() });
-            if (this.p._nmbStartupFailures.length === 1)
-                this.p.toast('ByeBlocked: parte de uma funcionalidade (' + l + ') nao pode iniciar. Provavelmente o Discord mudou algo - o resto do plugin continua ativo. Veja o console para detalhes.', 'warn');
-        } catch (_) {}
+        try { BdApi.DevTools?.log?.("[ByeBlocked] " + l + ": " + (err?.message || String(err))); } catch (_) {}
     }
 }
 
@@ -78,7 +73,7 @@ function _getLocale() { try { return (document.documentElement?.lang || navigato
 function _makeDict(pt, en) { return { 'pt-br': pt, pt: pt, 'en-us': en, en: en }; }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.3.6";
+    static VERSION="2.4.0";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static EVENTS_LOCALE = _makeDict(
@@ -86,8 +81,8 @@ module.exports = class ByeBlocked {
         { title: 'No upcoming events.', subtitle: 'Schedule an event for any planned activity in your server.', tip_prefix: 'You can give other people permission to create events in ', tip_link: 'server settings > roles' }
     );
     static PINS_LOCALE = _makeDict(
-        { body: 'Este canal n\u00e3o tem<br>mensagens fixadas... por enquanto.', tip_label: 'Fica a dica:', tip_text: 'Usu\u00e1rios com a permiss\u00e3o \u201cGerenciar Mensagens\u201d podem fixar uma mensagem no menu de contexto.' },
-        { body: "This channel doesn't have<br>any pinned messages... yet.", tip_label: 'Pro tip:', tip_text: 'Users with the "Manage Messages" permission can pin a message from the context menu.' }
+        { body: 'Este canal n\u00e3o tem<br>mensagens fixadas... por enquanto.', tip_label: 'Fica a dica:', tip_text: 'Usu\u00e1rios com a permiss\u00e3o \u201cFixar mensagens\u201d podem fixar uma mensagem no menu contextual.' },
+        { body: "This channel doesn't have<br>any pinned messages... yet.", tip_label: 'Pro tip:', tip_text: 'Users with the "Pin Messages" permission can pin a message from the context menu.' }
     );
     static TOPICS_LOCALE = _makeDict(
         { title: 'N\u00e3o h\u00e1 t\u00f3picos.', subtitle: 'Mantenha o foco em uma conversa com um t\u00f3pico \u2014 um canal de texto tempor\u00e1rio.', button: 'Criar t\u00f3pico' },
@@ -101,10 +96,51 @@ module.exports = class ByeBlocked {
         'Status oculto (bloqueado)',
         'Status hidden (blocked)'
     );
+    static DURATION_LOCALE = _makeDict(
+        'dura\u00e7\u00e3o da chamada',
+        'call duration'
+    );
+    static TOPIC_HEADER_LOCALE = _makeDict(
+        't\u00f3pic',
+        'topic'
+    );
+    static get INVITE_LABELS() { return ['Convidar para canal de voz', 'Invite to voice channel']; }
+    static get INVITE_LABEL_SEL() { return ByeBlocked.INVITE_LABELS.map(l => '[aria-label^="' + l + '"]').join(', '); }
     static STAGE_LOCALE = _makeDict(
         { title: 'Sem pedidos', body: 'Os pedidos para falar ser\u00e3o mostrados aqui.' },
         { title: 'No requests', body: 'Requests to speak will show up here.' }
     );
+    static get ACTIONS() {
+        return {
+            VOICE_STATE_UPDATES: "VOICE_STATE_UPDATES",
+            MESSAGE_CREATE: "MESSAGE_CREATE",
+            MESSAGE_UPDATE: "MESSAGE_UPDATE",
+            MESSAGE_PIN_ADD: "MESSAGE_PIN_ADD",
+            MESSAGE_PIN_REMOVE: "MESSAGE_PIN_REMOVE",
+            CHANNEL_PINS_UPDATE: "CHANNEL_PINS_UPDATE",
+            LOAD_PINNED_MESSAGES_SUCCESS: "LOAD_PINNED_MESSAGES_SUCCESS",
+            FETCH_PINNED_MESSAGES_SUCCESS: "FETCH_PINNED_MESSAGES_SUCCESS",
+            THREAD_CREATE: "THREAD_CREATE",
+            CHANNEL_ACK: "CHANNEL_ACK",
+            ACK_MESSAGES: "ACK_MESSAGES",
+            THREAD_ACK: "THREAD_ACK",
+            EMBEDDED_ACTIVITY_UPDATE_V2: "EMBEDDED_ACTIVITY_UPDATE_V2",
+            VOICE_CHANNEL_EFFECT_SEND: "VOICE_CHANNEL_EFFECT_SEND",
+            GUILD_SETTINGS_MODAL_OPEN: "GUILD_SETTINGS_MODAL_OPEN",
+            CHANNEL_STATUS_REGEX: /CHANNEL_STATUS|VOICE_STATUS|VOICE_CHANNEL_STATUS/i,
+        };
+    }
+    static get STORE_NAMES() {
+        return {
+            RELATIONSHIP: ["RelationshipStore", "RelationshipManagerStore", "RelationshipStoreManager"],
+            GUILD_MEMBER: ["GuildMemberStore", "MemberStore", "GuildMembersStore"],
+            REACTIONS: ["ReactionsStore", "MessageReactionsStore", "ReactionStore"],
+            VOICE_STATE: ["SortedVoiceStateStore", "VoiceStateStore", "SortedVoiceStatesStore"],
+            STAGE_PARTICIPANT: ["StageChannelParticipantStore", "StageParticipantStore"],
+            STAGE_INSTANCE: ["StageInstanceStore", "StageInstancesStore"],
+            ACTIVITY: ["ActivityStore", "EmbeddedActivityStore", "ActivityParticipantsStore", "ActivityManagerStore"],
+        };
+    }
     static SETTINGS_LABELS = {
         blocked: 'Blocked users',
         ignored: 'Muted/ignored users',
@@ -148,6 +184,9 @@ module.exports = class ByeBlocked {
         this._muteTimeout = null;
         this._reactorModalPassTimer = null;
         this._guildSwitchWaitTimeout = null;
+        this._isNavigating = false;
+        this._navStartedAt = null;
+        this._scrollRestoreTimer = null;
         
         for (const flag of ['store','readState','taskbarBadge','taskbarElectron','forumPostComponent',
             'messagesWrap','inviteSuggestions','privateChannelStore','mentionAutocomplete',
@@ -170,6 +209,7 @@ module.exports = class ByeBlocked {
         this._lastActivityParticipantIds = new Set;
         this.originalVoiceMethods = {};
         this._soundPlayKey = null;
+        this._soundFileKey = null;
         this._localMuteKey = null;
         this._localVolumeKey = null;
         
@@ -210,6 +250,7 @@ module.exports = class ByeBlocked {
         this._forumRetryScheduled = false;
         this._lastScanDomTime = 0;
         this._lastContextMessageId = null;
+        this._voiceStateCallSig = null;
         
         this._patcher = new PatchManager(this);
     }
@@ -1382,6 +1423,7 @@ module.exports = class ByeBlocked {
         }
         if (this._readStateRecheckScheduled || this._readStateRecheckInFlight) return;
         this._readStateRecheckScheduled = true;
+        clearTimeout(this._readStateRecheckTimer);
         this._readStateRecheckTimer = setTimeout(run, 100);
     }
     _scheduleReadStateReloadRechecks() {
@@ -1431,11 +1473,19 @@ module.exports = class ByeBlocked {
             clearTimeout(this._guildSwitchWaitTimeout);
             this._guildSwitchWaitTimeout = null;
         }
+        if (this._scrollRestoreTimer) {
+            clearTimeout(this._scrollRestoreTimer);
+            this._scrollRestoreTimer = null;
+        }
     }
     _handleNavigation() {
         if (!this.isRunning) return;
         this._cancelAllNavTimers();
         this._observerFramePending = false;
+        const currentGuildId = this.modules.SelectedGuildStore?.getGuildId?.() || null;
+        this._lastSeenGuildId = currentGuildId;
+        this._isNavigating = true;
+        this._navStartedAt = Date.now();
         this._injectGuildSwitchGuard();
         if (this.settings.places.events) {
             try {
@@ -1468,10 +1518,13 @@ module.exports = class ByeBlocked {
             () => document.querySelector('[data-list-id]')
         );
         if (chatReady || attempts >= MAX_ATTEMPTS) {
-            this.hiddenElements.clear();
-            this.hiddenParents.clear();
+            if (!this._isNavigating) {
+                this.hiddenElements.clear();
+                this.hiddenParents.clear();
+            }
             this._restartObserver();
             this.scanDom();
+            this._restoreChatScroll();
             this.patchMessageStore();
             try {
                 const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
@@ -1480,12 +1533,13 @@ module.exports = class ByeBlocked {
             this._guildSwitchWaitTimeout = setTimeout(() => {
                 if (!this.isRunning) return;
                 this.scanDom();
+                this._restoreChatScroll();
                 try {
                     const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
                     if (channelId) this._scanExistingPinsForChannel(channelId);
                 } catch (_) {}
-                this._waitForEventsDataThenRemoveGuard(0);
                 this._guildSwitchWaitTimeout = null;
+                this._waitForEventsDataThenRemoveGuard(0);
             }, 400);
         } else {
             if (this.settings.places.events) {
@@ -1497,6 +1551,25 @@ module.exports = class ByeBlocked {
                 this._waitForChatReady(attempts + 1);
             }, INTERVAL);
         }
+    }
+    _restoreChatScroll() {
+        if (!this._isNavigating) return;
+        if (this._scrollRestoreTimer) { clearTimeout(this._scrollRestoreTimer); this._scrollRestoreTimer = null; }
+        this._scrollRestoreTimer = setTimeout(() => {
+            this._finishNavigation();
+            this._scrollRestoreTimer = null;
+        }, 600);
+    }
+    _finishNavigation() {
+        this._isNavigating = false;
+        try {
+            for (const el of Array.from(this.hiddenElements)) {
+                if (!document.contains(el)) this.hiddenElements.delete(el);
+            }
+            for (const parent of Array.from(this.hiddenParents)) {
+                if (!document.contains(parent)) this.hiddenParents.delete(parent);
+            }
+        } catch (_) {}
     }
     _waitForEventsDataThenRemoveGuard(attempts) {
         const MAX_ATTEMPTS = 30;
@@ -1550,6 +1623,11 @@ module.exports = class ByeBlocked {
     }
     _restartObserver() {
         this.observer?.disconnect();
+        this._stageObserver?.disconnect();
+        if (this._stageRootWatchInterval) {
+            clearInterval(this._stageRootWatchInterval);
+            this._stageRootWatchInterval = null;
+        }
         this._observerFramePending = false;
         this.observer = new MutationObserver(mutations => {
             if (!this._isRelevantMutation(mutations)) return;
@@ -1574,6 +1652,23 @@ module.exports = class ByeBlocked {
             childList: true,
             subtree: true
         });
+        this._stageObserverBusy = false;
+        this._stageObserver = new MutationObserver(() => {
+            if (this._stageObserverBusy) return;
+            this._stageObserverBusy = true;
+            requestAnimationFrame(() => {
+                if (!this.isRunning || !this.settings.places?.voiceChannels) { this._stageObserverBusy = false; return; }
+                try { this.hideStageSpeakerRequests(); } catch (_) {}
+                this._stageObserverBusy = false;
+            });
+        });
+        const _watchStageRoot = () => {
+            this._stageObserver?.disconnect();
+            const root = document.querySelector('[class*="stageSection_"], [class*="chat_"]');
+            if (root) this._stageObserver?.observe(root, { childList: true, subtree: true });
+        };
+        _watchStageRoot();
+        this._stageRootWatchInterval = setInterval(_watchStageRoot, 3000);
     }
     _injectGuildSwitchGuard() {
         if (document.getElementById("nmb-guild-switch-guard")) return;
@@ -1581,7 +1676,7 @@ module.exports = class ByeBlocked {
         style.id = "nmb-guild-switch-guard";
         const voiceTimerRule = this.settings.places.voiceChannels ? `\n            [data-list-item-id*="channels"] [class*="timer"],\n            [data-list-item-id*="channels"] [class*="voiceTimer"],\n            [data-list-item-id*="channels"] [role="timer"],\n            [data-list-item-id*="channels"] [class*="tabularNumbers"],\n            [class*="voiceChannel"] [class*="timer"],\n            [class*="voiceChannel"] [class*="voiceTimer"],\n            [class*="voiceChannel"] [role="timer"],\n            [class*="voiceChannel"] [class*="tabularNumbers"] {\n                visibility: hidden !important;\n            }\n        ` : "";
         const stageIconGuardRule = this.settings.places.voiceChannels ? `\n            [data-list-item-id*="channels"] [class*="iconLive"],\n            [class*="voiceChannel"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n            }\n        ` : "";
-        const eventsGuardRule = this.settings.places.events ? `\n            li:has([data-list-item-id^="channels___upcoming-events-"]) {\n                visibility: hidden !important;\n            }\n        ` : "";
+        const eventsGuardRule = "";
         const channelStatusGuardRule = "";
         style.textContent = `\n            [class*="messageGroupBlocked"],\n            [class*="blockedSystemMessage"],\n            li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),\n            li[class*="messageListItem"]:has([class*="blockedSystemMessage"]) {\n                display: none !important;\n                height: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${voiceTimerRule}\n            ${stageIconGuardRule}\n            ${eventsGuardRule}\n            ${channelStatusGuardRule}\n        `;
         document.head.appendChild(style);
@@ -1610,10 +1705,13 @@ module.exports = class ByeBlocked {
         if (this.isRunning) return;
         this.isRunning = true;
         window.__byeBlocked = this;
+        this.restoreAllElements();
+        this._removeGuildSwitchGuard();
+        this.removeStyles();
         this._injectGuildSwitchGuard();
         this._patcher.safe('resolveModules', () => this.resolveModules());
         if (!this.modules.RelationshipStore?.isBlocked) {
-            const maxAttempts = 12;
+            const maxAttempts = 20;
             if (_retryAttempt < maxAttempts) {
                 this.isRunning = false;
                 const delay = Math.min(1000 * Math.pow(1.5, _retryAttempt), 20000);
@@ -1732,6 +1830,11 @@ module.exports = class ByeBlocked {
             clearTimeout(this._guildSwitchWaitTimeout);
             this._guildSwitchWaitTimeout = null;
         }
+        if (this._scrollRestoreTimer) {
+            clearTimeout(this._scrollRestoreTimer);
+            this._scrollRestoreTimer = null;
+        }
+        this._isNavigating = false;
         if (this._readStateRecheckTimer) {
             clearTimeout(this._readStateRecheckTimer);
             this._readStateRecheckTimer = null;
@@ -1740,6 +1843,12 @@ module.exports = class ByeBlocked {
         this._readStateRecheckInFlight = false;
         this.observer?.disconnect();
         this.observer = null;
+        this._stageObserver?.disconnect();
+        this._stageObserver = null;
+        if (this._stageRootWatchInterval) {
+            clearInterval(this._stageRootWatchInterval);
+            this._stageRootWatchInterval = null;
+        }
         if (this._reactionClickHandler) {
             document.removeEventListener("click", this._reactionClickHandler, true);
             this._reactionClickHandler = null;
@@ -1821,6 +1930,7 @@ module.exports = class ByeBlocked {
         this._guildSwitchFluxHandler = null;
         this._channelSelectFluxHandler = null;
         this._lastSeenGuildId = null;
+        this._navStartedAt = null;
         if (this._historyPatchActive) {
             history.pushState = this._origPushState;
             history.replaceState = this._origReplaceState;
@@ -1843,6 +1953,8 @@ module.exports = class ByeBlocked {
         this.modules.ElectronModule = null;
         this._oldUnblockedConnectedUsers = [];
         this._soundPlayKey = null;
+        this._soundFileKey = null;
+        this._voiceStateCallSig = null;
         this._lastStreamerId = null;
         this._lastActivityParticipantIds = new Set;
         this._guildMembersPagePatched = false;
@@ -1865,13 +1977,13 @@ module.exports = class ByeBlocked {
     resolveModules() {
         const getStore = (...names) => this._wpGetStore(...names);
         const getModule = (filter, opts) => this._wpGetModule(filter, opts);
-        this.modules.RelationshipStore = getStore("RelationshipStore", "RelationshipManagerStore", "RelationshipStoreManager");
-        this.modules.GuildMemberStore = getStore("GuildMemberStore", "MemberStore", "GuildMembersStore");
-        this.modules.ReactionsStore = getStore("ReactionsStore", "MessageReactionsStore", "ReactionStore");
-        this.modules.SortedVoiceStateStore = getStore("SortedVoiceStateStore", "VoiceStateStore", "SortedVoiceStatesStore");
-        this.modules.StageChannelParticipantStore = getStore("StageChannelParticipantStore", "StageParticipantStore");
-        this.modules.StageInstanceStore = getStore("StageInstanceStore", "StageInstancesStore");
-        this.modules.ActivityStore = getStore("ActivityStore", "EmbeddedActivityStore", "ActivityParticipantsStore", "ActivityManagerStore");
+        this.modules.RelationshipStore = getStore(...ByeBlocked.STORE_NAMES.RELATIONSHIP);
+        this.modules.GuildMemberStore = getStore(...ByeBlocked.STORE_NAMES.GUILD_MEMBER);
+        this.modules.ReactionsStore = getStore(...ByeBlocked.STORE_NAMES.REACTIONS);
+        this.modules.SortedVoiceStateStore = getStore(...ByeBlocked.STORE_NAMES.VOICE_STATE);
+        this.modules.StageChannelParticipantStore = getStore(...ByeBlocked.STORE_NAMES.STAGE_PARTICIPANT);
+        this.modules.StageInstanceStore = getStore(...ByeBlocked.STORE_NAMES.STAGE_INSTANCE);
+        this.modules.ActivityStore = getStore(...ByeBlocked.STORE_NAMES.ACTIVITY);
         this.modules.ChannelStore = getStore("ChannelStore", "ChannelsStore");
         this.modules.MessageStore = getStore("MessageStore", "MessagesStore", "ChannelMessagesStore");
         this._resolveMessagesGet();
@@ -1918,13 +2030,15 @@ module.exports = class ByeBlocked {
         });
         if (this.modules.SoundUtils) {
             this._soundPlayKey = null;
+            this._soundFileKey = null;
             try {
                 for (const [key, val] of Object.entries(this.modules.SoundUtils)) {
                     if (typeof val !== "function") continue;
                     const src = val.toString();
                     if (src.includes("disableSounds") && src.includes("getSoundpack")) {
                         this._soundPlayKey = key;
-                        break;
+                    } else if (src.includes("playFile")) {
+                        this._soundFileKey = key;
                     }
                 }
             } catch (_) {}
@@ -1934,7 +2048,10 @@ module.exports = class ByeBlocked {
             }
         } else {
             this.modules.SoundUtils = getModuleRaw(m => typeof m?.playSound === "function" && typeof m?.playFile === "function");
-            if (this.modules.SoundUtils) this._soundPlayKey = "playSound";
+            if (this.modules.SoundUtils) {
+                this._soundPlayKey = "playSound";
+                this._soundFileKey = "playFile";
+            }
         }
         if (!this.modules.SoundUtils || !this._soundPlayKey) {
             const altMod = this._wpGetModule(m => {
@@ -1947,7 +2064,8 @@ module.exports = class ByeBlocked {
             }
         }
     }
-    _resolveMediaEngineActions() {
+    _resolveMediaEngineActions(attempt = 0) {
+        if (this.modules.MediaEngineActions && (this._localVolumeKey || this._localMuteKey)) return;
         try {
             const mod = this._wpGetModule(m => {
                 if (typeof m !== "object" || !m) return false;
@@ -1974,6 +2092,12 @@ module.exports = class ByeBlocked {
                     this._localMuteKey = typeof alt.setLocalMute === "function" ? "setLocalMute" : this._localMuteKey;
                 }
             } catch (_) {}
+        }
+        if ((!this.modules.MediaEngineActions || (!this._localVolumeKey && !this._localMuteKey)) && attempt < 8) {
+            const delays = [1000, 2000, 3000, 5000, 8000, 12000, 18000, 25000];
+            setTimeout(() => this._resolveMediaEngineActions(attempt + 1), delays[attempt] || 5000);
+        } else if (attempt >= 8 && (!this.modules.MediaEngineActions || (!this._localVolumeKey && !this._localMuteKey))) {
+            this._patcher._logFail("resolveMediaEngineActions", new Error("esgotou tentativas"));
         }
     }
     _resolveMessagesGet() {
@@ -2068,7 +2192,7 @@ module.exports = class ByeBlocked {
                     if (ch.isDM?.() && self.shouldHide(ch.recipient?.id || ch.recipientId)) return false;
                     if (self.settings.places.groupDms && ch.isGroupDM?.()) {
                         const recipients = ch.recipients || ch.rawRecipients?.map(u => u?.id || u) || [];
-                        if (Array.isArray(recipients) && recipients.length && recipients.every(rid => self.shouldHide(rid))) return false;
+                        if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) return false;
                     }
                     return true;
                 } catch (_) {
@@ -2086,7 +2210,7 @@ module.exports = class ByeBlocked {
                 if (channel?.isDM?.() && self.shouldHide(channel.recipient?.id || channel.recipientId)) continue;
                 if (self.settings.places.groupDms && channel?.isGroupDM?.()) {
                     const recipients = channel.recipients || channel.rawRecipients?.map(u => u?.id || u) || [];
-                    if (Array.isArray(recipients) && recipients.length && recipients.every(rid => self.shouldHide(rid))) continue;
+                    if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) continue;
                 }
                 if (Array.isArray(out)) out.push(ch); else out[key] = ch;
             }
@@ -2352,6 +2476,7 @@ module.exports = class ByeBlocked {
         }
         if (!mod || !key || typeof mod[key] !== "function") {
             if (attempt < 8) setTimeout(() => this.patchMentionAutocomplete(attempt + 1), 3e3);
+            else this._patcher._logFail("patchMentionAutocomplete", new Error("esgotou tentativas"));
             return;
         }
         const self = this;
@@ -2397,6 +2522,8 @@ return false;
             this._guildMembersPagePatched = true;
         } else if (attempt < 10) {
             setTimeout(() => this.patchGuildMembersPageRow(attempt + 1), 2500);
+        } else {
+            this._patcher._logFail("patchGuildMembersPageRow", new Error("esgotou tentativas"));
         }
     }
     patchMemberListRow(attempt = 0) {
@@ -2410,6 +2537,8 @@ return false;
             this._memberListRowPatched = true;
         } else if (attempt < 10) {
             setTimeout(() => this.patchMemberListRow(attempt + 1), 2500);
+        } else {
+            this._patcher._logFail("patchMemberListRow", new Error("esgotou tentativas"));
         }
     }
     patchStores() {
@@ -2508,7 +2637,6 @@ return false;
             });
         }
         if (this.modules.ThreadStore && typeof this.modules.ThreadStore.getThreadsForParent === "function") {
-            const channelStoreRef = this.modules.ChannelStore;
             this.patchAfter(this.modules.ThreadStore, "getThreadsForParent", (_, args, ret) => {
                 if (!this.settings.places.messages) return ret;
                 if (!ret || typeof ret !== "object") return ret;
@@ -2517,9 +2645,9 @@ return false;
                 const filtered = isArray ? [] : {};
                 for (const [key, thread] of entries) {
                     let ownerId = thread?.ownerId || thread?.owner_id || thread?.message?.author?.id;
-                    if (!ownerId && channelStoreRef?.getChannel) {
+                    if (!ownerId && this.modules.ChannelStore?.getChannel) {
                         const threadId = thread?.id || key;
-                        const ch = threadId ? channelStoreRef.getChannel(threadId) : null;
+                        const ch = threadId ? this.modules.ChannelStore.getChannel(threadId) : null;
                         ownerId = ch?.ownerId || ch?.owner_id;
                     }
                     if (ownerId && this.shouldHide(ownerId)) continue;
@@ -2538,7 +2666,7 @@ return false;
             });
         }
     }
-    patchStageRenderComponent() {
+    patchStageRenderComponent(attempt = 0) {
         if (this._stageRenderComponentPatched) return;
         const self = this;
         const tryPatchComponent = (mod) => {
@@ -2603,8 +2731,13 @@ return false;
                 this._stageRenderComponentPatched = true;
             }
         }
+        if (!this._stageRenderComponentPatched && attempt < 8) {
+            setTimeout(() => this.patchStageRenderComponent(attempt + 1), 3000);
+        } else if (!this._stageRenderComponentPatched) {
+            this._patcher._logFail("patchStageRenderComponent", new Error("esgotou tentativas"));
+        }
     }
-    patchActivityPanelComponent() {
+    patchActivityPanelComponent(attempt = 0) {
         if (this._activityPanelComponentPatched) return;
         const self = this;
         const mod = this._wpGetModule(m => {
@@ -2663,6 +2796,11 @@ return false;
                 });
                 this._activityPanelComponentPatched = true;
             }
+        }
+        if (!this._activityPanelComponentPatched && attempt < 8) {
+            setTimeout(() => this.patchActivityPanelComponent(attempt + 1), 3000);
+        } else if (!this._activityPanelComponentPatched) {
+            this._patcher._logFail("patchActivityPanelComponent", new Error("esgotou tentativas"));
         }
     }
     _onRelationshipChanged() {
@@ -2785,6 +2923,7 @@ return false;
             const BlockedMessageGroup = BdApi.Webpack.getModule(m => m?.displayName === "BlockedMessageGroup" || m?.name === "BlockedMessageGroup" || m?.prototype?.render?.toString?.().includes("MESSAGE_GROUP_BLOCKED") || typeof m === "function" && m.toString && m.toString().includes("messageGroupSpacing"));
             if (BlockedMessageGroup?.prototype?.render) {
                 this.patchInstead(BlockedMessageGroup.prototype, "render", () => null);
+                this._blockedMsgGroupPatched = true;
                 return;
             }
         } catch (_) {}
@@ -2802,6 +2941,7 @@ return false;
             if (result) {
                 const [moduleObj, key] = result;
                 this.patchInstead(moduleObj, key, () => null);
+                this._blockedMsgGroupPatched = true;
                 return;
             }
         } catch (_) {}
@@ -2825,8 +2965,8 @@ return false;
             }, {
                 searchExports: true
             });
+            if (patched) this._blockedMsgGroupPatched = true;
         } catch (_) {}
-        this._blockedMsgGroupPatched = true;
     }
     isBlockedMessageData(message, referencedMessage = null) {
         if (!message || typeof message !== "object") return false;
@@ -3034,8 +3174,14 @@ return false;
         const self = this;
         this.patchAfter(store, "getPins", function(_, args, ret) {
             const channelId = args?.[0];
-            if (channelId) self._processPinStoreItems(channelId, ret?.items);
-            return ret;
+            if (!channelId || !ret || !Array.isArray(ret.items)) return ret;
+            self._processPinStoreItems(channelId, ret.items);
+            const filteredItems = ret.items.filter(item => {
+                const messageId = item?.message?.id;
+                return messageId ? !self._shouldHidePinnedMessage(channelId, messageId, item) : true;
+            });
+            if (filteredItems.length === ret.items.length) return ret;
+            return Object.assign({}, ret, { items: filteredItems });
         });
         this._channelPinsStorePatched = true;
     }
@@ -3053,20 +3199,24 @@ return false;
             if (!self.settings.places?.messages) return;
             const action = args?.[0];
             if (!action || typeof action !== "object") return;
-            if (action.type === "MESSAGE_PIN_ADD") {
+            if (action.type === self.constructor.ACTIONS.MESSAGE_PIN_ADD) {
                 self._handlePinAdd(action);
                 return;
             }
-            if (action.type === "MESSAGE_PIN_REMOVE") {
+            if (action.type === self.constructor.ACTIONS.MESSAGE_PIN_REMOVE) {
                 self._unmarkMessageUnpinned(action.messageId);
                 return;
             }
-            if (action.type === "MESSAGE_CREATE" && action.message?.type === 6) {
+            if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && action.message?.type === 6) {
                 self._handlePinSystemMessage(action.message);
                 return;
             }
+            if (action.type === self.constructor.ACTIONS.MESSAGE_UPDATE && action.message) {
+                self.queueScan();
+                return;
+            }
             const channelId = action.channelId || action.channel_id;
-            if (channelId && (action.type === "CHANNEL_PINS_UPDATE" || action.type === "LOAD_PINNED_MESSAGES_SUCCESS" || action.type === "FETCH_PINNED_MESSAGES_SUCCESS")) {
+            if (channelId && (action.type === self.constructor.ACTIONS.CHANNEL_PINS_UPDATE || action.type === self.constructor.ACTIONS.LOAD_PINNED_MESSAGES_SUCCESS || action.type === self.constructor.ACTIONS.FETCH_PINNED_MESSAGES_SUCCESS)) {
                 self._scanExistingPinsForChannel(channelId);
                 self._processPinStoreItems(channelId, action.items || action.pins?.items);
                 self._forceReadStateRecheck(true);
@@ -3091,7 +3241,14 @@ return false;
         if (!msg) return false;
         if (msg.blocked === true) return true;
         const authorId = this._getAuthorId(msg);
-        return !!(authorId && this.shouldHide(authorId));
+        if (authorId && this.shouldHide(authorId)) return true;
+        if (Array.isArray(msg.mentions)) {
+            for (const mention of msg.mentions) {
+                const mid = mention?.id || mention?.userId;
+                if (mid && this.shouldHide(mid)) return true;
+            }
+        }
+        return false;
     }
     _flattenThreadEntries(list) {
         if (!list) return [];
@@ -3478,7 +3635,7 @@ return false;
                             self._refreshTaskbarBadge();
                         });
                     };
-                    if (action.type === "MESSAGE_CREATE") {
+                    if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE) {
                         const msg = action.message;
                         const authorId = msg?.author?.id;
                         const channelId = msg?.channel_id;
@@ -3487,7 +3644,7 @@ return false;
                         try {
                             parentId = self.modules.ChannelStore?.getChannel?.(channelId)?.parent_id || null;
                         } catch (_) {}
-                        if (self.shouldHide(authorId)) {
+                        if (self.shouldHide(authorId) || self._isBlockedMessage(msg)) {
                             self._markBlockedOnlyReadActivity(channelId, parentId, msg?.id);
                             scheduleRefresh();
                         } else {
@@ -3496,7 +3653,7 @@ return false;
                         }
                         return;
                     }
-                    if (action.type === "THREAD_CREATE") {
+                    if (action.type === self.constructor.ACTIONS.THREAD_CREATE) {
                         const thread = action.channel || action;
                         const ownerId = thread?.ownerId || thread?.owner_id;
                         const parentId = thread?.parent_id;
@@ -3508,7 +3665,7 @@ return false;
                         return;
                     }
                     const ackChannelId = action.channelId || action.channel_id;
-                    if (ackChannelId && (action.type === "CHANNEL_ACK" || action.type === "ACK_MESSAGES" || action.type === "THREAD_ACK")) {
+                    if (ackChannelId && (action.type === self.constructor.ACTIONS.CHANNEL_ACK || action.type === self.constructor.ACTIONS.ACK_MESSAGES || action.type === self.constructor.ACTIONS.THREAD_ACK)) {
                         self._clearBlockedOnlyReadActivity(ackChannelId);
                     }
                 });
@@ -3671,6 +3828,12 @@ return false;
                     } catch (_) {}
                 }, delays[d]);
             }
+            setTimeout(() => {
+                if (!this.isRunning) return;
+                if (this._isNavigating) return;
+                if (this._navStartedAt && (Date.now() - this._navStartedAt < 1200)) return;
+                try { this.restoreUnhiddenElements(); } catch (_) {}
+            }, 900);
         };
         store.addChangeListener(this._channelSwitchChangeHandler);
     }
@@ -3678,7 +3841,7 @@ return false;
         clearTimeout(this.refreshTimeout);
         this.refreshTimeout = setTimeout(() => {
             this._revalidateActiveChannelPins();
-            this.restoreUnhiddenElements();
+            if (!this._isNavigating && !(this._navStartedAt && (Date.now() - this._navStartedAt < 1200))) this.restoreUnhiddenElements();
             this.queueScan();
         }, 10);
     }
@@ -3718,11 +3881,15 @@ return false;
             const observerBroken = !this.observer;
             const dispatcherBroken = !this.modules.Dispatcher || typeof this.modules.Dispatcher.dispatch !== "function";
             const msgStoreBroken = !this._rawGetMessages && (!this.modules.MessageStore || typeof this.modules.MessageStore.getMessages !== "function");
-            if (storeBroken || observerBroken || dispatcherBroken || msgStoreBroken) {
+            const voiceStoreBroken = !this.modules.SortedVoiceStateStore || typeof this.modules.SortedVoiceStateStore.getVoiceStatesForChannel !== "function";
+            const mediaEngineBroken = !this.modules.MediaEngineActions || (!this._localVolumeKey && !this._localMuteKey);
+            if (storeBroken || observerBroken || dispatcherBroken || msgStoreBroken || voiceStoreBroken || mediaEngineBroken) {
                 if (storeBroken) { this._patcher.safe("watchdog:resolveModules", () => this.resolveModules()); }
                 if (dispatcherBroken) { this._patcher.safe("watchdog:resolveDispatcher", () => this._resolveDispatcher()); }
                 if (msgStoreBroken) { this._patcher.safe("watchdog:resolveMessagesGet", () => this._resolveMessagesGet()); }
                 if (observerBroken || storeBroken) { this._patcher.safe("watchdog:restartObserver", () => this._restartObserver()); }
+                if (voiceStoreBroken) { this._patcher.safe("watchdog:resolveVoiceStores", () => { this.resolveModules(); this.patchStores(); }); }
+                if (mediaEngineBroken) { this._patcher.safe("watchdog:resolveMediaEngine", () => this._resolveMediaEngineActions()); }
             }
         } catch (_) {}
     }
@@ -4184,7 +4351,13 @@ return false;
         try {
             const forumLists = document.querySelectorAll('[data-list-id^="forum-channel-list-"]');
             for (const list of forumLists) {
-                const cards = Array.from(list.querySelectorAll('.card_f369db, [class*="card_"]')).filter(card => !card.classList.contains("headerRow_f369db") && !/headerRow_/.test(card.className));
+                let cards = Array.from(list.querySelectorAll('[class*="card_"]')).filter(card => {
+                    const cls = card.className;
+                    return !/headerRow_/.test(cls);
+                });
+                if (!cards.length) {
+                    cards = Array.from(list.children).filter(el => el.nodeType === 1 && el.matches('a, div, [role="listitem"], [data-item-id], [class*="card_"], [class*="post_"], [class*="thread_"]'));
+                }
                 let hiddenCount = 0;
                 for (const card of cards) {
                     if (card.dataset?.hiddenBlocked === "true") {
@@ -4194,11 +4367,17 @@ return false;
                     let shouldHide = false;
                     let authorId = this._getForumThreadOwnerId(card);
                     if (!authorId) authorId = this.findUserId(card);
+                    if (!authorId) {
+                        const threadId = card.dataset?.itemId || card.querySelector("[data-item-id]")?.dataset?.itemId;
+                        if (threadId && this.modules.ChannelStore?.getChannel) {
+                            try { const ch = this.modules.ChannelStore.getChannel(threadId); authorId = ch?.ownerId || ch?.owner_id; } catch (_) {}
+                        }
+                    }
                     if (authorId && this.shouldHide(authorId)) {
                         shouldHide = true;
                     }
-                    const messageContent = card.querySelector('.message_faa96b, .messageFocusBlock_faa96b, [class*="message"]');
-                    const blockedMessage = card.querySelector('[data-hidden-blocked="true"], .blockedMessage_faa96b, [class*="blockedMessage"]');
+                    const messageContent = card.querySelector('[class*="message_"], [class*="messageFocusBlock"]');
+                    const blockedMessage = card.querySelector('[data-hidden-blocked="true"], [class*="blockedMessage"]');
                     const placeholder = card.querySelector('text-md\\/medium, .text-md\\/medium, [class*="empty"]');
                     if (blockedMessage && blockedMessage.dataset?.hiddenBlocked === "true") {
                         shouldHide = true;
@@ -4221,16 +4400,16 @@ return false;
     _findLocalizedForumEmptyText() { return _locale(_getLocale(), ByeBlocked.FORUM_LOCALE).title; }
     _findLocalizedForumEmptySubtitle(channelName) { return _locale(_getLocale(), ByeBlocked.FORUM_LOCALE).subtitle.replace('{channel}', channelName); }
     _syncForumEmptyState(listRoot, shouldShowEmpty) {
-        const contentContainer = listRoot.querySelector('.content_d125d2, [class*="content_"]') || listRoot;
+        const contentContainer = listRoot.querySelector('[class*="content_"]') || listRoot;
         let placeholder = contentContainer.querySelector(":scope > .nmb-injected-forum-empty");
         if (shouldShowEmpty) {
             if (!placeholder) {
                 placeholder = document.createElement("div");
-                placeholder.className = "container__93db4 nmb-injected-forum-empty";
+                placeholder.className = "nmb-injected-forum-empty";
                 const bodyText = this._findLocalizedForumEmptyText();
-                const channelName = document.querySelector('h1[class*="title__9293f"]')?.textContent?.trim() || document.title.split("|")[0]?.replace("#", "").trim() || "";
+                const channelName = document.querySelector('h1[class*="title_"]')?.textContent?.trim() || document.title.split("|")[0]?.replace("#", "").trim() || "";
                 const subtitleText = this._findLocalizedForumEmptySubtitle(channelName);
-                placeholder.innerHTML = `\n                    <h2 class="defaultColor__4bd52 heading-md/semibold_cf4812 defaultColor__5345c header__93db4" data-text-variant="heading-md/semibold">${bodyText}</h2>\n                    <div class="text-sm/normal_cf4812" data-text-variant="text-sm/normal" style="color: var(--text-default);">${subtitleText}</div>\n                `;
+                placeholder.innerHTML = `\n                    <h2 class="defaultColor heading-md/semibold header" data-text-variant="heading-md/semibold">${bodyText}</h2>\n                    <div class="text-sm/normal" data-text-variant="text-sm/normal" style="color: var(--text-default);">${subtitleText}</div>\n                `;
                 contentContainer.appendChild(placeholder);
             }
             placeholder.style.display = "";
@@ -4240,12 +4419,32 @@ return false;
     }
     hideTopicPanelItems() {
         try {
-            const topicItems = document.querySelectorAll('div.container__6764b, [class*="container__6764b"]');
+            let topicItems = document.querySelectorAll('[class*="container_"]');
+            if (!topicItems.length) {
+                topicItems = document.querySelectorAll('[data-list-item-id*="forum"], [data-list-item-id*="thread"], [class*="thread_"], [class*="forum_"], [role="listitem"]');
+            }
             for (const item of topicItems) {
                 if (item.dataset?.hiddenBlocked === "true") continue;
                 let authorId = null;
                 const listId = item.dataset?.listItemId || item.getAttribute("data-list-item-id") || "";
                 let threadId = (listId.match(/(\d{17,20})/) || [])[1] || null;
+                if (!threadId) {
+                    try {
+                        const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+                        if (channelId) {
+                            const channel = this.modules.ChannelStore?.getChannel?.(channelId);
+                            if (channel?.type === 15 || channel?.type === 16) {
+                                const threads = this.modules.ChannelStore?.getThreads?.(channelId) || channel?.threads || [];
+                                for (const t of threads) {
+                                    if (t?.id && /^\d{17,20}$/.test(String(t.id)) && (
+                                        (item.getAttribute("aria-label") || "").includes(t.name || "") ||
+                                        (item.textContent || "").includes(t.name || "")
+                                    )) { threadId = String(t.id); break; }
+                                }
+                            }
+                        }
+                    } catch (_) {}
+                }
                 if (!threadId) {
                     this.walkFiberProps(item, props => {
                         if (threadId) return;
@@ -4298,9 +4497,20 @@ return false;
     }
     _threadFromRowFiber(row) {
         let found = null;
-        this.walkFiberProps(row, props => {
-            if (!found && props?.thread) found = props.thread;
-        }, 10);
+        try {
+            const listId = row.dataset?.listItemId || "";
+            const idMatch = listId.match(/(\d{17,20})/);
+            const threadId = idMatch?.[1];
+            if (threadId && this.modules.ChannelStore?.getChannel) {
+                const ch = this.modules.ChannelStore.getChannel(threadId);
+                if (ch && (ch.type === 11 || ch.type === 12)) found = ch;
+            }
+        } catch (_) {}
+        if (!found) {
+            this.walkFiberProps(row, props => {
+                if (!found && props?.thread) found = props.thread;
+            }, 10);
+        }
         return found;
     }
     _watchActivePostsPopoverContent(popoverRoot) {
@@ -4385,24 +4595,24 @@ return false;
         return [ "___friends", "___nitro", "___shop", "___quests" ];
     }
     static get EMPTY_DM_SKELETON_SVG() {
-        return '<svg width="184" height="428" viewBox="0 0 184 428" class="empty__99e7c" data-nmb-injected-skeleton="true">' + '<rect x="40" y="6" width="144" height="20" rx="10"></rect><circle cx="16" cy="16" r="16"></circle>' + '<rect x="40" y="50" width="144" height="20" rx="10" opacity="0.9"></rect><circle cx="16" cy="60" r="16" opacity="0.9"></circle>' + '<rect x="40" y="94" width="144" height="20" rx="10" opacity="0.8"></rect><circle cx="16" cy="104" r="16" opacity="0.8"></circle>' + '<rect x="40" y="138" width="144" height="20" rx="10" opacity="0.7"></rect><circle cx="16" cy="148" r="16" opacity="0.7"></circle>' + '<rect x="40" y="182" width="144" height="20" rx="10" opacity="0.6"></rect><circle cx="16" cy="192" r="16" opacity="0.6"></circle>' + '<rect x="40" y="226" width="144" height="20" rx="10" opacity="0.5"></rect><circle cx="16" cy="236" r="16" opacity="0.5"></circle>' + '<rect x="40" y="270" width="144" height="20" rx="10" opacity="0.4"></rect><circle cx="16" cy="280" r="16" opacity="0.4"></circle>' + '<rect x="40" y="314" width="144" height="20" rx="10" opacity="0.3"></rect><circle cx="16" cy="324" r="16" opacity="0.3"></circle>' + '<rect x="40" y="358" width="144" height="20" rx="10" opacity="0.2"></rect><circle cx="16" cy="368" r="16" opacity="0.2"></circle>' + '<rect x="40" y="402" width="144" height="20" rx="10" opacity="0.1"></rect><circle cx="16" cy="412" r="16" opacity="0.1"></circle>' + "</svg>";
+        return '<svg width="184" height="428" viewBox="0 0 184 428" class="empty" data-nmb-injected-skeleton="true">' + '<rect x="40" y="6" width="144" height="20" rx="10"></rect><circle cx="16" cy="16" r="16"></circle>' + '<rect x="40" y="50" width="144" height="20" rx="10" opacity="0.9"></rect><circle cx="16" cy="60" r="16" opacity="0.9"></circle>' + '<rect x="40" y="94" width="144" height="20" rx="10" opacity="0.8"></rect><circle cx="16" cy="104" r="16" opacity="0.8"></circle>' + '<rect x="40" y="138" width="144" height="20" rx="10" opacity="0.7"></rect><circle cx="16" cy="148" r="16" opacity="0.7"></circle>' + '<rect x="40" y="182" width="144" height="20" rx="10" opacity="0.6"></rect><circle cx="16" cy="192" r="16" opacity="0.6"></circle>' + '<rect x="40" y="226" width="144" height="20" rx="10" opacity="0.5"></rect><circle cx="16" cy="236" r="16" opacity="0.5"></circle>' + '<rect x="40" y="270" width="144" height="20" rx="10" opacity="0.4"></rect><circle cx="16" cy="280" r="16" opacity="0.4"></circle>' + '<rect x="40" y="314" width="144" height="20" rx="10" opacity="0.3"></rect><circle cx="16" cy="324" r="16" opacity="0.3"></circle>' + '<rect x="40" y="358" width="144" height="20" rx="10" opacity="0.2"></rect><circle cx="16" cy="368" r="16" opacity="0.2"></circle>' + '<rect x="40" y="402" width="144" height="20" rx="10" opacity="0.1"></rect><circle cx="16" cy="412" r="16" opacity="0.1"></circle>' + "</svg>";
     }
     _findLocalizedTopicsEmptyText() { return _locale(_getLocale(), ByeBlocked.TOPICS_LOCALE); }
     _buildTopicsEmptySkeletonHtml() {
         const t = this._findLocalizedTopicsEmptyText();
-        return `<div class="nmb-injected-topic-empty container__1b24f">\n                    <div class="iconContainer__1b24f">\n                        <div class="icon__1b24f">\n                            <svg aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="36" height="36" fill="none" viewBox="0 0 24 24">\n                                <path d="M12 2.81a1 1 0 0 1 0-1.41l.36-.36a1 1 0 0 1 1.41 0l9.2 9.2a1 1 0 0 1 0 1.4l-.7.7a1 1 0 0 1-1.3.13l-9.54-6.72a1 1 0 0 1-.08-1.58l1-1L12 2.8ZM12 21.2a1 1 0 0 1 0 1.41l-.35.35a1 1 0 0 1-1.41 0l-9.2-9.19a1 1 0 0 1 0-1.41l.7-.7a1 1 0 0 1 1.3-.12l9.54 6.72a1 1 0 0 1 .07 1.58l-1 1 .35.36ZM15.66 16.8a1 1 0 0 1-1.38.28l-8.49-5.66A1 1 0 1 1 6.9 9.76l8.49 5.65a1 1 0 0 1 .27 1.39ZM17.1 14.25a1 1 0 1 0 1.11-1.66L9.73 6.93a1 1 0 0 0-1.11 1.66l8.49 5.66Z" fill="currentColor"></path>\n                            </svg>\n                        </div>\n                        <svg class="stars__1b24f" aria-hidden="true" role="img" width="104" height="80" viewBox="0 0 104 80" fill="none">\n                            <path d="M95.6718 1.80634C95.6718 0.808724 94.863 0 93.8654 0C92.8678 0 92.0591 0.808724 92.0591 1.80634V3.64278C92.0591 4.64039 92.8678 5.44911 93.8654 5.44911C94.863 5.44911 95.6718 4.64039 95.6718 3.64278V1.80634Z" fill="#ADF3FF"></path>\n                            <path d="M95.6713 16.3574C95.6713 15.3598 94.8625 14.5511 93.8649 14.5511C92.8673 14.5511 92.0586 15.3598 92.0586 16.3574V18.1939C92.0586 19.1915 92.8673 20.0002 93.8649 20.0002C94.8625 20.0002 95.6713 19.1915 95.6713 18.1939V16.3574Z" fill="#ADF3FF"></path>\n                            <path d="M102.194 11.8412C103.191 11.8412 104 11.0325 104 10.0349C104 9.03724 103.191 8.22852 102.194 8.22852H100.357C99.3596 8.22852 98.5509 9.03724 98.5509 10.0349C98.5509 11.0325 99.3596 11.8412 100.357 11.8412H102.194Z" fill="#ADF3FF"></path>\n                            <path d="M87.6434 11.7413C88.641 11.7413 89.4497 10.9325 89.4497 9.93494C89.4497 8.93733 88.641 8.1286 87.6434 8.1286H85.8069C84.8093 8.1286 84.0006 8.93733 84.0006 9.93494C84.0006 10.9325 84.8093 11.7413 85.8069 11.7413H87.6434Z" fill="#ADF3FF"></path>\n                            <path d="M11.1501 74.4573L15.3147 73.0684C15.5192 72.9747 15.6925 72.8241 15.814 72.6347C15.9354 72.4454 16 72.225 16 72C16 71.775 15.9354 71.5546 15.814 71.3653C15.6925 71.1759 15.5192 71.0253 15.3147 70.9316L11.1501 69.5427C10.8657 69.4142 10.6378 69.1862 10.5094 68.9016L9.01446 64.7348C8.94423 64.521 8.80835 64.3349 8.62619 64.203C8.44403 64.071 8.22488 64 7.99999 64C7.77511 64 7.55597 64.071 7.37381 64.203C7.19165 64.3349 7.05576 64.521 6.98554 64.7348L5.49057 68.9016C5.36216 69.1862 5.13433 69.4142 4.84986 69.5427L0.685276 70.9316C0.480802 71.0253 0.307523 71.1759 0.186045 71.3653C0.0645662 71.5546 0 71.775 0 72C0 72.225 0.0645662 72.4454 0.186045 72.6347C0.307523 72.8241 0.480802 72.9747 0.685276 73.0684L4.84986 74.4573C5.0011 74.5032 5.1387 74.5858 5.25046 74.6976C5.36222 74.8094 5.44469 74.9471 5.49057 75.0984L6.98554 79.2652C7.05576 79.479 7.19165 79.6651 7.37381 79.797C7.55597 79.929 7.77511 80 7.99999 80C8.22488 80 8.44403 79.929 8.62619 79.797C8.80835 79.6651 8.94423 79.479 9.01446 79.2652L10.5094 75.0984C10.5553 74.9471 10.6378 74.8094 10.7495 74.6976C10.8613 74.5858 10.9989 74.5032 11.1501 74.4573Z" fill="#FFD01A"></path>\n                        </svg>\n                    </div>\n                    <h2 class="defaultColor__4bd52 heading-xl/semibold_cf4812 defaultColor__5345c header__1b24f" data-text-variant="heading-xl/semibold">${t.title}</h2>\n                    <div class="text-md/normal_cf4812" data-text-variant="text-md/normal" style="color: var(--text-default);">${t.subtitle}</div>\n                    <div data-button-hoisted-classname-wrapper="true" class="cta__1b24f">\n                        <button data-mana-component="button" role="button" class="button_a22cb0 md_a22cb0 primary_a22cb0 hasText_a22cb0" type="button">\n                            <div class="buttonChildrenWrapper_a22cb0">\n                                <div class="buttonChildren_a22cb0">\n                                    <span class="lineClamp1__4bd52 text-md/medium_cf4812" data-text-variant="text-md/medium">${t.button}</span>\n                                </div>\n                            </div>\n                        </button>\n                    </div>\n                </div>`;
+        return `<div class="nmb-injected-topic-empty container">\n                    <div class="iconContainer">\n                        <div class="icon">\n                            <svg aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="36" height="36" fill="none" viewBox="0 0 24 24">\n                                <path d="M12 2.81a1 1 0 0 1 0-1.41l.36-.36a1 1 0 0 1 1.41 0l9.2 9.2a1 1 0 0 1 0 1.4l-.7.7a1 1 0 0 1-1.3.13l-9.54-6.72a1 1 0 0 1-.08-1.58l1-1L12 2.8ZM12 21.2a1 1 0 0 1 0 1.41l-.35.35a1 1 0 0 1-1.41 0l-9.2-9.19a1 1 0 0 1 0-1.41l.7-.7a1 1 0 0 1 1.3-.12l9.54 6.72a1 1 0 0 1 .07 1.58l-1 1 .35.36ZM15.66 16.8a1 1 0 0 1-1.38.28l-8.49-5.66A1 1 0 1 1 6.9 9.76l8.49 5.65a1 1 0 0 1 .27 1.39ZM17.1 14.25a1 1 0 1 0 1.11-1.66L9.73 6.93a1 1 0 0 0-1.11 1.66l8.49 5.66Z" fill="currentColor"></path>\n                            </svg>\n                        </div>\n                        <svg class="stars" aria-hidden="true" role="img" width="104" height="80" viewBox="0 0 104 80" fill="none">\n                            <path d="M95.6718 1.80634C95.6718 0.808724 94.863 0 93.8654 0C92.8678 0 92.0591 0.808724 92.0591 1.80634V3.64278C92.0591 4.64039 92.8678 5.44911 93.8654 5.44911C94.863 5.44911 95.6718 4.64039 95.6718 3.64278V1.80634Z" fill="#ADF3FF"></path>\n                            <path d="M95.6713 16.3574C95.6713 15.3598 94.8625 14.5511 93.8649 14.5511C92.8673 14.5511 92.0586 15.3598 92.0586 16.3574V18.1939C92.0586 19.1915 92.8673 20.0002 93.8649 20.0002C94.8625 20.0002 95.6713 19.1915 95.6713 18.1939V16.3574Z" fill="#ADF3FF"></path>\n                            <path d="M102.194 11.8412C103.191 11.8412 104 11.0325 104 10.0349C104 9.03724 103.191 8.22852 102.194 8.22852H100.357C99.3596 8.22852 98.5509 9.03724 98.5509 10.0349C98.5509 11.0325 99.3596 11.8412 100.357 11.8412H102.194Z" fill="#ADF3FF"></path>\n                            <path d="M87.6434 11.7413C88.641 11.7413 89.4497 10.9325 89.4497 9.93494C89.4497 8.93733 88.641 8.1286 87.6434 8.1286H85.8069C84.8093 8.1286 84.0006 8.93733 84.0006 9.93494C84.0006 10.9325 84.8093 11.7413 85.8069 11.7413H87.6434Z" fill="#ADF3FF"></path>\n                            <path d="M11.1501 74.4573L15.3147 73.0684C15.5192 72.9747 15.6925 72.8241 15.814 72.6347C15.9354 72.4454 16 72.225 16 72C16 71.775 15.9354 71.5546 15.814 71.3653C15.6925 71.1759 15.5192 71.0253 15.3147 70.9316L11.1501 69.5427C10.8657 69.4142 10.6378 69.1862 10.5094 68.9016L9.01446 64.7348C8.94423 64.521 8.80835 64.3349 8.62619 64.203C8.44403 64.071 8.22488 64 7.99999 64C7.77511 64 7.55597 64.071 7.37381 64.203C7.19165 64.3349 7.05576 64.521 6.98554 64.7348L5.49057 68.9016C5.36216 69.1862 5.13433 69.4142 4.84986 69.5427L0.685276 70.9316C0.480802 71.0253 0.307523 71.1759 0.186045 71.3653C0.0645662 71.5546 0 71.775 0 72C0 72.225 0.0645662 72.4454 0.186045 72.6347C0.307523 72.8241 0.480802 72.9747 0.685276 73.0684L4.84986 74.4573C5.0011 74.5032 5.1387 74.5858 5.25046 74.6976C5.36222 74.8094 5.44469 74.9471 5.49057 75.0984L6.98554 79.2652C7.05576 79.479 7.19165 79.6651 7.37381 79.797C7.55597 79.929 7.77511 80 7.99999 80C8.22488 80 8.44403 79.929 8.62619 79.797C8.80835 79.6651 8.94423 79.479 9.01446 79.2652L10.5094 75.0984C10.5553 74.9471 10.6378 74.8094 10.7495 74.6976C10.8613 74.5858 10.9989 74.5032 11.1501 74.4573Z" fill="#FFD01A"></path>\n                        </svg>\n                    </div>\n                    <h2 class="defaultColor heading-xl/semibold" data-text-variant="heading-xl/semibold">${t.title}</h2>\n                    <div class="text-md/normal" data-text-variant="text-md/normal" style="color: var(--text-default);">${t.subtitle}</div>\n                    <div data-button-hoisted-classname-wrapper="true" class="cta">\n                        <button data-mana-component="button" role="button" class="button md primary hasText" type="button">\n                            <div class="buttonChildrenWrapper">\n                                <div class="buttonChildren">\n                                    <span class="lineClamp1 text-md/medium" data-text-variant="text-md/medium">${t.button}</span>\n                                </div>\n                            </div>\n                        </button>\n                    </div>\n                </div>`;
     }
     enforceEmptyDmSkeleton() {
         try {
             const list = document.querySelector('ul[aria-label="Direct Messages"], ul[aria-label="Mensagens diretas"]');
             if (!list) return;
             const existingSkeleton = list.querySelector('[data-nmb-injected-skeleton="true"]');
-            const nativeSkeleton = list.querySelector('svg[class*="empty__99e7c"]:not([data-nmb-injected-skeleton])');
+            const nativeSkeleton = list.querySelector('svg[class*="empty_"]:not([data-nmb-injected-skeleton])');
             if (nativeSkeleton) {
                 if (existingSkeleton) existingSkeleton.remove();
                 return;
             }
-            const rows = Array.from(list.querySelectorAll('li[class*="channel__972a0"], li[role="listitem"]'));
+            const rows = Array.from(list.querySelectorAll('li[class*="channel_"], li[role="listitem"], li[data-list-item-id*="private-channels"]'));
             const isFixedItem = row => {
                 const link = row.querySelector("[data-list-item-id]");
                 const listId = link?.dataset?.listItemId || row.dataset?.listItemId || "";
@@ -4475,6 +4685,10 @@ return false;
             const normalize = el => (el.textContent || "").trim().toLowerCase();
             let target = allButtons.find(btn => normalize(btn) === "create thread") || allButtons.find(btn => normalize(btn) === "create") || allButtons.find(btn => normalize(btn) === "criar") || allButtons.find(btn => normalize(btn) === "criar tÃ³pico");
             if (!target) return;
+            try {
+                target.click();
+                return;
+            } catch (_) {}
             const rect = target.getBoundingClientRect();
             const mouseOpts = {
                 bubbles: true,
@@ -4494,11 +4708,12 @@ return false;
             const headers = document.querySelectorAll('[class*="sectionHeader_"]');
             for (const header of headers) {
                 const textContent = (header.textContent || "").toLowerCase();
-                if (!textContent.includes("topic") && !textContent.includes("thread") && !textContent.includes("tÃ³pic")) continue;
+                const topicLabel = _locale(_getLocale(), ByeBlocked.TOPIC_HEADER_LOCALE).toLowerCase();
+                if (!textContent.includes("topic") && !textContent.includes("thread") && !textContent.includes(topicLabel)) continue;
                 const scrollerContent = header.parentElement;
                 const listRoot = this._findTopicPanelListRoot(header);
                 if (!scrollerContent || !listRoot) continue;
-                const topics = Array.from(scrollerContent.querySelectorAll('div.container__6764b, [class*="container__6764b"]'));
+                const topics = Array.from(scrollerContent.querySelectorAll('[class*="container_"]'));
                 if (topics.length === 0) continue;
                 let visibleCount = 0;
                 let hiddenBlockedCount = 0;
@@ -4568,12 +4783,12 @@ return false;
         this.hideBlockedReactors();
     }
     _fastHideChannelStatusFromMutations(mutations) {
+        const sel = '[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i], [data-list-item-id*="channels"] [class*="subtitle" i], [data-list-item-id*="channels"] [role="button"]:has([class*="status" i])';
         for (let m = 0; m < mutations.length; m++) {
             const added = mutations[m].addedNodes;
             for (let n = 0; n < added.length; n++) {
                 const node = added[n];
                 if (node.nodeType !== 1) continue;
-                const sel = '[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]';
                 if (node.matches?.(sel)) {
                     if (!node.dataset?.nmbStatusSafe && !node.dataset?.nmbStatusOverridden) {
                         node.dataset.nmbStatusOverridden = "true";
@@ -4607,7 +4822,7 @@ return false;
                 if (this.hiddenElements.size > wasHidden) messagesHidden = true;
                 const qsa = node.querySelectorAll;
                 if (qsa) {
-                    const descendants = qsa.call(node, 'li[class*="messageListItem"], [class*="messageListItem"], [data-list-item-id^="pins__"], [class*="memberRow"], [role="listitem"][data-list-item-id], [class*="voiceUser"]');
+                    const descendants = qsa.call(node, 'li[class*="messageListItem"], [class*="messageListItem"], [data-list-item-id^="pins__"], [class*="memberRow"], [role="listitem"][data-list-item-id], [class*="voiceUser"], [class*="mention"]');
                     for (let d = 0; d < descendants.length; d++) {
                         const before = this.hiddenElements.size;
                         this._fastHideNode(descendants[d]);
@@ -4625,11 +4840,11 @@ return false;
                         this.fixPinNotificationBadge();
                     } catch (_) {}
                 }
-                if (node.matches?.('.mainCard_f369db, [class*="mainCard_"]') || node.querySelector?.('.card_f369db, [class*="card_"]') || node.matches?.('[data-list-id^="forum-channel-list-"]')) {
+                if (node.matches?.('[class*="mainCard_"]') || node.querySelector?.('[class*="card_"]') || node.matches?.('[data-list-id^="forum-channel-list-"]')) {
                     this.hideForumPosts();
                     this._scheduleForumRetry();
                 }
-                if (node.matches?.('div.container__6764b, [class*="container__6764b"]')) this.hideTopicPanelItems();
+                if (node.matches?.('[class*="container_"]')) this.hideTopicPanelItems();
                 if (node.matches?.('[data-list-item-id^="private-channels___"]')) this.hidePrivateChannels();
                 if (places.memberList && (node.matches?.('[class*="memberRow"]') || node.querySelector?.('[class*="memberRow"]'))) {
                     this.hideMemberRows();
@@ -4640,11 +4855,6 @@ return false;
                 if (places.events) {
                     const eventsSidebarItem = node.matches?.('[data-list-item-id^="channels___upcoming-events-"]') ? node : node.querySelector?.('[data-list-item-id^="channels___upcoming-events-"]');
                     if (eventsSidebarItem) {
-                        const li = eventsSidebarItem.closest('li');
-                        if (li && !li.querySelector('[data-nmb-events-ready="true"]')) {
-                            li.dataset.nmbSidebarPreHidden = "true";
-                            li.style.visibility = 'hidden';
-                        }
                         try { this._fixEventsSidebarCounterFor(eventsSidebarItem); } catch (_) {}
                     }
                     if (node.matches?.('[data-list-item-id^="channels___guild_scheduled_event-"]') || node.querySelector?.('[data-list-item-id^="channels___guild_scheduled_event-"]')) {
@@ -4655,8 +4865,9 @@ return false;
                     }
                 }
                 if (places.voiceChannels) {
-                    const voiceSel = '[class*="stageUser_"],[class*="stageSection_"],[class*="activityPanel_"],[class*="streamPreview_"],[class*="streamTile_"],[class*="tile_"],[class*="tileSizer_"],[class*="videoWrapper_"],[class*="participantWrapper_"],[class*="gridLayout_"],[class*="callContainer_"],[class*="audienceContainer__"],[class*="raisedHandCount__"],[class*="toolbar__"],[class*="details_"],[class*="speakerCount__"],[class*="text__9aed4"],[class*="blockedNotice__"],[class*="channelNotice__"],[class*="subtitle__"]';
-                    if (node.matches?.(voiceSel) || node.querySelector?.(voiceSel)) {
+                    const voiceSel = '[class*="voiceUser"],[class*="stageUser_"],[class*="stageSection_"],[class*="activityPanel_"],[class*="activityPanel"],[class*="streamPreview_"],[class*="streamTile_"],[class*="tile_"],[class*="tileSizer_"],[class*="videoWrapper_"],[class*="participantWrapper_"],[class*="gridLayout_"],[class*="callContainer_"],[class*="audienceContainer__"],[class*="raisedHandCount__"],[class*="toolbar__"],[class*="details_"],[class*="speakerCount__"],[class*="text__9aed4"],[class*="blockedNotice__"],[class*="channelNotice__"],[class*="subtitle__"]';
+                    const voiceAriaSel = '[aria-label*="canal de voz"],[aria-label*="voice channel"],[aria-label*="Canal de voz"]';
+                    if (node.matches?.(voiceSel) || node.querySelector?.(voiceSel) || node.matches?.(voiceAriaSel) || node.querySelector?.(voiceAriaSel)) {
                         try { this.hideVoiceUsers(); } catch (_) {}
                     }
                 }
@@ -4669,7 +4880,7 @@ return false;
     }
     _removeVoiceInviteSuggestion(node) {
         try {
-            const INVITE_LABEL_SEL = '[aria-label^="Convidar para canal de voz"], [aria-label^="Invite to voice channel"]';
+            const INVITE_LABEL_SEL = ByeBlocked.INVITE_LABEL_SEL;
             const isInviteRow = el => el.matches?.(INVITE_LABEL_SEL);
             let target = null;
             if (isInviteRow(node)) {
@@ -4686,7 +4897,7 @@ return false;
     }
     _removeAllVoiceInviteSuggestions() {
         try {
-            const INVITE_LABEL_SEL = '[aria-label^="Convidar para canal de voz"], [aria-label^="Invite to voice channel"]';
+            const INVITE_LABEL_SEL = ByeBlocked.INVITE_LABEL_SEL;
             const rows = document.querySelectorAll(INVITE_LABEL_SEL);
             for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
@@ -4803,15 +5014,29 @@ return false;
                     return;
                 }
                 let referencedAuthorId = null;
-                this._walkFiberPropsShallow(messageRow, props => {
-                    if (referencedAuthorId) return;
-                    if (props.referencedMessage?.message?.author?.id) referencedAuthorId = props.referencedMessage.message.author.id;
-                    else if (props.referencedMessage?.author?.id) referencedAuthorId = props.referencedMessage.author.id;
-                    else if (props.message?.messageReference && !referencedAuthorId) {
-                        const ref = this.getReferencedMessage(props.message);
-                        if (ref?.author?.id) referencedAuthorId = ref.author.id;
+                try {
+                    const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+                    const listId = messageRow.dataset?.listItemId || "";
+                    const msgId = listId.match(/(\d{17,20})$/)?.[1];
+                    if (msgId && channelId) {
+                        const msg = this.modules.MessageStore?.getMessage?.(channelId, msgId);
+                        if (msg?.messageReference) {
+                            const ref = this.getReferencedMessage(msg);
+                            if (ref?.author?.id) referencedAuthorId = ref.author.id;
+                        }
                     }
-                });
+                } catch (_) {}
+                if (!referencedAuthorId) {
+                    this._walkFiberPropsShallow(messageRow, props => {
+                        if (referencedAuthorId) return;
+                        if (props.referencedMessage?.message?.author?.id) referencedAuthorId = props.referencedMessage.message.author.id;
+                        else if (props.referencedMessage?.author?.id) referencedAuthorId = props.referencedMessage.author.id;
+                        else if (props.message?.messageReference && !referencedAuthorId) {
+                            const ref = this.getReferencedMessage(props.message);
+                            if (ref?.author?.id) referencedAuthorId = ref.author.id;
+                        }
+                    });
+                }
                 if (referencedAuthorId && this.shouldHide(referencedAuthorId)) {
                     this.hideElement(messageRow, "fast-reply-to-blocked", referencedAuthorId);
                     return;
@@ -4825,13 +5050,35 @@ return false;
                     return;
                 }
             }
-            const mention = messageRow.querySelector?.('[class*="mention"][data-user-id]');
-            if (mention) {
-                const mentionedId = mention.dataset.userId || this.findUserId(mention);
-                if (mentionedId && this.shouldHide(mentionedId)) {
-                    this.hideElement(messageRow, "fast-mention", mentionedId);
-                    return;
-                }
+            let mentionedId = null;
+            const mentionWithId = messageRow.querySelector?.('[class*="mention"][data-user-id]');
+            let mentionElem = mentionWithId || messageRow.querySelector?.('[class*="mention"]');
+            if (mentionWithId) {
+                mentionedId = mentionWithId.dataset.userId || this.findUserId(mentionWithId);
+            } else if (mentionElem && mentionElem.dataset?.nmbMentionUserId) {
+                mentionedId = mentionElem.dataset.nmbMentionUserId;
+            }
+            if (!mentionedId && mentionElem) {
+                try {
+                    const listId = messageRow.dataset?.listItemId || messageRow.id || "";
+                    const idMatch = listId.match(/(\d{17,20})$/) || messageRow.id?.match(/chat-messages-(?:\d+-)?(\d{17,20})$/);
+                    const messageId = idMatch ? idMatch[1] : null;
+                    const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+                    const getMessage = this.modules.MessageStore?.getMessage;
+                    const msg = channelId && messageId && typeof getMessage === "function" ? getMessage(channelId, messageId) : null;
+                    const mentions = msg?.mentions;
+                    if (mentions) {
+                        const list = Array.isArray(mentions) ? mentions : Array.from(mentions);
+                        for (const u of list) {
+                            const id = typeof u === "string" ? u : u?.id;
+                            if (id && this.shouldHide(id)) { mentionedId = id; break; }
+                        }
+                    }
+                } catch (_) {}
+            }
+            if (mentionedId && this.shouldHide(mentionedId)) {
+                this.hideElement(messageRow, "fast-mention", mentionedId);
+                return;
             }
             const text = messageRow.textContent;
             if (text && this.isBlockedMessageBannerText(text)) {
@@ -4839,24 +5086,18 @@ return false;
                 return;
             }
         }
-        if (this.settings.places.messages && el.matches?.('[class*="mention"]')) {
-            const userId = this.findUserId(el);
-            if (userId && this.shouldHide(userId)) {
-                const messageRow = el.closest('li[class*="messageListItem"]') || el.closest('[class*="messageListItem"]');
-                if (messageRow) {
-                    this.hideElement(messageRow, "fast-mention", userId);
-                                    } else {
-                    this.hideElement(el, "fast-mention", userId);
-                                    }
-            }
+        if (el.matches?.('[class*="mention"]')) {
+            this._hideSingleMention(el);
         }
     }
     scanDom(fromMutation = false) {
         try {
             this._shouldHideCache = new Map;
-            this.restoreUnhiddenElements();
+            const navCooldown = this._navStartedAt && (Date.now() - this._navStartedAt < 1200);
+            if (!this._isNavigating && !navCooldown) this.restoreUnhiddenElements();
             this._removeAllVoiceInviteSuggestions();
             if (fromMutation) {
+                this.hideMentionsEverywhere();
                 this.fixMemberGroupCounts();
                 this.fixVoiceChannelIconColors();
                 this._resyncBlockedChannelStatuses();
@@ -4896,6 +5137,7 @@ return false;
                 this.hideBlockedStageChannelNotice();
                 this.hideBlockedGuildStageBadge();
             }
+            this.hideMentionsEverywhere();
             this.fixMemberGroupCounts();
             this.fixVoiceChannelIconColors();
             this._resyncBlockedChannelStatuses();
@@ -4903,6 +5145,46 @@ return false;
             this.collapseGhostSlots();
             this.promoteOrphanedMessages();
         } catch (_) {}
+    }
+    _hideSingleMention(el) {
+        if (!el || el.dataset?.nmbMentionHidden === "true") return;
+        let userId = el.dataset?.userId || this.findUserId(el);
+        if (!userId) {
+            this._walkFiberPropsShallow(el, props => {
+                if (userId) return;
+                const candidate = props?.user?.id || props?.userId || props?.message?.author?.id || props?.mentionedUser?.id;
+                if (candidate && this.modules.RelationshipStore?.isBlocked?.(candidate)) userId = candidate;
+            });
+        }
+        if (!(userId && this.shouldHide(userId))) return;
+        const messageRow = el.closest('li[class*="messageListItem"], [class*="messageListItem"]');
+        if (messageRow) {
+            this.hideElement(messageRow, "fast-mention", userId);
+            return;
+        }
+        el.dataset.nmbMentionHidden = "true";
+        el.dataset.nmbMentionUserId = userId;
+        el.style.setProperty("display", "none", "important");
+        el.style.setProperty("visibility", "hidden", "important");
+        el.style.setProperty("pointer-events", "none", "important");
+        this.hiddenElements.add(el);
+    }
+    hideMentionsEverywhere() {
+        try {
+            const mentions = document.querySelectorAll('[class*="mention"]:not([data-nmb-mention-hidden="true"])');
+            for (const mention of mentions) {
+                this._hideSingleMention(mention);
+            }
+        } catch (_) {}
+    }
+    _restoreHiddenMention(el) {
+        if (!el || el.dataset?.nmbMentionHidden !== "true") return;
+        el.style.removeProperty("display");
+        el.style.removeProperty("visibility");
+        el.style.removeProperty("pointer-events");
+        delete el.dataset.nmbMentionHidden;
+        delete el.dataset.nmbMentionUserId;
+        this.hiddenElements.delete(el);
     }
     promoteOrphanedMessages() {
         document.querySelectorAll('[data-nmb-promoted="true"]').forEach(el => {
@@ -5008,7 +5290,7 @@ return false;
             let hasVisible = false;
             for (const child of group.children) {
                 if (child.dataset?.hiddenBlocked === "true" || child.dataset?.nmbGhost === "true") continue;
-                if (child.offsetParent !== null || !isEmptyText(child)) {
+                if (!isEmptyText(child) || child.children.length > 0) {
                     hasVisible = true;
                     break;
                 }
@@ -5093,6 +5375,12 @@ return false;
                 if (p && !p.dataset?.hiddenBlocked) parentSet.add(p);
                 continue;
             }
+            if (this.shouldHide(info.mentionedUserId)) {
+                this.hideElement(messageRow, "mention-blocked", info.mentionedUserId);
+                const p = messageRow.parentElement;
+                if (p && !p.dataset?.hiddenBlocked) parentSet.add(p);
+                continue;
+            }
             if (info.isBlockedGroup) {
                 this.hideElement(messageRow, "blocked-group");
                 const p = messageRow.parentElement;
@@ -5103,7 +5391,7 @@ return false;
         for (const parent of parentSet) {
             let hasVisible = false;
             for (const child of parent.children) {
-                if (child.dataset?.hiddenBlocked !== "true" && child.offsetParent !== null) {
+                if (child.dataset?.hiddenBlocked !== "true") {
                     hasVisible = true;
                     break;
                 }
@@ -5135,6 +5423,11 @@ return false;
                 this.hiddenElements.delete(el);
                 continue;
             }
+            if (el.dataset?.nmbMentionHidden === "true") {
+                const uid = el.dataset?.nmbMentionUserId;
+                if (uid && !this.shouldHide(uid)) this._restoreHiddenMention(el);
+                continue;
+            }
             const reason = el.dataset?.nmbReason;
             if (reason === "pin-by-blocked" || reason === "fast-pin-by-blocked") {
                 const listId = el.dataset?.listItemId || "";
@@ -5154,7 +5447,7 @@ return false;
                 this.hiddenParents.delete(parent);
                 continue;
             }
-            const visibleChildren = Array.from(parent.children).filter(child => !child.dataset?.hiddenBlocked && child.offsetParent !== null);
+            const visibleChildren = Array.from(parent.children).filter(child => child.dataset?.hiddenBlocked !== "true");
             if (visibleChildren.length > 0) {
                 this.restoreParent(parent);
             }
@@ -5184,7 +5477,7 @@ return false;
                 placeholder.remove();
             }
         });
-        document.querySelectorAll(".nmb-pins-empty-footer").forEach(footer => {
+        document.querySelectorAll(".nmb-pins-empty-footer, .nmb-injected-tip-footer").forEach(footer => {
             if (!document.contains(footer) || !document.contains(footer.parentElement)) {
                 footer.remove();
             }
@@ -5222,7 +5515,12 @@ return false;
         document.querySelectorAll('[data-nmb-sidebar-hidden="true"]').forEach(el => this._clearEventsSidebarOverlay(el));
         document.querySelectorAll('[data-nmb-orig-text]').forEach(el => el.removeAttribute("data-nmb-orig-text"));
         document.querySelectorAll(".nmb-pins-empty-placeholder").forEach(el => el.remove());
-        document.querySelectorAll(".nmb-pins-empty-footer").forEach(el => el.remove());
+        document.querySelectorAll(".nmb-pins-empty-footer, .nmb-injected-tip-footer").forEach(el => el.remove());
+        document.querySelectorAll("[data-nmb-prev-footer-html]").forEach(el => {
+            const prev = el.getAttribute("data-nmb-prev-footer-html");
+            if (prev !== null) el.innerHTML = prev;
+            el.removeAttribute("data-nmb-prev-footer-html");
+        });
         document.querySelectorAll("[data-nmb-prev-residue-style]").forEach(el => {
             const prev = el.getAttribute("data-nmb-prev-residue-style");
             if (prev) el.setAttribute("style", prev); else el.removeAttribute("style");
@@ -5258,12 +5556,19 @@ return false;
         }
     }
     hideVoiceUsers() {
-        const els = document.querySelectorAll('[class*="voiceUser"]:not([data-hidden-blocked="true"]), [class*="voiceUsers"] [data-list-item-id]:not([data-hidden-blocked="true"]), [class*="listItem"][data-list-item-id]:not([data-hidden-blocked="true"])');
-        for (let i = 0; i < els.length; i++) {
-            const el = els[i];
+        const voiceCandidates = document.querySelectorAll([
+            '[class*="voiceUser"]',
+            '[aria-label*="canal de voz"] [data-list-item-id]',
+            '[aria-label*="voice channel"] [data-list-item-id]',
+            '[data-list-item-id*="voice"]',
+            '[class*="voiceUsers"] [data-list-item-id]',
+            '[class*="listItem"][data-list-item-id]'
+        ].join(':not([data-hidden-blocked="true"]),') + ':not([data-hidden-blocked="true"])');
+        for (let i = 0; i < voiceCandidates.length; i++) {
+            const el = voiceCandidates[i];
             const userId = this.findUserId(el);
             if (!this.shouldHide(userId)) continue;
-            const row = el.closest('[class*="draggable__"]') || el.closest("li") || el;
+            const row = el.closest('[class*="draggable__"]') || el.closest('[data-list-item-id]') || el.closest("li") || el;
             if (!this.isVoiceChannelShell(row)) this.hideElement(row, "voice-user", userId); else this.hideElement(el, "voice-user", userId);
         }
         this._reapOrphanedVoiceWrappers();
@@ -5276,13 +5581,13 @@ return false;
         this.hideCallGridTiles();
     }
     hideCallGridTiles() {
-        const els = document.querySelectorAll('[class*="tileSizer_"], [class*="tile_"], [class*="videoWrapper_"], [class*="voiceUserTile"], [class*="participants_"] > *, [class*="gridLayout_"] [class*="participant"], [class*="callContainer_"] [class*="wrapper_"], [class*="participantWrapper_"]');
+        const els = document.querySelectorAll('[class*="tileSizer"], [class*="tile_"], [class*="videoWrapper_"], [class*="voiceUserTile"], [class*="participants_"] > *, [class*="gridLayout_"] [class*="participant"], [class*="callContainer_"] [class*="wrapper_"], [class*="participantWrapper_"], [aria-label*="grid" i] [class*="participant"], [role="grid"] [class*="participant"]');
         for (let i = 0; i < els.length; i++) {
             const el = els[i];
             if (el.dataset?.hiddenBlocked === "true") continue;
             const userId = this.findUserId(el);
             if (!userId || !this.shouldHide(userId)) continue;
-            const sizer = el.closest('[class*="tileSizer_"]');
+            const sizer = el.closest('[class*="tileSizer"]');
             const tile = sizer || el.closest('[class*="tile_"]') || el.closest('[class*="participantWrapper_"]') || el.closest('[class*="videoWrapper_"]') || el;
             this.hideElement(tile, "call-grid-tile", userId);
         }
@@ -5303,81 +5608,6 @@ return false;
                     }
                     ph.remove();
                 }
-            }
-            const hiddenTiles = document.querySelectorAll('[data-hidden-blocked="true"][data-nmb-reason="call-grid-tile"]');
-            if (!hiddenTiles.length) return;
-            for (let i = 0; i < hiddenTiles.length; i++) {
-                const hiddenTile = hiddenTiles[i];
-                const row = hiddenTile.closest('[class*="row_"]') || hiddenTile.parentElement;
-                if (!row) continue;
-                if (row.querySelector('[data-nmb-invite-placeholder="true"]')) continue;
-                const visibleTile = row.querySelector('[class*="tile_"]:not([data-hidden-blocked="true"])');
-                if (!visibleTile) continue;
-                const nativeSingleUserRoot = row.querySelector('[class*="singleUserRoot"]');
-                if (nativeSingleUserRoot && !hiddenTile.contains(nativeSingleUserRoot)) continue;
-                const now = Date.now();
-                if (!this._callGridPlaceholderCreations || now - (this._callGridPlaceholderWindowStart || 0) > 3000) {
-                    this._callGridPlaceholderCreations = 0;
-                    this._callGridPlaceholderWindowStart = now;
-                }
-                this._callGridPlaceholderCreations++;
-                if (this._callGridPlaceholderCreations > 8) {
-                    this._callGridPlaceholderCooldownUntil = now + 10000;
-                    return;
-                }
-                const clonedWidth = hiddenTile.getAttribute("data-nmb-prev-style") || "";
-                const widthMatch = clonedWidth.match(/width:\s*([\d.]+px)/);
-                const width = widthMatch ? widthMatch[1] : (visibleTile.style?.width || "100%");
-                const placeholder = document.createElement("div");
-                placeholder.setAttribute("data-nmb-invite-placeholder", "true");
-                placeholder.className = hiddenTile.className;
-                placeholder.style.width = width;
-                placeholder.innerHTML = `
-                    <div class="tileSizer_d6271c">
-                        <div class="root__4ad81 singleUserRoot__4ad81 theme-dark theme-midnight images-dark disable-adaptive-theme tile__90dc5">
-                            <img class="art__4ad81" alt="" src="/assets/664390de11a80444.svg">
-                            <div data-align="center" data-justify="center" data-direction="horizontal" data-wrap="true" data-full-width="false" class="stack_dbd263" style="gap: var(--space-8); padding: var(--space-0);">
-                                <button data-mana-component="button" role="button" class="button_a22cb0 md_a22cb0 secondary_a22cb0 hasText_a22cb0" type="button">
-                                    <div class="buttonChildrenWrapper_a22cb0">
-                                        <div class="buttonChildren_a22cb0">
-                                            <svg class="icon_a22cb0" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" viewBox="0 0 24 24"><path d="M19 14a1 1 0 0 1 1 1v3h3a1 1 0 0 1 0 2h-3v3a1 1 0 0 1-2 0v-3h-3a1 1 0 1 1 0-2h3v-3a1 1 0 0 1 1-1Z" fill="currentColor"></path><path d="M16.83 12.93c.26-.27.26-.75-.08-.92A9.5 9.5 0 0 0 12.47 11h-.94A9.53 9.53 0 0 0 2 20.53c0 .81.66 1.47 1.47 1.47h.22c.24 0 .44-.17.5-.4.29-1.12.84-2.17 1.32-2.91.14-.21.43-.1.4.15l-.26 2.61c-.02.3.2.55.5.55h7.64c.12 0 .17-.31.06-.36C12.82 21.14 12 20.22 12 19a3 3 0 0 1 3-3h.5a.5.5 0 0 0 .5-.5V15c0-.8.31-1.53.83-2.07ZM12 10a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z" fill="currentColor"></path></svg>
-                                            <span class="lineClamp1__4bd52 text-md/medium_cf4812" data-text-variant="text-md/medium">Convidar para voz</span>
-                                        </div>
-                                    </div>
-                                </button>
-                                <button data-mana-component="button" role="button" class="button_a22cb0 md_a22cb0 secondary_a22cb0 hasText_a22cb0" type="button">
-                                    <div class="buttonChildrenWrapper_a22cb0">
-                                        <div class="buttonChildren_a22cb0">
-                                            <svg class="icon_a22cb0" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" viewBox="0 0 24 24"><path fill="currentColor" d="M2.06 7.61c-.25.95.31 1.92 1.26 2.18l4.3 1.15c.94.25 1.91-.31 2.17-1.26l1.15-4.3c.25-.94-.31-1.91-1.26-2.17l-4.3-1.15c-.94-.25-1.91.31-2.17 1.26l-1.15 4.3ZM12.98 7.87a2 2 0 0 0 1.75 2.95H20a2 2 0 0 0 1.76-2.95l-2.63-4.83a2 2 0 0 0-3.51 0l-2.63 4.83ZM5.86 13.27a.89.89 0 0 1 1.28 0l.75.77a.9.9 0 0 0 .54.26l1.06.12c.5.06.85.52.8 1.02l-.13 1.08c-.02.2.03.42.14.6l.56.92c.27.43.14 1-.28 1.26l-.9.58a.92.92 0 0 0-.37.48l-.36 1.02a.9.9 0 0 1-1.15.57l-1-.36a.89.89 0 0 0-.6 0l-1 .36a.9.9 0 0 1-1.15-.57l-.36-1.02a.92.92 0 0 0-.37-.48l-.9-.58a.93.93 0 0 1-.28-1.26l.56-.93c.11-.17.16-.38.14-.59l-.12-1.08c-.06-.5.3-.96.8-1.02l1.05-.12a.9.9 0 0 0 .54-.26l.75-.77ZM18.52 13.71a1.1 1.1 0 0 0-2.04 0l-.46 1.24c-.19.5-.57.88-1.07 1.07l-1.24.46a1.1 1.1 0 0 0 0 2.04l1.24.46c.5.19.88.57 1.07 1.07l.46 1.24c.35.95 1.7.95 2.04 0l.46-1.24c.19-.5.57-.88 1.07-1.07l1.24-.46a1.1 1.1 0 0 0 0-2.04l-1.24-.46a1.8 1.8 0 0 1-1.07-1.07l-.46-1.24Z"></path></svg>
-                                            <span class="lineClamp1__4bd52 text-md/medium_cf4812" data-text-variant="text-md/medium">Escolher atividade</span>
-                                        </div>
-                                    </div>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                `;
-                const inviteBtn = Array.from(placeholder.querySelectorAll("button")).find(b => /Convidar para voz|Invite to voice channel/i.test(b.textContent || ""));
-                if (inviteBtn) {
-                    inviteBtn.addEventListener("click", () => {
-                        try {
-                            this._openNativeInviteModal();
-                        } catch (_) {}
-                    });
-                }
-                const activityBtn = Array.from(placeholder.querySelectorAll("button")).find(b => /Escolher atividade|Choose an activity|Choose activity/i.test(b.textContent || ""));
-                if (activityBtn) {
-                    activityBtn.addEventListener("click", () => {
-                        try {
-                            if (!this._clickNativeActivityButton()) {
-                                this.toast?.("Use o botÃ£o de atividades na barra da chamada para escolher uma atividade.", "info");
-                            }
-                        } catch (_) {}
-                    });
-                }
-                if (!visibleTile.style.order) visibleTile.style.order = "0";
-                placeholder.style.order = "1";
-                hiddenTile.insertAdjacentElement("afterend", placeholder);
             }
         } catch (_) {}
     }
@@ -5611,7 +5841,7 @@ return false;
                 }
             }
 
-            const headers = document.querySelectorAll('[class*="text__9aed4"]');
+            const headers = document.querySelectorAll('[class*="text__"]');
             for (let i = 0; i < headers.length; i++) {
                 if (hasNum(headers[i]) && /[\u2014\u2013-]/.test(headers[i].textContent)) {
                     replaceNum(headers[i], correctCount);
@@ -5626,11 +5856,13 @@ return false;
             const headings = document.querySelectorAll('[class*="listTitle__"]');
             let anyPanelProcessed = false;
             let totalVisible = 0;
+            let foundRelevantHeading = false;
             for (let h = 0; h < headings.length; h++) {
                 const heading = headings[h];
                 const text = (heading.textContent || "").trim();
                 const match = text.match(headingRe);
                 if (!match) continue;
+                foundRelevantHeading = true;
                 const baseLabel = match[1];
                 const panel = heading.closest('[class*="content"]') || heading.parentElement;
                 if (!panel) continue;
@@ -5663,19 +5895,19 @@ return false;
                 let placeholder = panel.querySelector('[data-nmb-injected="true"]');
                 if (!placeholder) {
                     placeholder = document.createElement("div");
-                    placeholder.className = "emptyStateContainer__664ff";
+                    placeholder.className = "emptyStateContainer";
                     placeholder.dataset.nmbInjected = "true";
-                    placeholder.innerHTML = `<img alt="" class="sparkleIcon__05cdc sparkleBottom__05cdc" src="/assets/3a6a08a976f34e04.svg">
-                        <div class="background__506d9">
-                            <svg class="foreground__506d9" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="none" viewBox="0 0 24 24">
+                    placeholder.innerHTML = `<img alt="" class="sparkleIcon sparkleBottom" src="/assets/3a6a08a976f34e04.svg">
+                        <div class="background">
+                            <svg class="foreground" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="none" viewBox="0 0 24 24">
                                 <path fill="currentColor" d="M19.61 18.25a1.08 1.08 0 0 1-.07-1.33 9 9 0 1 0-15.07 0c.26.42.25.97-.08 1.33l-.02.02c-.41.44-1.12.43-1.46-.07a11 11 0 1 1 18.17 0c-.33.5-1.04.51-1.45.07l-.02-.02Z"></path>
                                 <path fill="currentColor" d="M16.83 15.23c.43.47 1.18.42 1.45-.14a7 7 0 1 0-12.57 0c.28.56 1.03.6 1.46.14l.05-.06c.3-.33.35-.81.17-1.23A4.98 4.98 0 0 1 12 7a5 5 0 0 1 4.6 6.94c-.17.42-.13.9.18 1.23l.05.06Z"></path>
                                 <path fill="currentColor" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM6.33 20.03c-.25.72.12 1.5.8 1.84a10.96 10.96 0 0 0 9.73 0 1.52 1.52 0 0 0 .8-1.84 6 6 0 0 0-11.33 0Z"></path>
                             </svg>
                         </div>
-                        <img alt="" class="sparkleIcon__05cdc sparkleTop__05cdc" src="/assets/30d1720360dd2c40.svg">
-                        <div class="text-lg/semibold_cf4812 emptyStateTitle__664ff" data-text-variant="text-lg/semibold" style="color: var(--text-strong);">${t.title}</div>
-                        <div class="text-sm/normal_cf4812 emptyStateBody__664ff" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.body}</div>`;
+                        <img alt="" class="sparkleIcon sparkleTop" src="/assets/30d1720360dd2c40.svg">
+                        <div class="text-lg/semibold emptyStateTitle" data-text-variant="text-lg/semibold" style="color: var(--text-strong);">${t.title}</div>
+                        <div class="text-sm/normal emptyStateBody" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.body}</div>`;
                     heading.insertAdjacentElement("afterend", placeholder);
                 }
             }
@@ -5701,31 +5933,36 @@ return false;
                     if (svg) this._fixHandIconMaskCutout(svg);
                 }
             };
-            const badges = document.querySelectorAll('[class*="raisedHandCount__"]');
-            if (anyPanelProcessed) {
+            if (foundRelevantHeading && anyPanelProcessed) {
+                const badges = document.querySelectorAll('[class*="raisedHandCount__"]');
                 for (let b = 0; b < badges.length; b++) setHandBadgeCount(badges[b], totalVisible);
-            } else {
-                const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
-                let storeVisible = 0;
-                if (channelId && this.modules.StageChannelParticipantStore) {
-                    try {
-                        const participants = this.modules.StageChannelParticipantStore.getMutableParticipants?.(channelId);
-                        const list = Array.isArray(participants) ? participants : (participants && typeof participants === "object" ? Object.values(participants) : []);
-                        const nonBlocked = list.filter(p => {
-                            const uid = this.extractUserId(p);
-                            return !uid || !this.shouldHide(uid);
-                        });
-                        const requesters = nonBlocked.filter(p => {
-                            if (!p) return false;
-                            if (p.voiceState?.requestToSpeakTimestamp) return true;
-                            if (p.requestToSpeakTimestamp) return true;
-                            return false;
-                        });
-                        storeVisible = requesters.length;
-                    } catch (_) {}
-                }
-                for (let b = 0; b < badges.length; b++) setHandBadgeCount(badges[b], storeVisible);
+                return;
             }
+            const badges = document.querySelectorAll('[class*="raisedHandCount__"]');
+            if (!badges.length) return;
+            const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+            if (!channelId) return;
+            const channel = this.modules.ChannelStore?.getChannel?.(channelId);
+            if (!channel || channel.type !== 13) return;
+            let storeVisible = 0;
+            if (this.modules.StageChannelParticipantStore) {
+                try {
+                    const participants = this.modules.StageChannelParticipantStore.getMutableParticipants?.(channelId);
+                    const list = Array.isArray(participants) ? participants : (participants && typeof participants === "object" ? Object.values(participants) : []);
+                    const nonBlocked = list.filter(p => {
+                        const uid = this.extractUserId(p);
+                        return !uid || !this.shouldHide(uid);
+                    });
+                    const requesters = nonBlocked.filter(p => {
+                        if (!p) return false;
+                        if (p.voiceState?.requestToSpeakTimestamp) return true;
+                        if (p.requestToSpeakTimestamp) return true;
+                        return false;
+                    });
+                    storeVisible = requesters.length;
+                } catch (_) {}
+            }
+            for (let b = 0; b < badges.length; b++) setHandBadgeCount(badges[b], storeVisible);
         } catch (_) {}
     }
     hideBlockedStageNotice() {
@@ -5773,7 +6010,7 @@ return false;
     }
     _buildEventsEmptySkeletonHtml() {
         const t = _locale(_getLocale(), ByeBlocked.EVENTS_LOCALE);
-        return `<div class="nmb-injected-events-empty container__710ee">\n                    <img alt="" class="sparkleIcon__05cdc sparkleBottom__05cdc" src="/assets/3a6a08a976f34e04.svg">\n                    <div class="circle__710ee">\n                        <svg class="icon__710ee" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="none" viewBox="0 0 24 24">\n                            <path fill="currentColor" d="M7 1a1 1 0 0 1 1 1v.75c0 .14.11.25.25.25h7.5c.14 0 .25-.11.25-.25V2a1 1 0 1 1 2 0v.75c0 .14.11.25.25.25H19a3 3 0 0 1 3 3 1 1 0 0 1-1 1H3a1 1 0 0 1-1-1 3 3 0 0 1 3-3h.75c.14 0 .25-.11.25-.25V2a1 1 0 0 1 1-1Z"></path>\n                            <path fill="currentColor" fill-rule="evenodd" d="M2 10a1 1 0 0 1 1-1h18a1 1 0 0 1 1 1v9a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-9Zm3.5 2a.5.5 0 0 0-.5.5v3c0 .28.22.5.5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3Z" clip-rule="evenodd"></path>\n                        </svg>\n                    </div>\n                    <img alt="" class="sparkleIcon__05cdc sparkleTop__05cdc" src="/assets/30d1720360dd2c40.svg">\n                    <h2 class="heading-xl/semibold_cf4812 defaultColor__5345c title__710ee" data-text-variant="heading-xl/semibold" style="color: var(--text-strong);">${t.title}</h2>\n                    <div class="text-sm/normal_cf4812 subtitle__710ee" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.subtitle}</div>\n                    <div class="text-sm/normal_cf4812 roleTip__710ee" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.tip_prefix}<strong><a class="anchor_edefb8 anchorUnderlineOnHover_edefb8" role="link" tabindex="0" data-nmb-open-role-settings="true">${t.tip_link}</a></strong>.</div>\n                </div>`;
+        return `<div class="nmb-injected-events-empty container">\n                    <img alt="" class="sparkleIcon sparkleBottom" src="/assets/3a6a08a976f34e04.svg">\n                    <div class="circle">\n                        <svg class="icon" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="none" viewBox="0 0 24 24">\n                            <path fill="currentColor" d="M7 1a1 1 0 0 1 1 1v.75c0 .14.11.25.25.25h7.5c.14 0 .25-.11.25-.25V2a1 1 0 1 1 2 0v.75c0 .14.11.25.25.25H19a3 3 0 0 1 3 3 1 1 0 0 1-1 1H3a1 1 0 0 1-1-1 3 3 0 0 1 3-3h.75c.14 0 .25-.11.25-.25V2a1 1 0 0 1 1-1Z"></path>\n                            <path fill="currentColor" fill-rule="evenodd" d="M2 10a1 1 0 0 1 1-1h18a1 1 0 0 1 1 1v9a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-9Zm3.5 2a.5.5 0 0 0-.5.5v3c0 .28.22.5.5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3Z" clip-rule="evenodd"></path>\n                        </svg>\n                    </div>\n                    <img alt="" class="sparkleIcon sparkleTop" src="/assets/30d1720360dd2c40.svg">\n                    <h2 class="heading-xl/semibold defaultColor title" data-text-variant="heading-xl/semibold" style="color: var(--text-strong);">${t.title}</h2>\n                    <div class="text-sm/normal subtitle" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.subtitle}</div>\n                    <div class="text-sm/normal roleTip" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.tip_prefix}<strong><a class="anchor anchorUnderlineOnHover" role="link" tabindex="0" data-nmb-open-role-settings="true">${t.tip_link}</a></strong>.</div>\n                </div>`;
     }
     hideBlockedEvents() {
         const containers = new Set;
@@ -5782,7 +6019,7 @@ return false;
             const card = cards[i];
             const creatorEl = card.querySelector('[class*="creator_"]');
             if (!creatorEl) continue;
-            const container = card.closest('[class*="content__49fc1"], [class*="content_d0b769"]') || card.parentElement;
+            const container = card.closest('[class*="content_"]') || card.parentElement;
             if (container) containers.add(container);
             if (card.dataset?.hiddenBlocked === "true") continue;
             const userId = this.resolveEventCreatorId(card);
@@ -5791,12 +6028,6 @@ return false;
             }
         }
         for (const container of containers) this._fixEmptyEventsPopoverState(container);
-        for (const existingLi of document.querySelectorAll('li:has([data-list-item-id^="channels___upcoming-events-"])')) {
-            if (!existingLi.querySelector('[data-nmb-events-ready="true"]')) {
-                existingLi.dataset.nmbSidebarPreHidden = "true";
-                existingLi.style.visibility = 'hidden';
-            }
-        }
         this._fixEventsSidebarCounter();
         this.hideSidebarEventItems();
         this._closeBlockedEventModalIfOpen();
@@ -5820,9 +6051,9 @@ return false;
         this._fixEventsPopoverHeaderCount(container, visible, hiddenBlocked);
     }
     _fixEventsPopoverHeaderCount(container, visible, hiddenBlocked) {
-        const root = container.closest('[class*="root__49fc1"]') || container.parentElement;
+        const root = container.closest('[class*="root_"]') || container.parentElement;
         if (!root) return;
-        const heading = root.querySelector('h1[id], [class*="header__49fc1"] h1');
+        const heading = root.querySelector('h1[id], [class*="header_"] h1');
         if (!heading) return;
         if (!heading.hasAttribute("data-nmb-orig-text")) {
             heading.setAttribute("data-nmb-orig-text", heading.textContent || "");
@@ -5929,7 +6160,7 @@ return false;
     }
     _processEventsSidebarItem(item, eventRegex, seenNameEls) {
         if (!item) return;
-        if (item.querySelector('[class*="card__"], [class*="content__49fc1"]')) return;
+        if (item.querySelector('[class*="card__"], [class*="content_"]')) return;
         const nameEl = item.querySelector('[class*="name__"]');
         if (!nameEl) return;
         const _processEventsLi = item.closest('li');
@@ -5967,8 +6198,8 @@ return false;
             return;
         }
         nameEl.removeAttribute("data-nmb-events-pending-since");
-        const row = item.closest('[class*="wrapper__2ea32"]') || item.parentElement;
-        const badgeEl = row ? row.querySelector('[class*="numberBadge__"]') : null;
+        const row = item.closest('[class*="wrapper_"]') || item.parentElement;
+        const badgeEl = row ? row.querySelector('[class*="numberBadge"]') : null;
         const unreadEl = row ? row.querySelector('[class*="unread__"][class*="unreadImportant__"], [class*="unreadImportant__"]') : null;
         const genericLabel = storedOrigText.replace(/\d+/, "").replace(/[()]/g, "").replace(/\s+/g, " ").trim() || storedOrigText;
         const visibleEvents = totalEvents - hiddenEvents;
@@ -6109,16 +6340,31 @@ return false;
     findEventCreatorId(el) {
         if (!el) return null;
         let found = null;
-        this.walkFiberProps(el, props => {
-            if (found) return;
-            const direct = this.extractUserId(props);
-            if (direct) { found = direct; return; }
-            const event = props?.guildScheduledEvent || props?.event || props?.scheduledEvent;
-            if (event) {
-                const nested = event.creatorId || event.creator_id || event.creator?.id;
-                if (nested && /^\d{17,20}$/.test(String(nested))) found = String(nested);
+        try {
+            const listId = el.dataset?.listItemId || "";
+            const eventId = listId.match(/(\d{17,20})$/)?.[1];
+            if (eventId && this.modules.GuildScheduledEventStore) {
+                const guildId = this.modules.SelectedGuildStore?.getGuildId?.();
+                const ev = guildId
+                    ? (this.modules.GuildScheduledEventStore.getEvent?.(guildId, eventId)
+                        || this.modules.GuildScheduledEventStore.getGuildScheduledEvent?.(eventId))
+                    : this.modules.GuildScheduledEventStore.getGuildScheduledEvent?.(eventId);
+                const creatorId = ev?.creatorId || ev?.creator_id || ev?.creator?.id;
+                if (creatorId && /^\d{17,20}$/.test(String(creatorId))) found = String(creatorId);
             }
-        }, 14);
+        } catch (_) {}
+        if (!found) {
+            this.walkFiberProps(el, props => {
+                if (found) return;
+                const direct = this.extractUserId(props);
+                if (direct) { found = direct; return; }
+                const event = props?.guildScheduledEvent || props?.event || props?.scheduledEvent;
+                if (event) {
+                    const nested = event.creatorId || event.creator_id || event.creator?.id;
+                    if (nested && /^\d{17,20}$/.test(String(nested))) found = String(nested);
+                }
+            }, 14);
+        }
         return found;
     }
     _closeBlockedEventModalIfOpen() {
@@ -6188,13 +6434,22 @@ return false;
     }
     _resolveStageNoticeChannelId(notice) {
         let found = null;
-        this.walkFiberProps(notice, props => {
-            if (found || !props) return;
-            const direct = props.channelId;
-            if (direct && /^\d{17,20}$/.test(String(direct))) { found = String(direct); return; }
-            const nested = props.channel?.id;
-            if (nested && /^\d{17,20}$/.test(String(nested))) found = String(nested);
-        }, 14);
+        try {
+            const currentChannelId = this.modules.SelectedChannelStore?.getChannelId?.();
+            if (currentChannelId) {
+                const ch = this.modules.ChannelStore?.getChannel?.(currentChannelId);
+                if (ch?.type === 13) found = String(currentChannelId);
+            }
+        } catch (_) {}
+        if (!found) {
+            this.walkFiberProps(notice, props => {
+                if (found || !props) return;
+                const direct = props.channelId;
+                if (direct && /^\d{17,20}$/.test(String(direct))) { found = String(direct); return; }
+                const nested = props.channel?.id;
+                if (nested && /^\d{17,20}$/.test(String(nested))) found = String(nested);
+            }, 14);
+        }
         if (found) return found;
 
         const nameEl = notice.querySelector('[class*="channelName_"]');
@@ -6239,6 +6494,7 @@ return false;
                 if (badgeWrapper.dataset?.hiddenBlocked === "true") {
                     if (!isStageBadge) {
                         this.restoreElement(badgeWrapper);
+                        delete badgeWrapper.dataset.nmbGuildBadge;
                         this._restoreGuildIconMask(itemContainer);
                         continue;
                     }
@@ -6247,9 +6503,11 @@ return false;
                     const stillAllBlocked = channelIdRecheck ? this._areAllStageChannelUsersBlocked(channelIdRecheck) : true;
                     if (!stillAllBlocked) {
                         this.restoreElement(badgeWrapper);
+                        delete badgeWrapper.dataset.nmbGuildBadge;
                         this._restoreGuildIconMask(itemContainer);
                         continue;
                     }
+                    badgeWrapper.dataset.nmbGuildBadge = "true";
                     this._fixGuildIconMaskForHiddenBadge(itemContainer);
                     continue;
                 }
@@ -6264,6 +6522,7 @@ return false;
                 const allConnectedBlocked = this._areAllStageChannelUsersBlocked(channelId);
                 if (allConnectedBlocked) {
                     this.hideElement(badgeWrapper, "guild-stage-badge", false);
+                    badgeWrapper.dataset.nmbGuildBadge = "true";
                     this._fixGuildIconMaskForHiddenBadge(itemContainer);
                 }
             }
@@ -6274,6 +6533,7 @@ return false;
             const svg = itemContainer.querySelector('svg[class*="svg_cc5dd2"]');
             if (!svg) return;
             const fixedForeignObjects = svg.querySelectorAll('foreignObject[data-nmb-mask-fixed="true"]');
+            if (!fixedForeignObjects.length) return;
             fixedForeignObjects.forEach(fo => {
                 const prevMask = fo.getAttribute("data-nmb-prev-mask");
                 if (prevMask) fo.setAttribute("mask", prevMask);
@@ -6285,13 +6545,16 @@ return false;
                 el.style.removeProperty("display");
                 delete el.dataset.nmbStrokeHidden;
             });
-        } catch (_) {}
+        } catch (err) {
+            this._patcher._logFail("_restoreGuildIconMask", err);
+        }
     }
     _fixGuildIconMaskForHiddenBadge(itemContainer) {
         try {
             const svg = itemContainer.querySelector('svg[class*="svg_cc5dd2"]');
             if (!svg) return;
             const foreignObjects = svg.querySelectorAll("foreignObject[mask]");
+            if (!foreignObjects.length) return;
             for (let i = 0; i < foreignObjects.length; i++) {
                 const fo = foreignObjects[i];
                 if (fo.dataset?.nmbMaskFixed === "true") continue;
@@ -6299,11 +6562,12 @@ return false;
                 const maskIdMatch = maskAttr.match(/url\(#([^)]+)\)/);
                 if (!maskIdMatch) continue;
                 const maskId = maskIdMatch[1];
-                const maskEl = document.getElementById(maskId);
-                const usesBadgeCutout = !!maskEl && (!!maskEl.querySelector('[id*="upper_badge_masks"]') || Array.from(maskEl.querySelectorAll("use")).some(useEl => {
+                const maskEl = svg.querySelector(`mask#${CSS.escape(maskId)}`) || document.getElementById(maskId);
+                if (!maskEl) continue;
+                const usesBadgeCutout = !!maskEl.querySelector('[id*="upper_badge_masks"]') || Array.from(maskEl.querySelectorAll("use")).some(useEl => {
                     const href = useEl.getAttribute("href") || useEl.getAttribute("xlink:href") || "";
                     return href.includes("upper_badge_masks");
-                }));
+                });
                 if (!usesBadgeCutout) continue;
                 fo.setAttribute("data-nmb-prev-mask", maskAttr);
                 fo.setAttribute("mask", "url(#svg-mask-squircle)");
@@ -6312,25 +6576,33 @@ return false;
             const strokeMasks = svg.querySelectorAll('mask[id*="-stroke_mask"]');
             for (let i = 0; i < strokeMasks.length; i++) {
                 const strokeMask = strokeMasks[i];
-                if (!strokeMask.innerHTML.includes("upper_badge_masks")) continue;
+                if (!strokeMask || !strokeMask.innerHTML.includes("upper_badge_masks")) continue;
                 const maskId = strokeMask.id;
+                if (!maskId) continue;
                 const usersOfStroke = svg.querySelectorAll(`[mask="url(#${maskId})"]`);
+                if (!usersOfStroke.length) continue;
                 usersOfStroke.forEach(el => {
                     if (el.dataset?.nmbStrokeHidden === "true") return;
                     el.style.setProperty("display", "none", "important");
                     el.dataset.nmbStrokeHidden = "true";
                 });
             }
-        } catch (_) {}
+        } catch (err) {
+            this._patcher._logFail("_fixGuildIconMaskForHiddenBadge", err);
+        }
     }
     _fixHandIconMaskCutout(svg) {
+        if (!svg || !svg.querySelectorAll) return;
         try {
             const gEls = svg.querySelectorAll("g[mask]");
+            if (!gEls.length) return;
             for (let i = 0; i < gEls.length; i++) {
                 const maskAttr = gEls[i].getAttribute("mask") || "";
                 const maskIdMatch = maskAttr.match(/url\(#([^)]+)\)/);
                 if (!maskIdMatch) continue;
-                const maskEl = svg.querySelector(`mask#${CSS.escape(maskIdMatch[1])}`) || document.getElementById(maskIdMatch[1]);
+                const maskId = maskIdMatch[1];
+                if (!maskId) continue;
+                const maskEl = svg.querySelector(`mask#${CSS.escape(maskId)}`) || document.getElementById(maskId);
                 if (!maskEl || maskEl.dataset?.nmbHandMaskFixed === "true") continue;
                 const cutout = maskEl.querySelector('circle[fill="black"], circle[fill="#000"], circle[fill="#000000"]');
                 if (!cutout) continue;
@@ -6343,8 +6615,10 @@ return false;
         } catch (_) {}
     }
     _restoreHandIconMaskCutout(svg) {
+        if (!svg || !svg.querySelectorAll) return;
         try {
             const fixedMasks = svg.querySelectorAll('mask[data-nmb-hand-mask-fixed="true"]');
+            if (!fixedMasks.length) return;
             fixedMasks.forEach(maskEl => {
                 if (maskEl._nmbCutoutEl && maskEl._nmbCutoutPlaceholder) {
                     maskEl._nmbCutoutPlaceholder.replaceWith(maskEl._nmbCutoutEl);
@@ -6363,11 +6637,20 @@ return false;
             if (match) return match[1];
         }
         let found = null;
-        this.walkFiberProps(itemContainer, props => {
-            if (found || !props) return;
-            const direct = props.guildId ?? props.channel?.guild_id;
-            if (direct && /^\d{17,20}$/.test(String(direct))) found = String(direct);
-        }, 14);
+        try {
+            const selectedGuildId = this.modules.SelectedGuildStore?.getGuildId?.();
+            if (selectedGuildId && /^\d{17,20}$/.test(String(selectedGuildId))
+                && itemContainer.querySelector(`[data-list-item-id^="guildsnav___${selectedGuildId}"]`)) {
+                found = String(selectedGuildId);
+            }
+        } catch (_) {}
+        if (!found) {
+            this.walkFiberProps(itemContainer, props => {
+                if (found || !props) return;
+                const direct = props.guildId ?? props.channel?.guild_id;
+                if (direct && /^\d{17,20}$/.test(String(direct))) found = String(direct);
+            }, 14);
+        }
         return found;
     }
     _resolveGuildActiveStageChannelIdViaStore(guildId) {
@@ -6516,7 +6799,7 @@ return false;
             });
             if (Dispatcher?.dispatch) {
                 Dispatcher.dispatch({
-                    type: "GUILD_SETTINGS_MODAL_OPEN",
+                    type: ByeBlocked.ACTIONS.GUILD_SETTINGS_MODAL_OPEN,
                     guildId: guildId
                 });
                 watchForRolesTab();
@@ -6691,6 +6974,18 @@ return false;
     }
     cleanupPinnedPanelResidue() {
         const pinsRoots = document.querySelectorAll('[data-list-id="pins"], [data-list-id*="pins"]');
+        if (!pinsRoots.length) return;
+        const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+        let storeHasVisiblePin = null;
+        try {
+            const items = channelId ? this.modules.ChannelPinsStore?.getPins?.(channelId)?.items : null;
+            if (Array.isArray(items)) {
+                storeHasVisiblePin = items.some(item => {
+                    const messageId = item?.message?.id;
+                    return messageId ? !this._shouldHidePinnedMessage(channelId, messageId, item) : false;
+                });
+            }
+        } catch (_) {}
         for (let i = 0; i < pinsRoots.length; i++) {
             const root = pinsRoots[i];
             const groups = root.querySelectorAll('[class*="messageGroupWrapper"]');
@@ -6711,7 +7006,9 @@ return false;
                     hiddenGroups++;
                 }
             }
-            this._syncPinnedEmptyState(root, totalGroups > 0 && hiddenGroups === totalGroups);
+            const domLooksEmpty = totalGroups > 0 && hiddenGroups === totalGroups;
+            const shouldShowEmpty = domLooksEmpty && storeHasVisiblePin !== true;
+            this._syncPinnedEmptyState(root, shouldShowEmpty);
         }
     }
     _findLocalizedPinsEmptyText() { return (_locale(_getLocale(), ByeBlocked.PINS_LOCALE) || {}).body || null; }
@@ -6721,6 +7018,9 @@ return false;
     }
     _syncPinnedEmptyState(listRoot, shouldShowEmpty) {
         let placeholder = listRoot.querySelector(":scope > .nmb-pins-empty-placeholder");
+        const wrap = listRoot.closest('[class*="messagesPopoutWrap"]');
+        const nativeFooter = wrap ? wrap.querySelector('[class*="footer_"]:not([class*="scrollingFooterWrap"])') : null;
+        const scrollingFooterWrap = wrap ? wrap.querySelector('[class*="scrollingFooterWrap"]') : null;
         if (shouldShowEmpty) {
             if (!listRoot.hasAttribute("data-nmb-prev-list-style")) {
                 listRoot.setAttribute("data-nmb-prev-list-style", listRoot.getAttribute("style") || "");
@@ -6732,7 +7032,7 @@ return false;
             listRoot.style.flexDirection = "column";
             listRoot.style.height = "auto";
             listRoot.style.minHeight = "0px";
-            listRoot.style.overflow = "hidden";
+            listRoot.style.overflow = "visible";
             Array.from(listRoot.children).forEach(child => {
                 if (child === placeholder) return;
                 if (!child.hasAttribute("data-nmb-prev-residue-style")) {
@@ -6742,26 +7042,52 @@ return false;
             });
             if (!placeholder) {
                 placeholder = document.createElement("div");
-                const bodyText = this._findLocalizedPinsEmptyText() || "This channel doesn't have<br>any pinned messages... yet.";
-                placeholder.className = "emptyPlaceholder_e8b59c nmb-pins-empty-placeholder";
-                placeholder.innerHTML = `\n                    <div class="image_e8b59c" style="background-image:url(&quot;/assets/1772d54cb566d95b.svg&quot;)"></div>\n                    <div class="text-md/medium_cf4812 body_e8b59c" data-text-variant="text-md/medium" style="color: var(--text-default);">${bodyText}</div>\n                `;
+                placeholder.className = "nmb-pins-empty-placeholder";
                 listRoot.appendChild(placeholder);
             }
-            placeholder.style.display = "";
-            const scroller = listRoot.closest('.messagesPopout_e8b59c, [class*="messagesPopout_"], [class*="messagesPopout"]') || listRoot.parentElement;
-            const footerHost = scroller && scroller.parentElement ? scroller.parentElement : null;
-            let footer = footerHost ? footerHost.querySelector(":scope > .nmb-pins-empty-footer") : null;
-            if (!footer && footerHost) {
-                footer = document.createElement("div");
-                const tip = this._findLocalizedPinsTipText() || {
-                    label: "Pro tip:",
-                    text: 'Users with the "Manage Messages" permission can pin a message from the context menu.'
-                };
-                footer.className = "footer_e8b59c nmb-pins-empty-footer";
-                footer.innerHTML = `\n                    <div class="block__30cbe" style="width: 100%; padding-top: 10px; padding-bottom: 10px;">\n                        <div class="text-sm/bold_cf4812 pro__30cbe" data-text-variant="text-sm/bold" style="color: var(--text-feedback-positive);">${tip.label}</div>\n                        <div class="defaultColor__4bd52 text-sm/normal_cf4812 tip__30cbe" data-text-variant="text-sm/normal">${tip.text}</div>\n                    </div>\n                `;
-                footerHost.appendChild(footer);
+            {
+                const bodyText = this._findLocalizedPinsEmptyText() || "This channel doesn't have<br>any pinned messages... yet.";
+                placeholder.innerHTML = `\n                    <div class="image_e8b59c nmb-pins-empty-icon" style="background-image:url(&quot;/assets/1772d54cb566d95b.svg&quot;)"></div>\n                    <div class="text-md/medium" data-text-variant="text-md/medium" style="color: var(--text-default);">${bodyText}</div>\n                `;
             }
-            if (footer) footer.style.display = "";
+            placeholder.style.display = "";
+            void listRoot.offsetHeight;
+            const scroller = listRoot.closest('[class*="messagesPopout_"]');
+            if (scroller) {
+                scroller.style.height = "auto";
+                void scroller.offsetHeight;
+                scroller.style.height = "";
+            }
+            const tip = this._findLocalizedPinsTipText() || {
+                label: "Pro tip:",
+                text: 'Users with the "Manage Messages" permission can pin a message from the context menu.'
+            };
+            if (nativeFooter) {
+                if (!nativeFooter.hasAttribute("data-nmb-prev-footer-html")) {
+                    nativeFooter.setAttribute("data-nmb-prev-footer-html", nativeFooter.innerHTML);
+                }
+                const innerBlock = nativeFooter.firstElementChild;
+                if (innerBlock && innerBlock.children.length >= 2) {
+                    innerBlock.children[0].textContent = tip.label;
+                    innerBlock.children[1].textContent = tip.text;
+                } else {
+                    nativeFooter.innerHTML = `\n                        <div style="width: 100%; padding-top: 10px; padding-bottom: 10px;">\n                            <div class="text-sm/bold" data-text-variant="text-sm/bold" style="color: var(--text-feedback-positive);">${tip.label}</div>\n                            <div class="defaultColor text-sm/normal" data-text-variant="text-sm/normal">${tip.text}</div>\n                        </div>\n                    `;
+                }
+                nativeFooter.style.display = "";
+            } else if (scrollingFooterWrap) {
+                if (!scrollingFooterWrap.hasAttribute("data-nmb-prev-wrap-style")) {
+                    scrollingFooterWrap.setAttribute("data-nmb-prev-wrap-style", scrollingFooterWrap.getAttribute("style") || "");
+                }
+                scrollingFooterWrap.style.paddingLeft = "0px";
+                scrollingFooterWrap.style.paddingRight = "0px";
+                let injectedTip = scrollingFooterWrap.querySelector(":scope > .nmb-injected-tip-footer");
+                if (!injectedTip) {
+                    injectedTip = document.createElement("div");
+                    injectedTip.className = "nmb-injected-tip-footer";
+                    scrollingFooterWrap.appendChild(injectedTip);
+                }
+                injectedTip.innerHTML = `\n                    <div style="width: 100%; padding: 10px 16px; box-sizing: border-box;">\n                        <div style="color: var(--text-feedback-positive); font-size: 14px; font-weight: 600; line-height: 18px;">${tip.label}</div>\n                        <div style="color: var(--text-default); font-size: 14px; font-weight: 400; line-height: 18px;">${tip.text}</div>\n                    </div>\n                `;
+                injectedTip.style.cssText = "display: block !important; width: 100% !important; box-sizing: border-box !important; margin-top: 16px !important; background: var(--background-secondary) !important;";
+            }
         } else {
             if (listRoot.hasAttribute("data-nmb-prev-list-style")) {
                 const prevListStyle = listRoot.getAttribute("data-nmb-prev-list-style");
@@ -6785,8 +7111,17 @@ return false;
                 }
             });
             if (placeholder) placeholder.style.display = "none";
-            const footer = listRoot.parentElement ? listRoot.parentElement.querySelector(":scope > .nmb-pins-empty-footer") : null;
-            if (footer) footer.style.display = "none";
+            if (nativeFooter && nativeFooter.hasAttribute("data-nmb-prev-footer-html")) {
+                nativeFooter.innerHTML = nativeFooter.getAttribute("data-nmb-prev-footer-html");
+                nativeFooter.removeAttribute("data-nmb-prev-footer-html");
+            }
+            const injectedTip = scrollingFooterWrap ? scrollingFooterWrap.querySelector(":scope > .nmb-injected-tip-footer") : null;
+            if (injectedTip) injectedTip.remove();
+            if (scrollingFooterWrap && scrollingFooterWrap.hasAttribute("data-nmb-prev-wrap-style")) {
+                const prevWrapStyle = scrollingFooterWrap.getAttribute("data-nmb-prev-wrap-style");
+                if (prevWrapStyle) scrollingFooterWrap.setAttribute("style", prevWrapStyle); else scrollingFooterWrap.removeAttribute("style");
+                scrollingFooterWrap.removeAttribute("data-nmb-prev-wrap-style");
+            }
         }
     }
     _seedVoiceChannelMembers() {
@@ -6810,7 +7145,7 @@ return false;
             document.querySelectorAll('[data-list-item-id*="channels"]').forEach(row => {
                 const channelId = this.findChannelId(row);
                 if (!channelId) return;
-                const statusEl = row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]');
+                const statusEl = this._findChannelStatusElement(row);
                 if (!statusEl || !statusEl.textContent?.trim()) return;
                 if (this._isChannelStatusPlaceholder(statusEl)) {
                     statusEl.dataset.nmbStatusSafe = "true";
@@ -6843,6 +7178,8 @@ return false;
     _handleVoiceStateUpdatesForFakeTimer(voiceStates) {
         if (!this.settings.places.voiceChannels) return;
         const selfId = this._getSelfUserId();
+        const statusChannelsToReevaluate = new Set;
+        let selfLeftVoiceEntirely = false;
         for (const vs of voiceStates) {
             if (!vs) continue;
             const userId = vs.userId || this.extractUserId(vs);
@@ -6860,22 +7197,15 @@ return false;
                 if (oldSet && !oldSet.size) prevMembers.delete(oldChannelId);
             }
             if (this.shouldHide(userId)) {
-
-                const _oldChId = oldChannelId, _newChId = newChannelId;
-                setTimeout(() => {
-                    if (!this.isRunning) return;
-                    try {
-                        if (_oldChId) this._reevaluateChannelStatusVisibility(_oldChId);
-                        if (_newChId) this._reevaluateChannelStatusVisibility(_newChId);
-                    } catch (_) {}
-                }, 0);
+                if (oldChannelId) statusChannelsToReevaluate.add(oldChannelId);
+                if (newChannelId) statusChannelsToReevaluate.add(newChannelId);
             }
-            if (selfId && userId === selfId && !newChannelId) {
-                this._voiceFakeTimers.delete(oldChannelId);
-                this._releaseAllVoiceMutes();
-                setTimeout(() => {
-                    if (this.isRunning) this.fixVoiceChannelIconColors();
-                }, 0);
+            if (selfId && userId === selfId) {
+                if (oldChannelId) this._voiceFakeTimers.delete(oldChannelId);
+                if (!newChannelId) {
+                    this._releaseAllVoiceMutes();
+                    selfLeftVoiceEntirely = true;
+                }
             }
             if (newChannelId) {
                 const existingMembers = prevMembers.get(newChannelId) || new Set;
@@ -6902,6 +7232,15 @@ return false;
                     } catch (_) {}
                 }
             }
+        }
+        if (statusChannelsToReevaluate.size || selfLeftVoiceEntirely) {
+            setTimeout(() => {
+                if (!this.isRunning) return;
+                try {
+                    for (const chId of statusChannelsToReevaluate) this._reevaluateChannelStatusVisibility(chId);
+                    if (selfLeftVoiceEntirely) this.fixVoiceChannelIconColors();
+                } catch (_) {}
+            }, 0);
         }
     }
     _reevaluateChannelStatusVisibility(channelId) {
@@ -7011,7 +7350,7 @@ return false;
         this.patchBefore(Dispatcher, "dispatch", function(context, args) {
             const action = args[0];
             if (!action || typeof action !== "object") return;
-            if (action.type === "VOICE_STATE_UPDATES" && Array.isArray(action.voiceStates)) {
+            if (action.type === self.constructor.ACTIONS.VOICE_STATE_UPDATES && Array.isArray(action.voiceStates)) {
                 try {
                     self._handleVoiceStateUpdatesForMute(action.voiceStates);
                 } catch (_) {}
@@ -7108,34 +7447,33 @@ return false;
         } else if (!state.active) {
             state.active = true;
         }
-        const timerContainer = channelRow.querySelector('[class*="tabularNumbers"]');
-        if (timerContainer) {
-            if (timerContainer.dataset.hiddenBlocked === "true") {
-                this.restoreElement(timerContainer);
-            }
-            const visibleTimerSpan = timerContainer.querySelector('span[aria-hidden="true"]') || timerContainer;
-            if (!state.styleSnapshot) {
-                const computed = window.getComputedStyle(visibleTimerSpan);
-                state.styleSnapshot = {
-                    fontFamily: computed.fontFamily,
-                    fontSize: computed.fontSize,
-                    fontWeight: computed.fontWeight,
-                    fontVariantNumeric: computed.fontVariantNumeric,
-                    lineHeight: computed.lineHeight,
-                    color: computed.color,
-                    letterSpacing: computed.letterSpacing,
-                    margin: computed.margin,
-                    padding: computed.padding
-                };
-            }
-            if (!visibleTimerSpan.hasAttribute("data-nmb-prev-style")) {
-                visibleTimerSpan.setAttribute("data-nmb-prev-style", visibleTimerSpan.getAttribute("style") || "");
-            }
-            visibleTimerSpan.dataset.hiddenBlocked = "true";
-            visibleTimerSpan.dataset.nmbReason = "voice-timer-faked";
-            visibleTimerSpan.style.cssText = this.hideStyles;
-            this.hiddenElements.add(visibleTimerSpan);
+        const timerContainer = channelRow.querySelector('[class*="tabularNumbers"], [class*="timer"][role="timer"]');
+        if (!timerContainer) { state.active = false; return; }
+        if (timerContainer.dataset.hiddenBlocked === "true") {
+            this.restoreElement(timerContainer);
         }
+        const visibleTimerSpan = timerContainer.querySelector('span[aria-hidden="true"]') || timerContainer;
+        if (!state.styleSnapshot) {
+            const computed = window.getComputedStyle(visibleTimerSpan);
+            state.styleSnapshot = {
+                fontFamily: computed.fontFamily,
+                fontSize: computed.fontSize,
+                fontWeight: computed.fontWeight,
+                fontVariantNumeric: computed.fontVariantNumeric,
+                lineHeight: computed.lineHeight,
+                color: computed.color,
+                letterSpacing: computed.letterSpacing,
+                margin: computed.margin,
+                padding: computed.padding
+            };
+        }
+        if (!visibleTimerSpan.hasAttribute("data-nmb-prev-style")) {
+            visibleTimerSpan.setAttribute("data-nmb-prev-style", visibleTimerSpan.getAttribute("style") || "");
+        }
+        visibleTimerSpan.dataset.hiddenBlocked = "true";
+        visibleTimerSpan.dataset.nmbReason = "voice-timer-faked";
+        visibleTimerSpan.style.cssText = this.hideStyles;
+        this.hiddenElements.add(visibleTimerSpan);
         const computedSnapshot = state.styleSnapshot || this._DEFAULT_FAKE_TIMER_STYLE();
         const anchor = this._findVoiceTimerAnchor(channelRow);
         if (!anchor) return;
@@ -7218,9 +7556,16 @@ return false;
             const isMixedChannel = states.length > 0 && anyBlocked && !allHidden;
             let fakeResetExists = this._voiceFakeTimers.has(channelId);
             const selfHereWithOnlyBlocked = isHiddenOnly && !isMixedChannel && this._channelContainsSelf(channelId, states);
-            if (this.settings.places.voiceChannels && !fakeResetExists && selfHereWithOnlyBlocked) {
+            let mySelectedVoiceChannelId = null;
+            try { mySelectedVoiceChannelId = this.modules.SelectedChannelStore?.getVoiceChannelId?.() || null; } catch (_) {}
+            const selfDefinitelyElsewhere = mySelectedVoiceChannelId && mySelectedVoiceChannelId !== channelId;
+            if (this.settings.places.voiceChannels && !fakeResetExists && selfHereWithOnlyBlocked && !selfDefinitelyElsewhere) {
                 this._resetFakeVoiceTimer(channelId);
                 fakeResetExists = true;
+            }
+            if (fakeResetExists && selfDefinitelyElsewhere) {
+                this._voiceFakeTimers.delete(channelId);
+                fakeResetExists = false;
             }
             if (!isHiddenOnly && !hasBlockedUsers) {
                 this.restoreVoiceChannelIcon(channelRow);
@@ -7251,7 +7596,8 @@ return false;
         const link = row.matches?.('[data-list-item-id*="channels"]') ? row : row.querySelector?.('[data-list-item-id*="channels"]');
         const label = `${link?.getAttribute?.("aria-label") || ""} ${row.textContent || ""}`;
         const hasLiveIcon = Boolean(row.querySelector?.('[class*="iconLive"]'));
-        const hasCallDuration = /dura(?:Ã§|c)[aÃ£]o da chamada|call duration|duration/i.test(label);
+        const durationLabels = [_locale(_getLocale(), ByeBlocked.DURATION_LOCALE), 'call duration', 'duration'];
+        const hasCallDuration = durationLabels.some(l => label.toLowerCase().includes(l.toLowerCase()));
         if (!hasLiveIcon && !hasCallDuration) return false;
         const container = row.closest?.("li") || row;
         const visibleVoiceRows = Array.from(container.querySelectorAll?.('[class*="voiceUser"], [class*="voiceUser_"], [class*="voiceUser-"], [data-list-item-id*="voice"]') || []).filter(el => el.dataset?.hiddenBlocked !== "true" && el.offsetParent !== null);
@@ -7275,48 +7621,81 @@ return false;
             const states = Array.isArray(raw) ? raw : Object.values(raw || {});
             return states;
         };
-        try {
-            if (fn) {
+        if (this._voiceStateCallSig === 1 && fn) {
+            try {
                 const channel = this.modules.ChannelStore?.getChannel?.(channelId);
                 if (channel) {
                     const raw = fn(channel);
                     const states = normalize(raw);
                     if (states.length) return states;
                 }
-            }
-        } catch (_) { }
-        try {
-            if (fn) {
-                const guildId = this.modules.ChannelStore?.getChannel?.(channelId)?.guild_id
-                    || this.modules.SelectedGuildStore?.getGuildId?.();
+            } catch (_) {}
+        }
+        if (this._voiceStateCallSig === 2 && fn) {
+            try {
+                const guildId = this.modules.ChannelStore?.getChannel?.(channelId)?.guild_id || this.modules.SelectedGuildStore?.getGuildId?.();
                 if (guildId) {
                     const raw = fn(guildId, channelId);
                     const states = normalize(raw);
                     if (states.length) return states;
                 }
-            }
-        } catch (_) { }
-        try {
-            if (fn) {
+            } catch (_) {}
+        }
+        if (this._voiceStateCallSig === 3 && fn) {
+            try {
                 const raw = fn(channelId);
                 const states = normalize(raw);
                 if (states.length) return states;
-            }
-        } catch (_) { }
-        try {
-            const guildId = this.modules.ChannelStore?.getChannel?.(channelId)?.guild_id
-                || this.modules.SelectedGuildStore?.getGuildId?.();
-            const byGuild = guildId && this.originalVoiceMethods.getVoiceStates ? this.originalVoiceMethods.getVoiceStates(guildId) : null;
-            const channelStates = byGuild?.[channelId];
-            return Array.isArray(channelStates) ? channelStates : Object.values(channelStates || {});
-        } catch (_) {
-            return [];
+            } catch (_) {}
         }
+        if (this._voiceStateCallSig === 4) {
+            try {
+                const guildId = this.modules.ChannelStore?.getChannel?.(channelId)?.guild_id || this.modules.SelectedGuildStore?.getGuildId?.();
+                const byGuild = guildId && this.originalVoiceMethods.getVoiceStates ? this.originalVoiceMethods.getVoiceStates(guildId) : null;
+                const channelStates = byGuild?.[channelId];
+                const states = Array.isArray(channelStates) ? channelStates : Object.values(channelStates || {});
+                if (states.length) return states;
+            } catch (_) {}
+        }
+        if (!this._voiceStateCallSig && fn) {
+            try {
+                const channel = this.modules.ChannelStore?.getChannel?.(channelId);
+                if (channel) {
+                    const raw = fn(channel);
+                    const states = normalize(raw);
+                    if (states.length) { this._voiceStateCallSig = 1; return states; }
+                }
+            } catch (_) {}
+            try {
+                const guildId = this.modules.ChannelStore?.getChannel?.(channelId)?.guild_id || this.modules.SelectedGuildStore?.getGuildId?.();
+                if (guildId) {
+                    const raw = fn(guildId, channelId);
+                    const states = normalize(raw);
+                    if (states.length) { this._voiceStateCallSig = 2; return states; }
+                }
+            } catch (_) {}
+            try {
+                const raw = fn(channelId);
+                const states = normalize(raw);
+                if (states.length) { this._voiceStateCallSig = 3; return states; }
+            } catch (_) {}
+        }
+        if (!this._voiceStateCallSig) {
+            try {
+                const guildId = this.modules.ChannelStore?.getChannel?.(channelId)?.guild_id || this.modules.SelectedGuildStore?.getGuildId?.();
+                const byGuild = guildId && this.originalVoiceMethods.getVoiceStates ? this.originalVoiceMethods.getVoiceStates(guildId) : null;
+                const channelStates = byGuild?.[channelId];
+                const states = Array.isArray(channelStates) ? channelStates : Object.values(channelStates || {});
+                if (states.length) { this._voiceStateCallSig = 4; return states; }
+            } catch (_) {}
+        }
+        return [];
     }
     getMessageInfo(el) {
         const info = {
             authorId: null,
             referencedAuthorId: null,
+            mentionedUserId: null,
             isBlockedGroup: false,
             isSpammer: false,
             messageId: null
@@ -7337,6 +7716,12 @@ return false;
             const idMatch = listId.match(/(\d{17,20})$/) || el.id?.match(/(\d{17,20})/);
             if (idMatch) info.authorId = idMatch[1];
         }
+        try {
+            const mention = el.querySelector?.('[class*="mention"][data-user-id]');
+            if (mention) {
+                info.mentionedUserId = mention.dataset.userId || this.findUserId(mention);
+            }
+        } catch (_) {}
         const visit = props => {
             if (!props || typeof props !== "object") return;
             const message = props.message || props.baseMessage || props.referencedMessage?.message;
@@ -7356,10 +7741,11 @@ return false;
             if (/BLOCKED|IGNORED|SPAMMER/i.test(type)) info.isBlockedGroup = true;
             if (/SPAMMER/i.test(type)) info.isSpammer = true;
             if (props.isBlockedMessage === true) info.isBlockedGroup = true;
+            if (!info.mentionedUserId && Array.isArray(message?.mentions) && message.mentions.length) {
+                const hiddenMention = message.mentions.find(u => u?.id && this.shouldHide(u.id));
+                if (hiddenMention) info.mentionedUserId = hiddenMention.id;
+            }
         };
-        if (!info.messageId || !info.authorId || !info.referencedAuthorId) {
-            this._walkFiberPropsShallow(el, visit);
-        }
         if (!info.messageId) {
             const listId = el.dataset?.listItemId || el.closest?.("[data-list-item-id]")?.dataset?.listItemId || "";
             const pinMatch = listId.match(/^pins_+(\d{17,20})$/);
@@ -7369,6 +7755,34 @@ return false;
                 const chatMatch = listId.match(/^chat-messages___chat-messages-\d+-(\d{17,20})$/);
                 if (chatMatch) info.messageId = chatMatch[1];
             }
+        }
+        if (!info.messageId) {
+            const idMatch = el.id?.match(/chat-messages-(?:\d+-)?(\d{17,20})$/);
+            if (idMatch) info.messageId = idMatch[1];
+        }
+        if (!info.mentionedUserId && info.messageId) {
+            try {
+                const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+                const getMessage = this.modules.MessageStore?.getMessage;
+                const msg = channelId && typeof getMessage === "function" ? getMessage(channelId, info.messageId) : null;
+                const mentions = msg?.mentions;
+                if (Array.isArray(mentions) && mentions.length) {
+                    const hit = mentions.find(u => {
+                        const id = typeof u === "string" ? u : u?.id;
+                        return id && this.shouldHide(id);
+                    });
+                    if (hit) info.mentionedUserId = typeof hit === "string" ? hit : hit.id;
+                } else if (mentions && typeof mentions.forEach === "function") {
+                    mentions.forEach(u => {
+                        if (info.mentionedUserId) return;
+                        const id = typeof u === "string" ? u : u?.id;
+                        if (id && this.shouldHide(id)) info.mentionedUserId = id;
+                    });
+                }
+            } catch (_) {}
+        }
+        if (!info.messageId || !info.authorId || !info.referencedAuthorId || !info.mentionedUserId) {
+            this._walkFiberPropsShallow(el, visit);
         }
         return info;
     }
@@ -7427,7 +7841,9 @@ return false;
             for (let i = 0; i < 10 && fiber; i++, fiber = fiber.return) {
                 if (fiber.memoizedProps) visitor(fiber.memoizedProps);
             }
-        } catch (_) {}
+        } catch (err) {
+            this._patcher._logFail("_walkFiberPropsShallow", err);
+        }
     }
     extractUserId(value, depth = 0) {
         if (!value || depth > 3) return null;
@@ -7455,7 +7871,9 @@ return false;
                 visitor(fiber.memoizedProps);
                 visitor(fiber.pendingProps);
             }
-        } catch (_) {}
+        } catch (err) {
+            this._patcher._logFail("walkFiberProps", err);
+        }
     }
     findChannelId(el) {
         if (!el) return null;
@@ -7505,67 +7923,73 @@ return false;
         if (!this.settings.behavior.muteVoiceJoinLeaveSound && !this.settings.behavior.muteBlockedVoiceAudio) return;
         const SoundUtils = this.modules.SoundUtils;
         if (!SoundUtils) return;
-        const playSoundKey = this._soundPlayKey || "playSound";
-        if (typeof SoundUtils[playSoundKey] !== "function") return;
+        const primaryKey = this._soundPlayKey || "playSound";
+        const fallbackKey = this._soundFileKey || (primaryKey === "playSound" ? "playFile" : "playSound");
+        const targetKey = typeof SoundUtils[primaryKey] === "function" ? primaryKey : (typeof SoundUtils[fallbackKey] === "function" ? fallbackKey : null);
+        if (!targetKey) return;
         const RTCUtils = this.modules.RTCConnectionUtils;
         const self = this;
-        this.patchInstead(SoundUtils, playSoundKey, function(context, args, originalMethod) {
-            const soundType = args[0];
-            const isVoiceEvent = [ "disconnect", "user_join", "user_leave", "user_moved", "stream_started", "stream_ended", "activity_launch" ].includes(soundType);
-            if (!isVoiceEvent) {
-                return originalMethod.apply(context, args);
-            }
-            if (soundType === "stream_started" || soundType === "stream_ended") {
-                if (!self.settings.behavior.muteBlockedVoiceAudio) return originalMethod.apply(context, args);
-                const streamerId = self._lastStreamerId;
-                if (!streamerId) return originalMethod.apply(context, args);
-                if (self.shouldHide(streamerId)) return;
-                return originalMethod.apply(context, args);
-            }
-            if (soundType === "activity_launch") {
-                if (!self.settings.behavior.muteVoiceJoinLeaveSound) return originalMethod.apply(context, args);
-                const participantIds = self._lastActivityParticipantIds;
-                if (!participantIds || !participantIds.size) return originalMethod.apply(context, args);
-                const allBlocked = [ ...participantIds ].every(id => self.shouldHide(id));
-                if (allBlocked) return;
-                return originalMethod.apply(context, args);
-            }
-            if (!self.settings.behavior.muteVoiceJoinLeaveSound) {
-                return originalMethod.apply(context, args);
-            }
-            let channelId = null;
-            if (RTCUtils) {
-                try {
-                    channelId = RTCUtils.getChannelId();
-                } catch (_) {}
-            }
-            if (!channelId) {
-                try {
-                    const candidate = self.modules.SelectedChannelStore?.getVoiceChannelId?.();
-                    if (candidate) {
-                        const resolved = self.modules.ChannelStore?.getChannel?.(candidate);
-                        if (resolved && (resolved.type === 2 || resolved.type === 13)) {
-                            channelId = candidate;
-                        }
-                    }
-                } catch (_) {}
-            }
-            if (!channelId) return originalMethod.apply(context, args);
-            let voiceStatesList = [];
+        this.patchInstead(SoundUtils, targetKey, function(context, args, originalMethod) {
             try {
-                voiceStatesList = self.getRawVoiceStatesForChannel(channelId) || [];
-            } catch (_) {}
-            const currentIds = new Set(voiceStatesList.map(s => self.extractUserId(s)).filter(Boolean));
-            const previousIds = self._oldUnblockedConnectedUsers instanceof Set ? self._oldUnblockedConnectedUsers : new Set((self._oldUnblockedConnectedUsers || []).map(s => self.extractUserId(s)).filter(Boolean));
-            self._oldUnblockedConnectedUsers = currentIds;
-            if (!currentIds.size && !previousIds.size) return originalMethod.apply(context, args);
-            const joined = [ ...currentIds ].filter(id => !previousIds.has(id));
-            const left = [ ...previousIds ].filter(id => !currentIds.has(id));
-            const changedIds = [ ...joined, ...left ];
-            if (!changedIds.length) return originalMethod.apply(context, args);
-            const allChangedAreBlocked = changedIds.every(id => self.shouldHide(id));
-            if (allChangedAreBlocked) return;
-            return originalMethod.apply(context, args);
+                const soundType = args[0];
+                const isVoiceEvent = [ "disconnect", "user_join", "user_leave", "user_moved", "stream_started", "stream_ended", "activity_launch" ].includes(soundType);
+                if (!isVoiceEvent) {
+                    return originalMethod.apply(context, args);
+                }
+                if (soundType === "stream_started" || soundType === "stream_ended") {
+                    if (!self.settings.behavior.muteBlockedVoiceAudio) return originalMethod.apply(context, args);
+                    const streamerId = self._lastStreamerId;
+                    if (!streamerId) return originalMethod.apply(context, args);
+                    if (self.shouldHide(streamerId)) return;
+                    return originalMethod.apply(context, args);
+                }
+                if (soundType === "activity_launch") {
+                    if (!self.settings.behavior.muteVoiceJoinLeaveSound) return originalMethod.apply(context, args);
+                    const participantIds = self._lastActivityParticipantIds;
+                    if (!participantIds || !participantIds.size) return originalMethod.apply(context, args);
+                    const allBlocked = [ ...participantIds ].every(id => self.shouldHide(id));
+                    if (allBlocked) return;
+                    return originalMethod.apply(context, args);
+                }
+                if (!self.settings.behavior.muteVoiceJoinLeaveSound) {
+                    return originalMethod.apply(context, args);
+                }
+                let channelId = null;
+                if (RTCUtils) {
+                    try {
+                        channelId = RTCUtils.getChannelId();
+                    } catch (_) {}
+                }
+                if (!channelId) {
+                    try {
+                        const candidate = self.modules.SelectedChannelStore?.getVoiceChannelId?.();
+                        if (candidate) {
+                            const resolved = self.modules.ChannelStore?.getChannel?.(candidate);
+                            if (resolved && (resolved.type === 2 || resolved.type === 13)) {
+                                channelId = candidate;
+                            }
+                        }
+                    } catch (_) {}
+                }
+                if (!channelId) return originalMethod.apply(context, args);
+                let voiceStatesList = [];
+                try {
+                    voiceStatesList = self.getRawVoiceStatesForChannel(channelId) || [];
+                } catch (_) {}
+                const currentIds = new Set(voiceStatesList.map(s => self.extractUserId(s)).filter(Boolean));
+                const previousIds = self._oldUnblockedConnectedUsers instanceof Set ? self._oldUnblockedConnectedUsers : new Set((self._oldUnblockedConnectedUsers || []).map(s => self.extractUserId(s)).filter(Boolean));
+                self._oldUnblockedConnectedUsers = currentIds;
+                if (!currentIds.size && !previousIds.size) return originalMethod.apply(context, args);
+                const joined = [ ...currentIds ].filter(id => !previousIds.has(id));
+                const left = [ ...previousIds ].filter(id => !currentIds.has(id));
+                const changedIds = [ ...joined, ...left ];
+                if (!changedIds.length) return originalMethod.apply(context, args);
+                const allChangedAreBlocked = changedIds.every(id => self.shouldHide(id));
+                if (allChangedAreBlocked) return;
+                return originalMethod.apply(context, args);
+            } catch (_) {
+                try { return originalMethod.apply(context, args); } catch (_) { return; }
+            }
         });
     }
     patchSoundboardEffects() {
@@ -7577,7 +8001,7 @@ return false;
         this.patchBefore(Dispatcher, "dispatch", function(context, args) {
             const action = args[0];
             if (!action || typeof action !== "object") return;
-            if (action.type === "VOICE_STATE_UPDATES" && Array.isArray(action.voiceStates)) {
+            if (action.type === self.constructor.ACTIONS.VOICE_STATE_UPDATES && Array.isArray(action.voiceStates)) {
                 for (const vs of action.voiceStates) {
                     if (vs && vs.selfStream === true && vs.userId) {
                         self._lastStreamerId = vs.userId;
@@ -7588,9 +8012,24 @@ return false;
                 try {
                     self._handleVoiceStateUpdatesForFakeTimer(action.voiceStates);
                 } catch (_) {}
+                self._voiceStateRafId = requestAnimationFrame(function _nmbVoiceRaf() {
+                    self._voiceStateRafId = null;
+                    if (!self.isRunning || !self.settings.places?.voiceChannels) return;
+                    try { self.hideVoiceUsers(); } catch (_) {}
+                });
+                if (!self._voiceStateTimers) self._voiceStateTimers = 0;
+                self._voiceStateTimers++;
+                const timerId = self._voiceStateTimers;
+                [200, 600].forEach(function _nmbVoiceDelay(delay) {
+                    setTimeout(function _nmbVoiceCheck() {
+                        if (timerId !== self._voiceStateTimers) return;
+                        if (!self.isRunning || !self.settings.places?.voiceChannels) return;
+                        try { self.hideVoiceUsers(); } catch (_) {}
+                    }, delay);
+                });
                 return;
             }
-            if (action.type === "EMBEDDED_ACTIVITY_UPDATE_V2") {
+            if (action.type === self.constructor.ACTIONS.EMBEDDED_ACTIVITY_UPDATE_V2) {
                 const participants = action.instance?.participants;
                 if (Array.isArray(participants)) {
                     self._lastActivityParticipantIds = new Set(participants.map(p => p?.user_id).filter(Boolean));
@@ -7602,7 +8041,7 @@ return false;
                 }
                 return;
             }
-            if (action.type === "VOICE_CHANNEL_EFFECT_SEND") {
+            if (action.type === self.constructor.ACTIONS.VOICE_CHANNEL_EFFECT_SEND) {
                 if (!self.settings.behavior.muteBlockedVoiceAudio) return;
                 const senderId = action.userId;
                 if (senderId && self.shouldHide(senderId)) {
@@ -7621,7 +8060,7 @@ return false;
     _isChannelStatusUpdateAction(action) {
         if (!action || typeof action !== "object") return false;
         const type = String(action.type || "");
-        if (!/CHANNEL_STATUS|VOICE_STATUS|VOICE_CHANNEL_STATUS/i.test(type)) return false;
+        if (!ByeBlocked.ACTIONS.CHANNEL_STATUS_REGEX.test(type)) return false;
         const channelId = action.channelId || action.channel_id || action.id;
         return Boolean(channelId) && ("status" in action || "channelStatus" in action);
     }
@@ -7688,7 +8127,7 @@ return false;
         if (!this.settings.places.voiceChannels) return;
         const row = this._findChannelRowById(channelId);
         if (!row) return;
-        const statusEl = row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i]');
+        const statusEl = this._findChannelStatusElement(row);
         if (this._isChannelStatusPlaceholder(statusEl)) return;
         if (!statusEl) return;
 
@@ -7703,6 +8142,11 @@ return false;
             el.dataset.nmbStatusSafe = "true";
         });
         row.querySelectorAll('[data-hidden-blocked="true"][data-nmb-reason="channel-status"]').forEach(el => this.restoreElement(el));
+    }
+    _findChannelStatusElement(row) {
+        if (!row) return null;
+        return row.querySelector('[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i], [class*="subtitle" i][role="button"], [data-list-item-id*="channels"] [class*="subtitle" i]')
+            || row.querySelector('[role="button"]:has([class*="status" i])');
     }
     _resyncBlockedChannelStatuses() {
 
@@ -7823,6 +8267,7 @@ return false;
             key = this.modules.InviteQueryComposeKey;
             if (!resolved || !mod || !key || typeof mod[key] !== "function") {
                 if (attempt < 5) setTimeout(() => this.patchInviteSuggestions(attempt + 1), 5e3);
+                else this._patcher._logFail("patchInviteSuggestions", new Error("esgotou tentativas"));
                 return;
             }
         }
@@ -7839,7 +8284,7 @@ return false;
                 if (row.type === "GROUP_DM") {
                     const channel = row.item;
                     const recipients = channel?.recipients;
-                    if (Array.isArray(recipients) && recipients.length && recipients.every(id => self.shouldHide(id))) {
+                    if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) {
                         return false;
                     }
                     return true;
@@ -7856,7 +8301,7 @@ return false;
             if (attempt > 5) return;
             setTimeout(() => {
                 const getStore = (...names) => this._wpGetStore(...names);
-                this.modules.ReactionsStore = getStore("ReactionsStore", "MessageReactionsStore");
+                this.modules.ReactionsStore = getStore(...ByeBlocked.STORE_NAMES.REACTIONS);
                 this.patchReactions(attempt + 1);
             }, 2e3);
             return;
@@ -8078,9 +8523,9 @@ return false;
     addStyles() {
         this.removeStyles();
         const hideBlockedBanner = this.settings.places.messages ? `\n            [class*="messageGroupBlocked"],\n            [class*="blockedSystemMessage"],\n            [class*="groupStart"]:has([class*="blocked"]),\n            li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),\n            li[class*="messageListItem"]:has([class*="blockedSystemMessage"]),\n            li[class*="messageListItem"]:has([class*="blocked"][class*="message"]),\n            [class*="messageListItem"]:has([class*="messageGroupBlocked"]) {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n        ` : "";
-        const eventsSidebarNameRule = this.settings.places.events ? `\n            li:has([data-list-item-id^="channels___upcoming-events-"]) {\n                visibility: hidden !important;\n            }\n            li:has([data-list-item-id^="channels___upcoming-events-"]):has([data-nmb-events-ready="true"]) {\n                visibility: visible !important;\n            }\n        ` : "";
+        const eventsSidebarNameRule = "";
         const noticeButtonStyles = `\n            .bd-notice button,\n            .bd-notice .bd-button,\n            .bd-notice [class*="button"],\n            .bd-notice [role="button"] {\n                background: transparent !important;\n                border: 1px solid var(--text-muted) !important;\n                color: var(--text-normal) !important;\n                transition: background 0.15s, border-color 0.15s !important;\n            }\n            .bd-notice button:hover,\n            .bd-notice .bd-button:hover,\n            .bd-notice [class*="button"]:hover,\n            .bd-notice [role="button"]:hover {\n                background: rgba(255, 255, 255, 0.08) !important;\n                border-color: var(--brand-experiment) !important;\n                color: var(--text-normal) !important;\n            }\n        `;
-        BdApi.DOM.addStyle(this.pluginName, `\n            [data-hidden-blocked="true"],\n            [data-hidden-blocked="true"] * { ${this.hideStyles} }\n            h1[data-nmb-header-hidden="true"] {\n                font-size: 0 !important;\n                line-height: 0 !important;\n            }\n            h1[data-nmb-header-hidden="true"] [data-nmb-header-overlay="true"] {\n                font-size: var(--nmb-header-restore-size, 20px) !important;\n                line-height: var(--nmb-header-restore-line-height, normal) !important;\n            }\n            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [data-nmb-status-overridden="true"] {\n                display: none !important;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-header-minimal {\n                display: flex;\n                align-items: baseline;\n                gap: 10px;\n                margin-bottom: 12px;\n                padding-bottom: 10px;\n                border-bottom: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-plugin-name { font-size: 22px; font-weight: 700; color: var(--header-primary); }\n            .nmb-version { font-size: 15px; color: var(--text-muted); font-weight: 500; }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 8px;\n                margin-top: 28px;\n                padding: 12px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-btn-icon { width: 14px; height: 14px; flex-shrink: 0; }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-checking .nmb-btn-icon { animation: nmb-spin 0.8s linear infinite; }\n            @keyframes nmb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n\n            ${noticeButtonStyles}\n        `);
+        BdApi.DOM.addStyle(this.pluginName, `\n            [data-hidden-blocked="true"],\n            [data-hidden-blocked="true"] * { ${this.hideStyles} }\n            [data-nmb-mention-hidden="true"] {\n                display: none !important;\n                visibility: hidden !important;\n                pointer-events: none !important;\n                width: 0 !important;\n                height: 0 !important;\n                min-width: 0 !important;\n                min-height: 0 !important;\n                max-width: 0 !important;\n                max-height: 0 !important;\n                font-size: 0 !important;\n                line-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                border: 0 !important;\n                overflow: hidden !important;\n                position: absolute !important;\n                transform: scale(0) !important;\n            }\n            h1[data-nmb-header-hidden="true"] {\n                font-size: 0 !important;\n                line-height: 0 !important;\n            }\n            h1[data-nmb-header-hidden="true"] [data-nmb-header-overlay="true"] {\n                font-size: var(--nmb-header-restore-size, 20px) !important;\n                line-height: var(--nmb-header-restore-line-height, normal) !important;\n            }\n            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [data-nmb-status-overridden="true"] {\n                display: none !important;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-header-minimal {\n                display: flex;\n                align-items: baseline;\n                gap: 10px;\n                margin-bottom: 12px;\n                padding-bottom: 10px;\n                border-bottom: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-plugin-name { font-size: 22px; font-weight: 700; color: var(--header-primary); }\n            .nmb-version { font-size: 15px; color: var(--text-muted); font-weight: 500; }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 8px;\n                margin-top: 28px;\n                padding: 12px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-btn-icon { width: 14px; height: 14px; flex-shrink: 0; }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-checking .nmb-btn-icon { animation: nmb-spin 0.8s linear infinite; }\n            @keyframes nmb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: flex-start;\n                text-align: center;\n                padding-top: 32px;\n                padding-bottom: 16px;\n                flex-shrink: 0;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c,\n            .nmb-pins-empty-placeholder .nmb-pins-empty-icon {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n                display: flex;\n                align-items: center;\n                justify-content: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer,\n            .nmb-injected-tip-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n\n            ${noticeButtonStyles}\n        `);
     }
     removeStyles() {
         try {
