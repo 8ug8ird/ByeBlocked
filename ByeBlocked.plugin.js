@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.3.5
+ * @version 2.3.6
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -78,7 +78,7 @@ function _getLocale() { try { return (document.documentElement?.lang || navigato
 function _makeDict(pt, en) { return { 'pt-br': pt, pt: pt, 'en-us': en, en: en }; }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.3.5";
+    static VERSION="2.3.6";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static EVENTS_LOCALE = _makeDict(
@@ -1559,14 +1559,14 @@ module.exports = class ByeBlocked {
             if (this.isRunning && this.settings.places?.reactions) {
                 try { this._fastHideReactionsFromMutations(mutations); } catch (_) {}
             }
+            if (this.isRunning && this.settings.places?.messages) {
+                try { this._fastHideFromMutations(mutations); } catch (_) {}
+            }
             if (this._observerFramePending) return;
             this._observerFramePending = true;
             requestAnimationFrame(() => {
                 this._observerFramePending = false;
                 if (!this.isRunning) return;
-                try {
-                    this._fastHideFromMutations(mutations);
-                } catch (_) {}
                 this.queueScan(true);
             });
         });
@@ -4594,6 +4594,7 @@ return false;
     }
     _fastHideFromMutations(mutations) {
         const places = this.settings.places;
+        let messagesHidden = false;
         for (let m = 0; m < mutations.length; m++) {
             const added = mutations[m].addedNodes;
             for (let n = 0; n < added.length; n++) {
@@ -4601,12 +4602,16 @@ return false;
                 if (node.nodeType !== 1) continue;
                 const tag = node.tagName;
                 if (tag === 'LINK' || tag === 'STYLE' || tag === 'SCRIPT' || tag === 'META' || tag === 'TITLE') continue;
+                const wasHidden = this.hiddenElements.size;
                 this._fastHideNode(node);
+                if (this.hiddenElements.size > wasHidden) messagesHidden = true;
                 const qsa = node.querySelectorAll;
                 if (qsa) {
                     const descendants = qsa.call(node, 'li[class*="messageListItem"], [class*="messageListItem"], [data-list-item-id^="pins__"], [class*="memberRow"], [role="listitem"][data-list-item-id], [class*="voiceUser"]');
                     for (let d = 0; d < descendants.length; d++) {
+                        const before = this.hiddenElements.size;
                         this._fastHideNode(descendants[d]);
+                        if (this.hiddenElements.size > before) messagesHidden = true;
                     }
                 }
                 if (node.children?.length === 0 && !node.classList?.length) continue;
@@ -4657,6 +4662,9 @@ return false;
                 }
                 this._removeVoiceInviteSuggestion(node);
             }
+        }
+        if (messagesHidden && places.messages) {
+            try { this.hideOrphanedDividers(); } catch (_) {}
         }
     }
     _removeVoiceInviteSuggestion(node) {
@@ -4794,8 +4802,26 @@ return false;
                     this.hideElement(messageRow, "fast-reply-to-blocked", replyUserId);
                     return;
                 }
+                let referencedAuthorId = null;
+                this._walkFiberPropsShallow(messageRow, props => {
+                    if (referencedAuthorId) return;
+                    if (props.referencedMessage?.message?.author?.id) referencedAuthorId = props.referencedMessage.message.author.id;
+                    else if (props.referencedMessage?.author?.id) referencedAuthorId = props.referencedMessage.author.id;
+                    else if (props.message?.messageReference && !referencedAuthorId) {
+                        const ref = this.getReferencedMessage(props.message);
+                        if (ref?.author?.id) referencedAuthorId = ref.author.id;
+                    }
+                });
+                if (referencedAuthorId && this.shouldHide(referencedAuthorId)) {
+                    this.hideElement(messageRow, "fast-reply-to-blocked", referencedAuthorId);
+                    return;
+                }
                 if (replyBar.matches('[class*="blocked"]') || replyBar.querySelector('[class*="blocked"]')) {
                     this.hideElement(messageRow, "fast-reply-blocked-class");
+                    return;
+                }
+                if (!referencedAuthorId && this.isBlockedMessageBannerText(replyBar.textContent || "")) {
+                    this.hideElement(messageRow, "fast-reply-blocked-text");
                     return;
                 }
             }
