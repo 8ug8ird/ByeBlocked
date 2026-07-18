@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.0
+ * @version 2.4.1
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -39,7 +39,7 @@ class ModuleResolver {
     }
     get(f, o) { try { return BdApi.Webpack.getModule(f, o); } catch (_) { return null; } }
     getBySource(s, o) { try { return BdApi.Webpack.getBySource(s, o); } catch (_) { return null; } }
-    getWithKey(f) { try { return BdApi.Webpack.getModuleWithKey(f); } catch (_) { return null; } }
+    getWithKey(f) { try { return BdApi.Webpack.getWithKey(f); } catch (_) { return null; } }
     findByKeys(...keys) {
         for (const key of keys) { try { const m = BdApi.Webpack.getByKeys(key); if (m) return m; } catch (_) {} }
         try { const m = this.get(mod => mod && typeof mod === 'object' && keys.every(k => k in mod)); if (m) return m; } catch (_) {}
@@ -57,14 +57,24 @@ class ModuleResolver {
     getBySourceAny(...sources) { for (const s of sources) { try { const m = BdApi.Webpack.getBySource(s); if (m) return m; } catch (_) {} } return null; }
 }
 class PatchManager {
-    constructor(p) { this.p = p; }
+    constructor(p) { this.p = p; this.failCounts = {}; }
     before(t, m, fn) { try { if (!t?.[m]) return; BdApi.Patcher.before(this.p.pluginName, t, m, fn); } catch (_) {} }
     after(t, m, fn) { try { if (!t?.[m]) return; BdApi.Patcher.after(this.p.pluginName, t, m, fn); } catch (_) {} }
     instead(t, m, fn) { try { if (!t?.[m]) return; BdApi.Patcher.instead(this.p.pluginName, t, m, fn); } catch (_) {} }
-    safe(l, fn) { try { fn(); return true; } catch (err) { this._logFail(l, err); return false; } }
+    safe(l, fn) { try { fn(); return true; } catch (e) { this._warn(l, e); return false; } }
     cleanup() { try { BdApi.Patcher.unpatchAll(this.p.pluginName); } catch (_) {} }
-    _logFail(l, err) {
-        try { BdApi.DevTools?.log?.("[ByeBlocked] " + l + ": " + (err?.message || String(err))); } catch (_) {}
+    _logFail(l, err) { this._warn(l, err); }
+    _warn(l, e) {
+        try {
+            this.failCounts[l] = (this.failCounts[l] || 0) + 1;
+            console.warn("[ByeBlocked] " + l + ": " + (e?.message || String(e)));
+        } catch (_) {}
+    }
+    report() {
+        const entries = Object.entries(this.failCounts).sort((a, b) => b[1] - a[1]);
+        if (!entries.length) { console.info("[ByeBlocked] Nenhuma falha registrada."); return {}; }
+        console.table(entries.map(([label, count]) => ({ label, count })));
+        return Object.fromEntries(entries);
     }
 }
 
@@ -72,10 +82,62 @@ function _locale(locale, dict) { return dict[locale] || dict[locale.split('-')[0
 function _getLocale() { try { return (document.documentElement?.lang || navigator.language || 'en').toLowerCase(); } catch (_) { return 'en'; } }
 function _makeDict(pt, en) { return { 'pt-br': pt, pt: pt, 'en-us': en, en: en }; }
 
+const _CLOSE_LABELS = [
+    'Close', 'Fechar', 'Cerrar', 'Fermer', 'Schließen', 'Chiudi', 'Sluiten',
+    'Zamknij', 'Закрыть', 'Kapat', 'Ade', '關閉', '关闭', '閉じる', '닫기',
+    'Sulge', 'Luk', 'Stäng', 'Lukk', 'Sulje', 'Zavřít', 'Zatvoriť', 'Bezárás',
+    'Închide', 'Затвори', 'Κλείσιμο', 'סגור', 'إغلاق', 'ปิด', 'Đóng'
+];
+function _findCloseButton(dialog) {
+    if (!dialog) return null;
+    try {
+        const iconBtn = dialog.querySelector('button[class*="close"], [class*="closeButton"]');
+        if (iconBtn) return iconBtn;
+    } catch (_) {}
+    try {
+        const header = dialog.querySelector('[class*="header"]');
+        const headerBtn = header?.querySelector('button[aria-label]');
+        if (headerBtn) return headerBtn;
+    } catch (_) {}
+    try {
+        for (const label of _CLOSE_LABELS) {
+            const el = dialog.querySelector(`[aria-label="${label}"]`);
+            if (el) return el;
+        }
+    } catch (_) {}
+    return null;
+}
+
 module.exports = class ByeBlocked {
-    static VERSION="2.4.0";
+    static VERSION="2.4.1";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
+    static BLOCKED_BANNER_PATTERNS = [
+        /(?:^|\s)(?:\d+\s+)?blocked\s+messages?(?:\s|$)/i,                          // en
+        /(?:^|\s)messages?\s+blocked(?:\s|$)/i,                                     // en (alt order)
+        /(?:^|\s)(?:\d+\s+)?mensage(?:m|ns)\s+bloquead[ao]s?(?:\s|$)/i,             // pt-br/pt
+        /(?:^|\s)(?:\d+\s+)?mensajes?\s+bloqueados?(?:\s|$)/i,                      // es
+        /(?:^|\s)(?:\d+\s+)?messages?\s+bloqu[ée]s?(?:\s|$)/i,                      // fr
+        /(?:^|\s)(?:\d+\s+)?blockierte\s+nachrichten?(?:\s|$)/i,                    // de
+        /(?:^|\s)(?:\d+\s+)?messaggi?\s+bloccat[oi]?(?:\s|$)/i,                     // it
+        /(?:^|\s)(?:\d+\s+)?geblokkeerde\s+berichten?(?:\s|$)/i,                    // nl
+        /(?:^|\s)(?:\d+\s+)?zablokowan(?:e|ych)\s+wiadomo[śs]ci(?:\s|$)/i,          // pl
+        /(?:^|\s)(?:\d+\s+)?заблокирован(?:ных|ные)?\s+сообщени[йя]/i,             // ru
+        /(?:^|\s)(?:\d+\s+)?engellenmi[sş]\s+mesaj(?:lar)?(?:\s|$)/i,               // tr
+        /(?:^|\s)(?:\d+\s*)?個の?ブロックされたメッセージ/,                        // ja
+        /(?:^|\s)(?:\d+\s*)?条已屏蔽的?消息/,                                       // zh-cn
+        /(?:^|\s)(?:\d+\s*)?則已封鎖的?訊息/,                                       // zh-tw
+        /(?:^|\s)(?:\d+\s*)?개의?\s*차단된\s*메시지/,                              // ko
+    ];
+    static REACTION_MENU_LABELS = [
+        'Ver rea\u00e7\u00f5es', 'Remover rea\u00e7\u00f5es', 'Remover todas as rea\u00e7\u00f5es',
+        'View Reactions', 'Remove Reactions', 'Remove All Reactions',
+        'Ver reacciones', 'Quitar reacciones', 'Quitar todas las reacciones',
+        'Voir les r\u00e9actions', 'Retirer les r\u00e9actions', 'Retirer toutes les r\u00e9actions',
+        'Reaktionen anzeigen', 'Reaktionen entfernen', 'Alle Reaktionen entfernen',
+        'Visualizza reazioni', 'Rimuovi reazioni', 'Rimuovi tutte le reazioni',
+        'Reacties weergeven', 'Reacties verwijderen', 'Alle reacties verwijderen'
+    ];
     static EVENTS_LOCALE = _makeDict(
         { title: 'N\u00e3o h\u00e1 eventos futuros.', subtitle: 'Agende um evento para qualquer atividade planejada no seu servidor.', tip_prefix: 'Voc\u00ea pode dar permiss\u00e3o para outras pessoas criarem eventos em ', tip_link: 'configura\u00e7\u00f5es do servidor > cargos' },
         { title: 'No upcoming events.', subtitle: 'Schedule an event for any planned activity in your server.', tip_prefix: 'You can give other people permission to create events in ', tip_link: 'server settings > roles' }
@@ -286,7 +348,7 @@ module.exports = class ByeBlocked {
     }
     _wpGetModule(f, o) { return this._r ? this._r.get(f, o) : (() => { try { return BdApi.Webpack.getModule(f, o); } catch (_) { return null; } })(); }
     _wpGetBySource(s, o) { return this._r ? this._r.getBySource(s, o) : (() => { try { return BdApi.Webpack.getBySource(s, o); } catch (_) { return null; } })(); }
-    _wpGetModuleWithKey(f) { return this._r ? this._r.getWithKey(f) : (() => { try { return BdApi.Webpack.getModuleWithKey(f); } catch (_) { return null; } })(); }
+    _wpGetModuleWithKey(f) { return this._r ? this._r.getWithKey(f) : (() => { try { return BdApi.Webpack.getWithKey(f); } catch (_) { return null; } })(); }
     _wpGetModuleByKeys(...keys) { return this._r ? this._r.findByKeys(...keys) : this._wpGetModuleByKeysLegacy(...keys); }
     _wpGetModuleByKeysLegacy(...keys) {
         for (const key of keys) { try { const mod = BdApi.Webpack.getByKeys(key); if (mod) return mod; } catch (_) {} }
@@ -350,11 +412,27 @@ module.exports = class ByeBlocked {
         }
         return null;
     }
-    _wpPatchRenderBySourceHeuristic(shouldSuppress, matchingStrings) {
+    _wpPatchRenderBySourceHeuristic(shouldSuppress, matchingStrings, requiredMatches = 1) {
         const self = this;
+        const unwrapComponent = v => {
+            if (typeof v === "function") return v;
+            if (v && typeof v === "object") {
+                const typeofTag = v.$$typeof?.toString?.() || "";
+                if (typeofTag.includes("react.memo") && typeof v.type === "function") return v.type;
+                if (typeofTag.includes("react.forward_ref") && typeof v.render === "function") return v.render;
+            }
+            return null;
+        };
         const doPatch = (mod, key, getProps) => {
-            if (!mod?.[key] || typeof mod[key] !== "function") return false;
-            self.patchInstead(mod, key, function(ctx, args, orig) {
+            const raw = mod?.[key];
+            const fn = unwrapComponent(raw);
+            if (!fn) return false;
+            let patchTarget = mod, patchKey = key;
+            if (raw !== fn) {
+                patchTarget = raw;
+                patchKey = (typeof raw.type === "function") ? "type" : "render";
+            }
+            self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
                 try {
                     const props = getProps ? getProps(ctx, args) : args?.[0] || ctx?.props;
                     if (shouldSuppress(props, ctx, args)) return null;
@@ -364,10 +442,12 @@ module.exports = class ByeBlocked {
             return true;
         };
         const srcFilter = m => {
-            if (typeof m !== "function") return false;
+            const fn = unwrapComponent(m);
+            if (!fn) return false;
             try {
-                const src = Function.prototype.toString.call(m);
-                return matchingStrings.some(s => src.includes(s));
+                const src = Function.prototype.toString.call(fn);
+                const hits = matchingStrings.filter(s => src.includes(s));
+                return hits.length >= requiredMatches;
             } catch (_) { return false; }
         };
         try {
@@ -379,8 +459,24 @@ module.exports = class ByeBlocked {
         } catch (_) {}
         try {
             const found = this._wpGetModuleWithKey(srcFilter);
-            if (found?.[0] && found[1]) {
-                return doPatch(found[0], found[1], (ctx, args) => args?.[0]);
+            if (found?.[0] && found[1] && typeof found[0] === "object") {
+                if (doPatch(found[0], found[1], (ctx, args) => args?.[0])) return true;
+            }
+        } catch (_) {}
+        try {
+            const wholeModule = this._wpGetModule(exportsObj => {
+                if (!exportsObj || typeof exportsObj !== "object") return false;
+                try {
+                    return Object.values(exportsObj).some(srcFilter);
+                } catch (_) { return false; }
+            }, { defaultExport: false });
+            if (wholeModule && typeof wholeModule === "object") {
+                for (const key of Object.keys(wholeModule)) {
+                    let val;
+                    try { val = wholeModule[key]; } catch (_) { continue; }
+                    if (!srcFilter(val)) continue;
+                    if (doPatch(wholeModule, key, (ctx, args) => args?.[0])) return true;
+                }
             }
         } catch (_) {}
         return false;
@@ -1701,10 +1797,55 @@ module.exports = class ByeBlocked {
             this._historyPatchActive = true;
         } catch (_) {}
     }
+    _installDomRemovalGuard() {
+        if (ByeBlocked._domGuardInstalled) return;
+        const proto = Node.prototype;
+        const originalRemoveChild = proto.removeChild;
+        const originalInsertBefore = proto.insertBefore;
+        proto.removeChild = function(child) {
+            if (child && child.parentNode !== this) {
+                console.warn("[ByeBlocked] removeChild bloqueado: nó já não era filho (evitando NotFoundError).", { parent: this, child: child });
+                return child;
+            }
+            try {
+                return originalRemoveChild.call(this, child);
+            } catch (err) {
+                if (err instanceof DOMException && err.name === "NotFoundError") {
+                    console.warn("[ByeBlocked] removeChild lançou NotFoundError nativo — engolido para evitar crash.", { parent: this, child: child });
+                    return child;
+                }
+                throw err;
+            }
+        };
+        proto.insertBefore = function(newNode, referenceNode) {
+            if (referenceNode && referenceNode.parentNode !== this) {
+                console.warn("[ByeBlocked] insertBefore bloqueado: nó de referência já não era filho (evitando NotFoundError).", { parent: this, referenceNode: referenceNode });
+                return this.appendChild(newNode);
+            }
+            try {
+                return originalInsertBefore.call(this, newNode, referenceNode);
+            } catch (err) {
+                if (err instanceof DOMException && err.name === "NotFoundError") {
+                    console.warn("[ByeBlocked] insertBefore lançou NotFoundError nativo — engolido para evitar crash.", { parent: this, referenceNode: referenceNode });
+                    return this.appendChild(newNode);
+                }
+                throw err;
+            }
+        };
+        this._originalRemoveChild = originalRemoveChild;
+        this._originalInsertBefore = originalInsertBefore;
+        ByeBlocked._domGuardInstalled = true;
+        ByeBlocked._domGuardRestore = () => {
+            try { proto.removeChild = originalRemoveChild; } catch (_) {}
+            try { proto.insertBefore = originalInsertBefore; } catch (_) {}
+            ByeBlocked._domGuardInstalled = false;
+        };
+    }
     start(_retryAttempt = 0) {
         if (this.isRunning) return;
         this.isRunning = true;
         window.__byeBlocked = this;
+        this._patcher.safe('installDomRemovalGuard', () => this._installDomRemovalGuard());
         this.restoreAllElements();
         this._removeGuildSwitchGuard();
         this.removeStyles();
@@ -1741,8 +1882,9 @@ module.exports = class ByeBlocked {
         p.safe('patchBlockedMessageGroup', () => this.patchBlockedMessageGroup());
         p.safe('patchMessagesWrapComponent', () => this.patchMessagesWrapComponent());
         p.safe('patchForumPostComponent', () => this.patchForumPostComponent());
-        p.safe('patchCallGridParticipants', () => this.patchCallGridParticipants());
+        p.safe('patchCallGridParticipants', () => {});
         p.safe('patchMessageStore', () => this.patchMessageStore());
+        p.safe('patchMessageItemComponent', () => this.patchMessageItemComponent());
         p.safe('restartObserver', () => this._restartObserver());
         p.safe('startReactionClickWatcher', () => this._startReactionClickWatcher());
         p.safe('startChannelSwitchWatcher', () => this._startChannelSwitchWatcher());
@@ -1766,6 +1908,7 @@ module.exports = class ByeBlocked {
             p.safe('patchMentionAutocomplete', () => this.patchMentionAutocomplete());
             p.safe('patchGuildMembersPageRow', () => this.patchGuildMembersPageRow());
             p.safe('patchMemberListRow', () => this.patchMemberListRow());
+            p.safe('patchAutocompleteRowComponent', () => this.patchAutocompleteRowComponent());
             p.safe('patchSoundboardEffects', () => this.patchSoundboardEffects());
             if (this.settings.behavior.muteVoiceJoinLeaveSound || this.settings.behavior.muteBlockedVoiceAudio)
                 p.safe('patchSound', () => this.patchSound());
@@ -1775,6 +1918,7 @@ module.exports = class ByeBlocked {
         setTimeout(() => {
             p.safe('patchStageRenderComponent', () => this.patchStageRenderComponent());
             p.safe('patchActivityPanelComponent', () => this.patchActivityPanelComponent());
+            p.safe('patchVoiceUserComponent', () => this.patchVoiceUserComponent());
         }, 3e3);
         this._patchHistoryApi();
         this._roleSettingsClickHandler = event => {
@@ -1795,7 +1939,7 @@ module.exports = class ByeBlocked {
         try {
             const dialog = link.closest('[role="dialog"], [class*="layer"]');
             if (!dialog) return;
-            const closeBtn = dialog.querySelector('[aria-label="Fechar"], [aria-label="Close"]');
+            const closeBtn = _findCloseButton(dialog);
             if (closeBtn) {
                 closeBtn.click();
                 return;
@@ -1811,6 +1955,10 @@ module.exports = class ByeBlocked {
     }
     stop() {
         this.isRunning = false;
+        if (typeof ByeBlocked._domGuardRestore === "function") {
+            ByeBlocked._domGuardRestore();
+            ByeBlocked._domGuardRestore = null;
+        }
         clearTimeout(this._moduleRetryTimeout);
         this._moduleRetryTimeout = null;
         if (window.__byeBlocked === this) delete window.__byeBlocked;
@@ -1864,6 +2012,10 @@ module.exports = class ByeBlocked {
         }
         this._menuPortalObserver?.disconnect();
         this._menuPortalObserver = null;
+        if (this._inviteClickHandler) {
+            document.removeEventListener("click", this._inviteClickHandler, true);
+            this._inviteClickHandler = null;
+        }
         if (this._statusModalClickHandler) {
             document.removeEventListener("click", this._statusModalClickHandler, true);
             this._statusModalClickHandler = null;
@@ -1965,6 +2117,9 @@ module.exports = class ByeBlocked {
         this._activityPanelComponentPatched = false;
         this._blockedMsgGroupPatched = false;
         this._voiceMutePatched = false;
+        this._autocompleteRowPatched = false;
+        this._voiceUserComponentPatched = false;
+        this._messageItemPatched = false;
         if (this._muteTimeout) {
             clearTimeout(this._muteTimeout);
             this._muteTimeout = null;
@@ -2413,6 +2568,113 @@ module.exports = class ByeBlocked {
 
         if (patchedAny) this._eventsSidebarUnreadPatched = true;
     }
+    patchAutocompleteRowComponent(attempt = 0) {
+        if (!this.settings.places.autocomplete) return;
+        if (this._autocompleteRowPatched) return;
+        const self = this;
+        try {
+            const result = BdApi.Webpack.getWithKey(m => {
+                if (typeof m !== "function") return false;
+                try {
+                    const src = Function.prototype.toString.call(m);
+                    return src.includes("autocomplete") && src.includes("aria-selected") && (src.includes("user") || src.includes("userId"));
+                } catch (_) { return false; }
+            });
+            if (result) {
+                const [mod, key] = result;
+                this.patchInstead(mod, key, function(ctx, args, orig) {
+                    try {
+                        const props = args?.[0] || ctx?.props;
+                        const uid = props?.user?.id || props?.userId || props?.suggestion?.id;
+                        if (uid && self.shouldHide(uid)) return null;
+                    } catch (_) {}
+                    return orig.apply(ctx, args);
+                });
+                this._autocompleteRowPatched = true;
+                return;
+            }
+        } catch (err) { this._patcher?._warn("patchAutocompleteRowComponent", err); }
+        if (!this._autocompleteRowPatched && attempt < 6) {
+            setTimeout(() => this.patchAutocompleteRowComponent(attempt + 1), 5000);
+        }
+    }
+    patchVoiceUserComponent(attempt = 0) {
+        if (!this.settings.places.voiceChannels) return;
+        if (this._voiceUserComponentPatched) return;
+        const self = this;
+        try {
+            const result = BdApi.Webpack.getWithKey(m => {
+                if (typeof m !== "function") return false;
+                try {
+                    const src = Function.prototype.toString.call(m);
+                    return src.includes("voiceUser") && src.includes("voiceStates") && src.includes("user");
+                } catch (_) { return false; }
+            });
+            if (result) {
+                const [mod, key] = result;
+                this.patchInstead(mod, key, function(ctx, args, orig) {
+                    try {
+                        const props = args?.[0] || ctx?.props;
+                        const uid = props?.user?.id || props?.userId || self.extractUserId(props);
+                        if (uid && self.shouldHide(uid)) return null;
+                    } catch (_) {}
+                    return orig.apply(ctx, args);
+                });
+                this._voiceUserComponentPatched = true;
+                return;
+            }
+        } catch (err) { this._patcher?._warn("patchVoiceUserComponent", err); }
+        if (!this._voiceUserComponentPatched && attempt < 6) {
+            setTimeout(() => this.patchVoiceUserComponent(attempt + 1), 5000);
+        }
+    }
+    patchMessageItemComponent(attempt = 0) {
+        if (!this.settings.places.messages) return;
+        if (this._messageItemPatched) return;
+        const self = this;
+        try {
+            const ChannelMessage = BdApi.Webpack.getModule(m =>
+                m?.displayName === "ChannelMessage" || m?.name === "ChannelMessage"
+            );
+            if (ChannelMessage?.prototype?.render) {
+                this.patchInstead(ChannelMessage.prototype, "render", function(ctx, args, orig) {
+                    try {
+                        const props = args?.[0] || ctx?.props;
+                        const msg = props?.message;
+                        if (msg?.author?.id && self.shouldHide(msg.author.id)) return null;
+                    } catch (_) {}
+                    return orig.apply(ctx, args);
+                });
+                this._messageItemPatched = true;
+                return;
+            }
+        } catch (err) { this._patcher?._warn("patchMessageItemComponent", err); }
+        try {
+            const result = BdApi.Webpack.getWithKey(m => {
+                if (typeof m !== "function") return false;
+                try {
+                    const src = Function.prototype.toString.call(m);
+                    return src.includes("messageListItem") && src.includes("author");
+                } catch (_) { return false; }
+            });
+            if (result) {
+                const [mod, key] = result;
+                this.patchInstead(mod, key, function(ctx, args, orig) {
+                    try {
+                        const props = args?.[0] || ctx?.props;
+                        const msg = props?.message;
+                        if (msg?.author?.id && self.shouldHide(msg.author.id)) return null;
+                    } catch (_) {}
+                    return orig.apply(ctx, args);
+                });
+                this._messageItemPatched = true;
+                return;
+            }
+        } catch (err) { this._patcher?._warn("patchMessageItemComponent", err); }
+        if (!this._messageItemPatched && attempt < 6) {
+            setTimeout(() => this.patchMessageItemComponent(attempt + 1), 5000);
+        }
+    }
     patchGuildMemberStore() {
         if (this._guildMemberStorePatched || !this.settings.places.memberList) return;
         const gms = this.modules.GuildMemberStore;
@@ -2439,7 +2701,15 @@ module.exports = class ByeBlocked {
         if (typeof gms.getMember === "function") {
             this.patchAfter(gms, "getMember", (_, args, ret) => {
                 if (!self.settings.places.memberList || !ret) return ret;
+                const guildId = args?.[0];
                 const userId = args?.[1] || ret.userId || ret.user?.id;
+                if (!userId) return ret;
+                try {
+                    const myId = self.modules.UserStore?.getCurrentUser?.()?.id;
+                    if (!guildId || (myId && userId === myId)) return ret;
+                    const guild = self.modules.GuildStore?.getGuild?.(guildId);
+                    if (guild && (userId === guildId || userId === guild.ownerId || userId === guild.owner_id)) return ret;
+                } catch (_) {}
                 if (isHiddenId(userId)) return null;
                 return ret;
             });
@@ -2457,26 +2727,46 @@ module.exports = class ByeBlocked {
     }
     patchMentionAutocomplete(attempt = 0) {
         if (this._mentionAutocompletePatched || !this.settings.places.autocomplete) return;
-        const sources = ["queryMentionResults", "mention-autocomplete", "getMentionSuggestions", "mention", "suggestions"];
+        const STRICT_SOURCES = ["queryMentionResults", "mention-autocomplete", "getMentionSuggestions"];
         let mod = null;
         let key = null;
-        for (const source of sources) {
+        for (const source of STRICT_SOURCES) {
             mod = this._wpGetBySource(source, { defaultExport: false }) || this._wpGetBySource(source);
             if (mod) {
                 key = this._wpFindFnKeyFuzzy(mod, source, "mention", "suggest");
                 if (key) break;
-                for (const k of Object.keys(mod)) {
-                    if (typeof mod[k] === "function" && mod[k].toString().includes("mention")) {
-                        key = k;
-                        break;
-                    }
+            }
+        }
+        if (!mod || !key) {
+            const WEAK_INDICATORS = ["mention", "suggest", "autocomplete", "queryresult"];
+            const REQUIRED_MATCHES = 3;
+            const candidateModules = this._wpGetModule(m => {
+                if (typeof m !== "object" || !m) return false;
+                return Object.values(m).some(v => {
+                    if (typeof v !== "function") return false;
+                    try {
+                        const src = v.toString().toLowerCase();
+                        return WEAK_INDICATORS.filter(s => src.includes(s)).length >= REQUIRED_MATCHES;
+                    } catch (_) { return false; }
+                });
+            }, { first: false, searchExports: true }) || [];
+            for (const candidate of candidateModules) {
+                for (const k of Object.keys(candidate)) {
+                    const v = candidate[k];
+                    if (typeof v !== "function") continue;
+                    try {
+                        const src = v.toString().toLowerCase();
+                        if (WEAK_INDICATORS.filter(s => src.includes(s)).length >= REQUIRED_MATCHES) {
+                            mod = candidate; key = k; break;
+                        }
+                    } catch (_) {}
                 }
-                if (key) break;
+                if (mod && key) break;
             }
         }
         if (!mod || !key || typeof mod[key] !== "function") {
-            if (attempt < 8) setTimeout(() => this.patchMentionAutocomplete(attempt + 1), 3e3);
-            else this._patcher._logFail("patchMentionAutocomplete", new Error("esgotou tentativas"));
+            if (attempt < 20) setTimeout(() => this.patchMentionAutocomplete(attempt + 1), 3e3);
+            else this._patcher._logFail("patchMentionAutocomplete", new Error("esgotou tentativas — indicadores não encontraram módulo; ver notas de manutenção"));
             return;
         }
         const self = this;
@@ -2487,9 +2777,10 @@ module.exports = class ByeBlocked {
                 const id = u?.id || u?.userId || u?.user?.id;
                 return !(id && self.shouldHide(id));
             };
-            if (Array.isArray(result)) return result.filter(filterUser);
-            if (Array.isArray(result?.results)) result.results = result.results.filter(filterUser);
-            if (Array.isArray(result?.users)) result.users = result.users.filter(filterUser);
+            const looksLikeUserArray = arr => arr.length === 0 || arr.some(u => u?.id || u?.userId || u?.user?.id);
+            if (Array.isArray(result) && looksLikeUserArray(result)) return result.filter(filterUser);
+            if (Array.isArray(result?.results) && looksLikeUserArray(result.results)) result.results = result.results.filter(filterUser);
+            if (Array.isArray(result?.users) && looksLikeUserArray(result.users)) result.users = result.users.filter(filterUser);
             return result;
         });
         this._mentionAutocompletePatched = true;
@@ -2517,13 +2808,13 @@ return false;
         const patched = this._wpPatchRenderBySourceHeuristic(props => {
             const userId = self.extractUserId(props);
             return !!(userId && self.shouldHide(userId));
-        }, ["memberRow", "guildMember", "joinedAt", "userId"]);
+        }, ["memberRow", "guildMember", "joinedAt", "userId", "roleIcon", "premiumSince", "pendingMember"], 3);
         if (patched) {
             this._guildMembersPagePatched = true;
-        } else if (attempt < 10) {
+        } else if (attempt < 20) {
             setTimeout(() => this.patchGuildMembersPageRow(attempt + 1), 2500);
         } else {
-            this._patcher._logFail("patchGuildMembersPageRow", new Error("esgotou tentativas"));
+            this._patcher._logFail("patchGuildMembersPageRow", new Error("esgotou tentativas — indicadores não encontraram módulo; ver notas de manutenção"));
         }
     }
     patchMemberListRow(attempt = 0) {
@@ -2532,24 +2823,30 @@ return false;
         const patched = this._wpPatchRenderBySourceHeuristic(props => {
             const userId = props?.user?.id || self.extractUserId(props);
             return !!(userId && self.shouldHide(userId));
-        }, ["nameplate", "hideClanTag", "colorRoleName", "shouldAnimateStatus"]);
+        }, ["nameplate", "hideClanTag", "colorRoleName", "shouldAnimateStatus", "premiumType", "isOwner", "statusColor"], 3);
         if (patched) {
             this._memberListRowPatched = true;
-        } else if (attempt < 10) {
+        } else if (attempt < 20) {
             setTimeout(() => this.patchMemberListRow(attempt + 1), 2500);
         } else {
-            this._patcher._logFail("patchMemberListRow", new Error("esgotou tentativas"));
+            this._patcher._logFail("patchMemberListRow", new Error("esgotou tentativas — indicadores não encontraram módulo; ver notas de manutenção"));
         }
     }
     patchStores() {
         const voiceStore = this.modules.SortedVoiceStateStore;
         if (voiceStore?.getVoiceStatesForChannel) {
             this.originalVoiceMethods.getVoiceStatesForChannel = voiceStore.getVoiceStatesForChannel.bind(voiceStore);
-            this.patchAfter(voiceStore, "getVoiceStatesForChannel", (_, __, ret) => this.settings.places.voiceChannels ? this.filterVoiceStates(ret) : ret);
+            this.patchAfter(voiceStore, "getVoiceStatesForChannel", (_, __, ret) => {
+                if (!this.settings.places.voiceChannels) return ret;
+                try { return this.filterVoiceStates(ret); } catch (_) { return ret; }
+            });
         }
         if (voiceStore?.getVoiceStates) {
             this.originalVoiceMethods.getVoiceStates = voiceStore.getVoiceStates.bind(voiceStore);
-            this.patchAfter(voiceStore, "getVoiceStates", (_, __, ret) => this.settings.places.voiceChannels ? this.filterVoiceStates(ret) : ret);
+            this.patchAfter(voiceStore, "getVoiceStates", (_, __, ret) => {
+                if (!this.settings.places.voiceChannels) return ret;
+                try { return this.filterVoiceStates(ret); } catch (_) { return ret; }
+            });
         }
         const stageStore = this.modules.StageChannelParticipantStore;
         if (!this.originalStageMethods) this.originalStageMethods = {};
@@ -2584,13 +2881,13 @@ return false;
         if (stageStore?.getMutableParticipants) {
             this.patchAfter(stageStore, "getMutableParticipants", (_, __, ret) => {
                 if (!this.settings.places.voiceChannels) return ret;
-                return filterStageParticipants(ret);
+                try { return filterStageParticipants(ret); } catch (_) { return ret; }
             });
         }
         if (stageStore?.getParticipants) {
             this.patchAfter(stageStore, "getParticipants", (_, __, ret) => {
                 if (!this.settings.places.voiceChannels) return ret;
-                return filterStageParticipants(ret);
+                try { return filterStageParticipants(ret); } catch (_) { return ret; }
             });
         }
         const patchedStageKeys = new Set;
@@ -2599,7 +2896,7 @@ return false;
             if (typeof stageStore?.[key] === "function") {
                 this.patchAfter(stageStore, key, (_, __, ret) => {
                     if (!this.settings.places.voiceChannels) return ret;
-                    return filterStageParticipants(ret);
+                    try { return filterStageParticipants(ret); } catch (_) { return ret; }
                 });
                 patchedStageKeys.add(key);
             }
@@ -2611,11 +2908,13 @@ return false;
             if (typeof activityStore?.[key] === "function") {
                 this.patchAfter(activityStore, key, (_, __, ret) => {
                     if (!this.settings.places.voiceChannels) return ret;
-                    if (Array.isArray(ret)) {
-                        const next = ret.filter(p => !this.shouldHide(this.extractUserId(p)));
-                        return next.length === ret.length ? ret : next;
-                    }
-                    return ret;
+                    try {
+                        if (Array.isArray(ret)) {
+                            const next = ret.filter(p => !this.shouldHide(this.extractUserId(p)));
+                            return next.length === ret.length ? ret : next;
+                        }
+                        return ret;
+                    } catch (_) { return ret; }
                 });
                 patchedActivityKeys.add(key);
             }
@@ -2624,9 +2923,6 @@ return false;
         if (channelStore?.getChannel) {
             this.patchAfter(channelStore, "getChannel", (_, __, channel) => {
                 if (!channel) return channel;
-                if (channel.isDM?.() && this.shouldHide(channel.recipient?.id || channel.recipientId)) {
-                    return null;
-                }
                 if (this.settings.places.groupDms && channel.isGroupDM?.()) {
                     const clone = Object.assign(Object.create(Object.getPrototypeOf(channel)), channel);
                     if (Array.isArray(clone.rawRecipients)) clone.rawRecipients = clone.rawRecipients.filter(user => !this.shouldHide(user?.id));
@@ -2669,143 +2965,144 @@ return false;
     patchStageRenderComponent(attempt = 0) {
         if (this._stageRenderComponentPatched) return;
         const self = this;
-        const tryPatchComponent = (mod) => {
-            if (!mod || typeof mod !== "object") return false;
-            for (const key of Object.keys(mod)) {
-                const val = mod[key];
-                if (typeof val !== "function" && typeof val !== "object") continue;
-                const proto = typeof val === "function" ? val.prototype : val;
-                if (!proto?.render || typeof proto.render !== "function") continue;
-                const src = proto.render.toString();
-                if (!src.includes("speaker") && !src.includes("listener") && !src.includes("participant")) continue;
-                if (!src.includes("user") && !src.includes("userId")) continue;
-                self.patchInstead(proto, "render", function(ctx, args, orig) {
-                    try {
-                        const props = args?.[0] || ctx?.props;
-                        if (!props) return orig.apply(ctx, args);
-                        const uid = props.user?.id || props.userId || props.participant?.userId || (props.participant && (props.participant.user?.id || props.participant.id));
-                        if (uid && self.settings.places.voiceChannels && self.shouldHide(uid)) return null;
-                    } catch (_) {}
-                    return orig.apply(ctx, args);
-                });
-                return true;
+        const unwrapComponent = v => {
+            if (typeof v === "function") return v;
+            if (v && typeof v === "object") {
+                const typeofTag = v.$$typeof?.toString?.() || "";
+                if (typeofTag.includes("react.memo") && typeof v.type === "function") return v.type;
+                if (typeofTag.includes("react.forward_ref") && typeof v.render === "function") return v.render;
             }
-            return false;
+            return null;
         };
-        const searchSources = [
-            "participants",
-            "userSummary",
-            "stageListeners",
-            "stageSpeakers",
-            "VoiceUserSummary"
-        ];
-        const mod = this._wpGetModuleBySourceAny(...searchSources);
-        if (mod && tryPatchComponent(mod)) {
-            this._stageRenderComponentPatched = true;
-            return;
-        }
-        const withKey = this._wpGetModuleWithKey(m => {
-            if (typeof m !== "object" || !m) return false;
-            return Object.values(m).some(v => {
-                if (typeof v !== "function" && typeof v !== "object") return false;
-                const p = typeof v === "function" ? v.prototype : v;
-                if (!p?.render || typeof p.render !== "function") return false;
-                const s = p.render.toString();
-                return (s.includes("speaker") || s.includes("listener") || s.includes("participant")) && s.includes("userId");
-            });
-        });
-        if (withKey?.[0] && withKey[1]) {
-            const [m, k] = withKey;
-            const val = m[k];
-            const proto = typeof val === "function" ? val.prototype : val;
-            if (proto?.render) {
-                self.patchInstead(proto, "render", function(ctx, args, orig) {
-                    try {
-                        const props = args?.[0] || ctx?.props;
-                        if (props?.user?.id && self.settings.places.voiceChannels && self.shouldHide(props.user.id)) return null;
-                        const uid = props?.userId || props?.participant?.userId || props?.participant?.user?.id;
-                        if (uid && self.settings.places.voiceChannels && self.shouldHide(uid)) return null;
-                    } catch (_) {}
-                    return orig.apply(ctx, args);
-                });
-                this._stageRenderComponentPatched = true;
+        const getSrc = fn => {
+            try {
+                if (fn.prototype?.render && typeof fn.prototype.render === "function") return fn.prototype.render.toString();
+                return Function.prototype.toString.call(fn);
+            } catch (_) { return null; }
+        };
+        const terms = ["seats", "claimedSeat", "speaking", "roomParticipants"];
+        const requiredMatches = 2;
+        const srcFilter = v => {
+            const fn = unwrapComponent(v);
+            if (!fn) return false;
+            const src = getSrc(fn);
+            if (!src) return false;
+            return terms.filter(t => src.includes(t)).length >= requiredMatches;
+        };
+        const doPatch = (mod, key) => {
+            const raw = mod?.[key];
+            const fn = unwrapComponent(raw);
+            if (!fn) return false;
+            let patchTarget = mod, patchKey = key;
+            if (raw !== fn) {
+                patchTarget = raw;
+                patchKey = (typeof raw.type === "function") ? "type" : "render";
             }
-        }
-        if (!this._stageRenderComponentPatched && attempt < 8) {
+            self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
+                try {
+                    const props = args?.[0] || ctx?.props;
+                    if (!props) return orig.apply(ctx, args);
+                    const p = props.participant;
+                    const uid = p?.userId || p?.user?.id || props.user?.id || props.userId;
+                    if (uid && self.settings.places.voiceChannels && self.shouldHide(uid)) return null;
+                } catch (_) {}
+                return orig.apply(ctx, args);
+            });
+            return true;
+        };
+        try {
+            const wholeModule = this._wpGetModule(exportsObj => {
+                if (!exportsObj || typeof exportsObj !== "object") return false;
+                try { return Object.values(exportsObj).some(srcFilter); } catch (_) { return false; }
+            }, { defaultExport: false });
+            if (wholeModule && typeof wholeModule === "object") {
+                for (const key of Object.keys(wholeModule)) {
+                    if (!srcFilter(wholeModule[key])) continue;
+                    if (doPatch(wholeModule, key)) {
+                        this._stageRenderComponentPatched = true;
+                        return;
+                    }
+                }
+            }
+        } catch (_) {}
+        if (!this._stageRenderComponentPatched && attempt < 20) {
             setTimeout(() => this.patchStageRenderComponent(attempt + 1), 3000);
         } else if (!this._stageRenderComponentPatched) {
-            this._patcher._logFail("patchStageRenderComponent", new Error("esgotou tentativas"));
+            this._patcher._logFail("patchStageRenderComponent", new Error("esgotou tentativas — indicadores fracos não encontraram módulo; ver notas de manutenção"));
         }
     }
     patchActivityPanelComponent(attempt = 0) {
         if (this._activityPanelComponentPatched) return;
         const self = this;
-        const mod = this._wpGetModule(m => {
-            if (typeof m !== "object" || !m) return false;
-            return Object.values(m).some(v => {
-                if (typeof v !== "function" && typeof v !== "object") return false;
-                const p = typeof v === "function" ? v.prototype : v;
-                if (!p?.render || typeof p.render !== "function") return false;
-                const s = p.render.toString();
-                return s.includes("activity") && s.includes("participants") && s.includes("user");
-            });
-        }, { searchExports: true });
-        if (mod?.prototype?.render) {
-            this.patchInstead(mod.prototype, "render", function(ctx, args, orig) {
+        const unwrapComponent = v => {
+            if (typeof v === "function") return v;
+            if (v && typeof v === "object") {
+                const typeofTag = v.$$typeof?.toString?.() || "";
+                if (typeofTag.includes("react.memo") && typeof v.type === "function") return v.type;
+                if (typeofTag.includes("react.forward_ref") && typeof v.render === "function") return v.render;
+            }
+            return null;
+        };
+        const getSrc = fn => {
+            try {
+                if (fn.prototype?.render && typeof fn.prototype.render === "function") return fn.prototype.render.toString();
+                return Function.prototype.toString.call(fn);
+            } catch (_) { return null; }
+        };
+        const terms = ["embeddedApplication", "otherClientSessionType", "isWatching", "voicePlatform", "serverMute", "serverDeaf"];
+        const requiredMatches = 3;
+        const srcFilter = v => {
+            const fn = unwrapComponent(v);
+            if (!fn) return false;
+            const src = getSrc(fn);
+            if (!src) return false;
+            return terms.filter(t => src.includes(t)).length >= requiredMatches;
+        };
+        const doPatch = (mod, key) => {
+            const raw = mod?.[key];
+            const fn = unwrapComponent(raw);
+            if (!fn) return false;
+            let patchTarget = mod, patchKey = key;
+            if (raw !== fn) {
+                patchTarget = raw;
+                patchKey = (typeof raw.type === "function") ? "type" : "render";
+            }
+            self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
                 try {
                     const props = args?.[0] || ctx?.props;
                     if (!props) return orig.apply(ctx, args);
-                    if (props?.users && Array.isArray(props.users) && self.settings.places.voiceChannels) {
-                        props.users = props.users.filter(u => !(u?.id && self.shouldHide(u.id)));
-                    }
-                    if (props?.participants && Array.isArray(props.participants) && self.settings.places.voiceChannels) {
-                        props.participants = props.participants.filter(p => {
-                            const uid = self.extractUserId(p);
-                            return !(uid && self.shouldHide(uid));
-                        });
-                    }
+                    const uid = props.user?.id || self.extractUserId(props.user);
+                    if (uid && self.settings.places.voiceChannels && self.shouldHide(uid)) return null;
                 } catch (_) {}
                 return orig.apply(ctx, args);
             });
-            this._activityPanelComponentPatched = true;
-            return;
-        }
-        const withKey = this._wpGetModuleWithKey(m => {
-            if (typeof m !== "object" || !m) return false;
-            return Object.values(m).some(v => {
-                if (typeof v !== "function" && typeof v !== "object") return false;
-                const p = typeof v === "function" ? v.prototype : v;
-                if (!p?.render || typeof p.render !== "function") return false;
-                const s = p.render.toString();
-                return s.includes("Activity") && s.includes("participants");
-            });
-        });
-        if (withKey?.[0] && withKey[1]) {
-            const [m, k] = withKey;
-            const val = m[k];
-            const proto = typeof val === "function" ? val.prototype : val;
-            if (proto?.render) {
-                this.patchInstead(proto, "render", function(ctx, args, orig) {
-                    try {
-                        const props = args?.[0] || ctx?.props;
-                        if (props?.users && Array.isArray(props.users) && self.settings.places.voiceChannels) {
-                            props.users = props.users.filter(u => !(u?.id && self.shouldHide(u.id)));
-                        }
-                    } catch (_) {}
-                    return orig.apply(ctx, args);
-                });
-                this._activityPanelComponentPatched = true;
+            return true;
+        };
+        try {
+            const wholeModule = this._wpGetModule(exportsObj => {
+                if (!exportsObj || typeof exportsObj !== "object") return false;
+                try { return Object.values(exportsObj).some(srcFilter); } catch (_) { return false; }
+            }, { defaultExport: false });
+            if (wholeModule && typeof wholeModule === "object") {
+                for (const key of Object.keys(wholeModule)) {
+                    if (!srcFilter(wholeModule[key])) continue;
+                    if (doPatch(wholeModule, key)) {
+                        this._activityPanelComponentPatched = true;
+                        return;
+                    }
+                }
             }
-        }
-        if (!this._activityPanelComponentPatched && attempt < 8) {
+        } catch (_) {}
+        if (!this._activityPanelComponentPatched && attempt < 20) {
             setTimeout(() => this.patchActivityPanelComponent(attempt + 1), 3000);
         } else if (!this._activityPanelComponentPatched) {
-            this._patcher._logFail("patchActivityPanelComponent", new Error("esgotou tentativas"));
+            this._patcher._logFail("patchActivityPanelComponent", new Error("esgotou tentativas — indicadores fracos não encontraram módulo; ver notas de manutenção"));
         }
     }
     _onRelationshipChanged() {
         this.queueRefresh();
         this._shouldHideCache = new Map;
+        this._voiceStateFilterCache = new WeakMap;
         if (this.settings.places.voiceChannels) {
             this._emitVoiceStateChanges();
             try { this.hideVoiceUsers(); } catch (_) {}
@@ -2837,12 +3134,13 @@ return false;
         if (!this.settings.places.messages) return;
         if (this._forumPostComponentPatched) return;
         const self = this;
-        const FORUM_CARD_STRINGS = [ "mainCard_", "forumPostItem", "ForumPostCard", "ForumPost", "forum-channel-list-", "PostCard" ];
+        const FORUM_CARD_STRINGS = [ "mainCard_", "forumPostItem", "ForumPostCard", "forum-channel-list-" ];
         const looksLikeForumCardFn = fn => {
             if (typeof fn !== "function") return false;
             try {
                 const src = Function.prototype.toString.call(fn);
-                return FORUM_CARD_STRINGS.some(s => src.includes(s));
+                const matches = FORUM_CARD_STRINGS.filter(s => src.includes(s));
+                return matches.length >= 2;
             } catch (_) {
                 return false;
             }
@@ -2898,7 +3196,7 @@ return false;
         } catch (_) {}
         if (!patchedAny) {
             try {
-                const result = BdApi.Webpack.getModuleWithKey(m => {
+                const result = BdApi.Webpack.getWithKey(m => {
                     if (!m || typeof m !== "function") return false;
                     return looksLikeForumCardFn(m);
                 }, {
@@ -2929,7 +3227,7 @@ return false;
         } catch (_) {}
         const BLOCKED_STRINGS = [ "MESSAGE_GROUP_BLOCKED", "blockedMessageGroup", "BlockedMessages", "blockedMessages", "messageGroupSpacing", "isBlockedMessage", "BLOCKED_MESSAGE" ];
         try {
-            const result = BdApi.Webpack.getModuleWithKey(m => {
+            const result = BdApi.Webpack.getWithKey(m => {
                 if (!m || typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
@@ -3026,7 +3324,7 @@ return false;
         } catch (_) {}
         const WRAP_STRINGS = [ "messages._array", "scrollToMessage", "MessagesWrap", "renderMessages" ];
         try {
-            const result = BdApi.Webpack.getModuleWithKey(m => {
+            const result = BdApi.Webpack.getWithKey(m => {
                 if (!m || typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
@@ -3132,7 +3430,7 @@ return false;
         } catch (_) {}
         if (!patchedAny) {
             try {
-                const result = BdApi.Webpack.getModuleWithKey(m => {
+                const result = BdApi.Webpack.getWithKey(m => {
                     return !!resolveRealFnHolder(m);
                 }, { searchExports: true });
                 if (result) {
@@ -3698,6 +3996,20 @@ return false;
     patchAfter(target, method, callback) { this._patcher?.after(target, method, callback); }
     filterVoiceStates(value) {
         if (!value) return value;
+        if (!this._voiceStateFilterCache) this._voiceStateFilterCache = new WeakMap();
+        const cache = this._voiceStateFilterCache;
+        if (typeof value === "object") {
+            const cached = cache.get(value);
+            if (cached !== undefined) return cached;
+        }
+        const result = this._filterVoiceStatesUncached(value);
+        if (typeof value === "object") {
+            try { cache.set(value, result); } catch (_) {}
+        }
+        return result;
+    }
+    _filterVoiceStatesUncached(value) {
+        if (!value) return value;
         if (Array.isArray(value)) {
             let changed = false;
             const filtered = value.filter(state => {
@@ -3997,6 +4309,12 @@ return false;
                         const modalRoot = node.matches?.('[role="dialog"]') ? node : node.closest?.('[role="dialog"]') || node;
                         this._watchReactorsModalContent(modalRoot);
                         this._scheduleReactorModalPass();
+                    }
+                    if (this.settings.places?.reactions) {
+                        try {
+                            const menuRoot = node.matches?.('[role="menu"]') ? node : node.querySelector?.('[role="menu"]');
+                            if (menuRoot) this._watchContextMenuContent(menuRoot);
+                        } catch (_) {}
                     }
                 }
             }
@@ -4334,6 +4652,54 @@ return false;
             if (item.dataset.nmbHideViewReactions === "true") delete item.dataset.nmbHideViewReactions;
             if (!hasReal) item.dataset.nmbHideViewReactions = "true";
         }
+    }
+    _watchContextMenuContent(menuRoot) {
+        try {
+            if (!menuRoot || menuRoot.dataset?.nmbMenuWatched === "true") return;
+            menuRoot.dataset.nmbMenuWatched = "true";
+            const apply = () => { try { this._fixReactionMenuItems(this._lastContextMessageId); } catch (_) {} };
+            apply();
+            const observer = new MutationObserver(() => {
+                if (!document.contains(menuRoot)) { observer.disconnect(); return; }
+                apply();
+            });
+            observer.observe(menuRoot, { childList: true, subtree: true });
+            setTimeout(() => observer.disconnect(), 1e4);
+        } catch (_) {}
+    }
+    _messageHasVisibleReactions(channelId, messageId) {
+        if (!channelId || !messageId) return true;
+        try {
+            const msg = this.modules.MessageStore?.getMessage?.(channelId, messageId);
+            const reactions = msg?.reactions;
+            if (!Array.isArray(reactions) || reactions.length === 0) return false;
+            const store = this.modules.ReactionsStore;
+            if (!store || typeof store.getReactions !== "function") return true;
+            for (const r of reactions) {
+                const emoji = r?.emoji;
+                if (!emoji) continue;
+                const users = this._getFilteredReactions(store, channelId, messageId, emoji, r.burst_colors?.length ? 1 : 0);
+                if (this._reactionUsersSize(users) > 0) return true;
+            }
+            return false;
+        } catch (_) {
+            return true;
+        }
+    }
+    _fixReactionMenuItems(messageId) {
+        if (!this.settings.places?.reactions || !messageId) return;
+        const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+        if (!channelId) return;
+        if (this._messageHasVisibleReactions(channelId, messageId)) return;
+        const labels = ByeBlocked.REACTION_MENU_LABELS;
+        document.querySelectorAll('[role="menu"]').forEach(menu => {
+            menu.querySelectorAll('[role="menuitem"]').forEach(item => {
+                const text = (item.textContent || "").trim().toLowerCase();
+                if (labels.some(l => text === l.toLowerCase())) {
+                    if (item.dataset?.nmbHideViewReactions !== "true") item.dataset.nmbHideViewReactions = "true";
+                }
+            });
+        });
     }
     _getForumThreadOwnerId(card) {
         try {
@@ -6377,7 +6743,7 @@ return false;
             dialog.dataset.nmbEventChecked = "true";
             const userId = this.resolveEventCreatorId(dialog);
             if (userId && this.shouldHide(userId)) {
-                const closeBtn = dialog.querySelector('button[aria-label="Close"], button[aria-label="Fechar"], [aria-label="Close"][role="button"], [aria-label="Fechar"][role="button"]');
+                const closeBtn = _findCloseButton(dialog);
                 if (closeBtn) {
                     closeBtn.click();
                     this.toast("ðŸš« Este evento foi criado por um usuÃ¡rio bloqueado.", "info");
@@ -6873,7 +7239,7 @@ return false;
         }
     }
     isBlockedMessageBannerText(text) {
-        return /(?:^|\s)(?:\d+\s+)?(?:blocked\s+messages?|messages?\s+blocked|mensage(?:m|ns)\s+bloquead[ao]s?)(?:\s*[â€”]\s*(?:mostrar|show))?(?:\s|$)/i.test(String(text || "").trim());
+        return ByeBlocked.BLOCKED_BANNER_PATTERNS.some(re => re.test(String(text || "").trim()));
     }
     hideAutocompleteRows() {
         const rows = document.querySelectorAll('[data-list-id^="channel-autocomplete"] [role="option"], [data-list-id^="mention-autocomplete"] [role="option"]');
@@ -8240,18 +8606,27 @@ return false;
         } catch (_) {}
     }
     resolveInviteQueryModule() {
-        const inviteQueryMod = this._wpGetBySource("queryFriends", {
-            defaultExport: false
-        });
+        const PRIMARY_SOURCES = ["queryFriends", "queryDMUsers", "friendSuggestions"];
+        let inviteQueryMod = null;
+        for (const src of PRIMARY_SOURCES) {
+            inviteQueryMod = this._wpGetBySource(src, { defaultExport: false });
+            if (inviteQueryMod) break;
+        }
         this.modules.InviteQueryModule = inviteQueryMod || null;
         this.modules.InviteQueryComposeKey = null;
         if (inviteQueryMod) {
+            const REQUIRED_MATCHES = 2;
             for (const key of Object.keys(inviteQueryMod)) {
                 const val = inviteQueryMod[key];
-                if (typeof val === "function" && val.toString().includes("queryFriends") && val.toString().includes("queryDMUsers")) {
-                    this.modules.InviteQueryComposeKey = key;
-                    break;
-                }
+                if (typeof val !== "function") continue;
+                try {
+                    const src = val.toString();
+                    const hits = PRIMARY_SOURCES.filter(s => src.includes(s));
+                    if (hits.length >= REQUIRED_MATCHES) {
+                        this.modules.InviteQueryComposeKey = key;
+                        break;
+                    }
+                } catch (_) {}
             }
         }
         if (this.modules.InviteQueryComposeKey) return true;
@@ -8259,41 +8634,134 @@ return false;
     }
     patchInviteSuggestions(attempt = 0) {
         if (this._inviteSuggestionsPatched) return;
-        let mod = this.modules.InviteQueryModule;
-        let key = this.modules.InviteQueryComposeKey;
-        if (!mod || !key || typeof mod[key] !== "function") {
-            const resolved = this.resolveInviteQueryModule();
-            mod = this.modules.InviteQueryModule;
-            key = this.modules.InviteQueryComposeKey;
-            if (!resolved || !mod || !key || typeof mod[key] !== "function") {
-                if (attempt < 5) setTimeout(() => this.patchInviteSuggestions(attempt + 1), 5e3);
-                else this._patcher._logFail("patchInviteSuggestions", new Error("esgotou tentativas"));
-                return;
-            }
-        }
         const self = this;
-        this.patchAfter(mod, key, function(context, args, result) {
-            if (!self.settings.places.autocomplete) return result;
-            if (!result || !Array.isArray(result.rows)) return result;
-            result.rows = result.rows.filter(row => {
-                if (!row) return true;
-                if (row.type === "FRIEND" || row.type === "DM") {
-                    const userId = row.item?.id;
-                    return !(userId && self.shouldHide(userId));
-                }
-                if (row.type === "GROUP_DM") {
-                    const channel = row.item;
-                    const recipients = channel?.recipients;
-                    if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) {
-                        return false;
+        const unwrapComponent = v => {
+            if (typeof v === "function") return v;
+            if (v && typeof v === "object") {
+                const typeofTag = v.$$typeof?.toString?.() || "";
+                if (typeofTag.includes("react.memo") && typeof v.type === "function") return v.type;
+                if (typeofTag.includes("react.forward_ref") && typeof v.render === "function") return v.render;
+            }
+            return null;
+        };
+        const getSrc = fn => {
+            try {
+                if (fn.prototype?.render && typeof fn.prototype.render === "function") return fn.prototype.render.toString();
+                return Function.prototype.toString.call(fn);
+            } catch (_) { return null; }
+        };
+        const terms = ["inviteKey", "ringingEnabled", "inviteChannel"];
+        const requiredMatches = 2;
+        const srcFilter = v => {
+            const fn = unwrapComponent(v);
+            if (!fn) return false;
+            const src = getSrc(fn);
+            if (!src) return false;
+            return terms.filter(t => src.includes(t)).length >= requiredMatches;
+        };
+        const doPatch = (mod, key) => {
+            const raw = mod?.[key];
+            const fn = unwrapComponent(raw);
+            if (!fn) return false;
+            let patchTarget = mod, patchKey = key;
+            if (raw !== fn) {
+                patchTarget = raw;
+                patchKey = (typeof raw.type === "function") ? "type" : "render";
+            }
+            self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
+                try {
+                    const props = args?.[0] || ctx?.props;
+                    if (!props || !self.settings.places.autocomplete) return orig.apply(ctx, args);
+                    const row = props.row;
+                    if (row?.type === "FRIEND" || row?.type === "DM") {
+                        const userId = row.item?.id || props.user?.id;
+                        if (userId && self.shouldHide(userId)) return null;
+                    } else if (row?.type === "GROUP_DM") {
+                        const recipients = row.item?.recipients;
+                        if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) {
+                            return null;
+                        }
+                    } else {
+                        const uid = props.user?.id;
+                        if (uid && self.shouldHide(uid)) return null;
                     }
-                    return true;
-                }
-                return true;
+                } catch (_) {}
+                return orig.apply(ctx, args);
             });
-            return result;
-        });
-        this._inviteSuggestionsPatched = true;
+            return true;
+        };
+        try {
+            const wholeModule = this._wpGetModule(exportsObj => {
+                if (!exportsObj || typeof exportsObj !== "object") return false;
+                try { return Object.values(exportsObj).some(srcFilter); } catch (_) { return false; }
+            }, { defaultExport: false });
+            if (wholeModule && typeof wholeModule === "object") {
+                for (const key of Object.keys(wholeModule)) {
+                    if (!srcFilter(wholeModule[key])) continue;
+                    if (doPatch(wholeModule, key)) {
+                        this._inviteSuggestionsPatched = true;
+                        return;
+                    }
+                }
+            }
+        } catch (_) {}
+        try {
+            let mod = this.modules.InviteQueryModule;
+            let key = this.modules.InviteQueryComposeKey;
+            if (!mod || !key || typeof mod[key] !== "function") {
+                const resolved = this.resolveInviteQueryModule();
+                mod = this.modules.InviteQueryModule;
+                key = this.modules.InviteQueryComposeKey;
+                if (resolved && mod && key && typeof mod[key] === "function") {
+                    this.patchAfter(mod, key, function(context, args, result) {
+                        if (!self.settings.places.autocomplete) return result;
+                        if (!result || !Array.isArray(result.rows)) return result;
+                        result.rows = result.rows.filter(row => {
+                            if (!row) return true;
+                            if (row.type === "FRIEND" || row.type === "DM") {
+                                const userId = row.item?.id;
+                                return !(userId && self.shouldHide(userId));
+                            }
+                            if (row.type === "GROUP_DM") {
+                                const channel = row.item;
+                                const recipients = channel?.recipients;
+                                if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) {
+                                    return false;
+                                }
+                                return true;
+                            }
+                            return true;
+                        });
+                        return result;
+                    });
+                    this._inviteSuggestionsPatched = true;
+                    return;
+                }
+            }
+        } catch (_) {}
+        if (!this._inviteSuggestionsPatched && attempt < 30) {
+            setTimeout(() => this.patchInviteSuggestions(attempt + 1), 5e3);
+            this._startInviteClickListener();
+        } else if (!this._inviteSuggestionsPatched) {
+            this._patcher._logFail("patchInviteSuggestions", new Error("esgotou tentativas — indicadores fracos não encontraram módulo; ver notas de manutenção"));
+        }
+    }
+    _startInviteClickListener() {
+        if (this._inviteClickHandler || this._inviteSuggestionsPatched) return;
+        const self = this;
+        const INVITE_LABEL_RE = /convidar|invite/i;
+        this._inviteClickHandler = event => {
+            if (self._inviteSuggestionsPatched) return;
+            try {
+                const el = event.target.closest?.('[aria-label], [aria-labelledby], button, a, [role="menuitem"], [role="button"]');
+                if (!el) return;
+                const label = el.getAttribute?.('aria-label') || el.textContent || '';
+                if (!INVITE_LABEL_RE.test(label)) return;
+                setTimeout(() => { if (!self._inviteSuggestionsPatched) self.patchInviteSuggestions(0); }, 500);
+                setTimeout(() => { if (!self._inviteSuggestionsPatched) self.patchInviteSuggestions(0); }, 1500);
+            } catch (_) {}
+        };
+        document.addEventListener("click", this._inviteClickHandler, true);
     }
     patchReactions(attempt = 1) {
         const store = this.modules.ReactionsStore;
@@ -8445,7 +8913,7 @@ return false;
                             modal.dataset.nmbEmptySeenAt = String(Date.now());
                         } else if (Date.now() - Number(modal.dataset.nmbEmptySeenAt) > 900) {
                             modal.dataset.nmbAutoClosed = "true";
-                            const closeBtn = modal.querySelector('[aria-label="Fechar"], [aria-label="Close"]');
+                            const closeBtn = _findCloseButton(modal);
                             if (closeBtn) closeBtn.click();
                         }
                     }
