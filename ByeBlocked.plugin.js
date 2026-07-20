@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.1
+ * @version 2.4.2
  * @description Hides blocked and ignored users from chat, voice, and member lists.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -78,6 +78,61 @@ class PatchManager {
     }
 }
 
+class HealthMonitor {
+    constructor(plugin, intervalMs = 15000) {
+        this.p = plugin;
+        this.intervalMs = intervalMs;
+        this.checks = {};
+        this._timer = null;
+        this._degraded = {};
+    }
+    register(name, checkFn, fallbackFn, recoverFn) {
+        this.checks[name] = { checkFn, fallbackFn, recoverFn, failStreak: 0 };
+    }
+    start() {
+        if (this._timer) return;
+        this._timer = setInterval(() => this._runAll(), this.intervalMs);
+    }
+    stop() {
+        if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    }
+    _runAll() {
+        for (const name in this.checks) this._runOne(name);
+    }
+    _runOne(name) {
+        const entry = this.checks[name];
+        if (!entry) return;
+        let healthy = true;
+        try { healthy = !!entry.checkFn(); }
+        catch (_) { healthy = false; }
+        if (!healthy) {
+            entry.failStreak++;
+            if (entry.failStreak >= 2 && !this._degraded[name]) {
+                this._degraded[name] = true;
+                try { console.warn(`[ByeBlocked] HealthMonitor: '${name}' parece ter falhado, ativando reforço DOM.`); } catch (_) {}
+                try { entry.fallbackFn?.(); } catch (_) {}
+            }
+        } else {
+            entry.failStreak = 0;
+            if (this._degraded[name]) {
+                this._degraded[name] = false;
+                try { console.info(`[ByeBlocked] HealthMonitor: '${name}' voltou ao normal.`); } catch (_) {}
+                try { entry.recoverFn?.(); } catch (_) {}
+            }
+        }
+    }
+    isDegraded(name) { return !!this._degraded[name]; }
+    report() {
+        const rows = Object.keys(this.checks).map(name => ({
+            check: name,
+            degraded: this.isDegraded(name),
+            failStreak: this.checks[name].failStreak
+        }));
+        console.table(rows);
+        return rows;
+    }
+}
+
 function _locale(locale, dict) { return dict[locale] || dict[locale.split('-')[0]] || dict.en; }
 function _getLocale() { try { return (document.documentElement?.lang || navigator.language || 'en').toLowerCase(); } catch (_) { return 'en'; } }
 function _makeDict(pt, en) { return { 'pt-br': pt, pt: pt, 'en-us': en, en: en }; }
@@ -109,7 +164,7 @@ function _findCloseButton(dialog) {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.4.1";
+    static VERSION="2.4.2";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static BLOCKED_BANNER_PATTERNS = [
@@ -315,6 +370,7 @@ module.exports = class ByeBlocked {
         this._voiceStateCallSig = null;
         
         this._patcher = new PatchManager(this);
+        this._health = new HealthMonitor(this, 15000);
     }
     get hideStyles() { return 'display: none !important;width: 0 !important;height: 0 !important;min-width: 0 !important;min-height: 0 !important;max-width: 0 !important;max-height: 0 !important;flex: 0 0 0 !important;padding: 0 !important;margin: 0 !important;border: 0 !important;overflow: hidden !important;position: absolute !important;opacity: 0 !important;pointer-events: none !important;transform: scale(0) !important;visibility: hidden !important;line-height: 0 !important;font-size: 0 !important;contain: size style !important;'; }
     _wpGetStore(...names) { return this._r ? this._r.getStore(...names) : this._wpGetStoreLegacy(...names); }
@@ -1889,6 +1945,7 @@ module.exports = class ByeBlocked {
         p.safe('startReactionClickWatcher', () => this._startReactionClickWatcher());
         p.safe('startChannelSwitchWatcher', () => this._startChannelSwitchWatcher());
         p.safe('seedVoiceChannelMembers', () => this._seedVoiceChannelMembers());
+        p.safe('registerHealthChecks', () => this._registerHealthChecks());
         this.scanInterval = setInterval(() => this.queueScan(), 4e3);
         this.queueRefresh();
         this._waitForChatReady(0);
@@ -2029,6 +2086,7 @@ module.exports = class ByeBlocked {
         this.scanInterval = null;
         this.scanTimeout = null;
         this.refreshTimeout = null;
+        this._health?.stop();
         if (this._voiceFakeTimerTick) {
             clearInterval(this._voiceFakeTimerTick);
             this._voiceFakeTimerTick = null;
@@ -3106,6 +3164,12 @@ return false;
         if (this.settings.places.voiceChannels) {
             this._emitVoiceStateChanges();
             try { this.hideVoiceUsers(); } catch (_) {}
+            if (this.settings.behavior.muteBlockedVoiceAudio) {
+                try {
+                    const ctx = this._getMediaEngineContext();
+                    if (ctx?.channelId) this._applyVoiceMuteForChannel(ctx.channelId);
+                } catch (_) {}
+            }
         }
         if (this.settings.places.memberList) {
             try { this.hideMemberRows(); } catch (_) {}
@@ -4164,6 +4228,154 @@ return false;
             if (channelId) this._scanExistingPinsForChannel(channelId);
         } catch (_) {}
     }
+    _registerHealthChecks() {
+        if (!this._health) return;
+
+        this._health.register(
+            "members",
+            () => {
+                if (!this.settings.places?.memberList) return true;
+                const els = document.querySelectorAll('[data-list-item-id]:not([data-hidden-blocked="true"])');
+                let sample = 0;
+                for (let i = 0; i < els.length && sample < 40; i++) {
+                    const el = els[i];
+                    if (el.closest?.('[data-list-id^="members-"]')) continue;
+                    sample++;
+                    const userId = this.findUserId(el);
+                    if (userId && this.shouldHide(userId)) return false;
+                }
+                return true;
+            },
+            () => { try { this.hideMemberRows(); } catch (_) {} },
+            () => {}
+        );
+
+        this._health.register(
+            "messages",
+            () => {
+                if (!this.settings.places?.messages) return true;
+                const els = document.querySelectorAll('li[class*="messageListItem"]:not([data-hidden-blocked="true"])');
+                let sample = 0;
+                for (let i = 0; i < els.length && sample < 40; i++) {
+                    const messageRow = els[i];
+                    sample++;
+                    const info = this.getMessageInfo(messageRow);
+                    if (this.shouldHide(info?.authorId, info?.isSpammer)) return false;
+                }
+                return true;
+            },
+            () => { try { this.hideMessages(); } catch (_) {} },
+            () => {}
+        );
+
+        this._health.register(
+            "reactions",
+            () => {
+                if (!this.settings.places?.reactions) return true;
+                try {
+                    const containers = document.querySelectorAll('[class*="reactorsContainer_"], [class*="reactors_"]');
+                    let sample = 0;
+                    for (let c = 0; c < containers.length && sample < 15; c++) {
+                        const container = containers[c];
+                        if (container.offsetParent === null) continue;
+                        const rows = container.querySelectorAll('[class*="reactorClickable_"]');
+                        for (const row of rows) {
+                            if (row.dataset?.nmbReactorHidden === "true") continue;
+                            sample++;
+                            let userId = this.findUserId(row);
+                            if (!userId) userId = this.resolveReactorIdByName?.(row);
+                            if (userId && this.shouldHide(userId)) return false;
+                            if (sample >= 15) break;
+                        }
+                    }
+                } catch (_) {}
+                return true;
+            },
+            () => { try { this.hideBlockedReactors(); } catch (_) {} },
+            () => {}
+        );
+
+        this._health.register(
+            "voice",
+            () => {
+                if (!this.settings.places?.voiceChannels) return true;
+                const els = document.querySelectorAll([
+                    '[class*="voiceUser"]',
+                    '[aria-label*="canal de voz"] [data-list-item-id]',
+                    '[aria-label*="voice channel"] [data-list-item-id]',
+                    '[data-list-item-id*="voice"]',
+                    '[class*="voiceUsers"] [data-list-item-id]'
+                ].join(':not([data-hidden-blocked="true"]),') + ':not([data-hidden-blocked="true"])');
+                let sample = 0;
+                for (let i = 0; i < els.length && sample < 40; i++) {
+                    const el = els[i];
+                    sample++;
+                    const userId = this.findUserId(el);
+                    if (userId && this.shouldHide(userId)) return false;
+                }
+                return true;
+            },
+            () => { try { this.hideVoiceUsers(); } catch (_) {} },
+            () => {}
+        );
+
+        this._health.register(
+            "groupDms",
+            () => {
+                if (!this.settings.places?.groupDms && !this.settings.places?.messages) return true;
+                const els = document.querySelectorAll('[data-list-item-id^="private-channels___"]:not([data-hidden-blocked="true"]), [class*="privateChannels"] [class*="channel"]:not([data-hidden-blocked="true"])');
+                let sample = 0;
+                for (let i = 0; i < els.length && sample < 40; i++) {
+                    const row = els[i];
+                    sample++;
+                    const userId = this.findUserId(row);
+                    if (userId && this.shouldHide(userId)) return false;
+                }
+                return true;
+            },
+            () => { try { this.hidePrivateChannels(); } catch (_) {} },
+            () => {}
+        );
+
+        this._health.register(
+            "autocomplete",
+            () => {
+                if (!this.settings.places?.autocomplete) return true;
+                const rows = document.querySelectorAll('[data-list-id^="channel-autocomplete"] [role="option"]:not([data-hidden-blocked="true"]), [data-list-id^="mention-autocomplete"] [role="option"]:not([data-hidden-blocked="true"])');
+                let sample = 0;
+                for (let i = 0; i < rows.length && sample < 40; i++) {
+                    const row = rows[i];
+                    sample++;
+                    const userId = this.findUserId(row);
+                    if (userId && this.shouldHide(userId)) return false;
+                }
+                return true;
+            },
+            () => { try { this.hideAutocompleteRows(); } catch (_) {} },
+            () => {}
+        );
+
+        this._health.register(
+            "events",
+            () => {
+                if (!this.settings.places?.events) return true;
+                const cards = document.querySelectorAll('[class*="card__"]:not([data-hidden-blocked="true"])');
+                let sample = 0;
+                for (let i = 0; i < cards.length && sample < 25; i++) {
+                    const card = cards[i];
+                    if (!card.querySelector('[class*="creator_"]')) continue;
+                    sample++;
+                    const userId = this.resolveEventCreatorId(card);
+                    if (userId && this.shouldHide(userId)) return false;
+                }
+                return true;
+            },
+            () => { try { this.hideBlockedEvents(); } catch (_) {} },
+            () => {}
+        );
+
+        this._health.start();
+    }
     queueScan(fromMutation = false) {
         if (!this.isRunning || this.scanTimeout) return;
         this._nmbWatchdogCheck();
@@ -4775,7 +4987,17 @@ return false;
                 const bodyText = this._findLocalizedForumEmptyText();
                 const channelName = document.querySelector('h1[class*="title_"]')?.textContent?.trim() || document.title.split("|")[0]?.replace("#", "").trim() || "";
                 const subtitleText = this._findLocalizedForumEmptySubtitle(channelName);
-                placeholder.innerHTML = `\n                    <h2 class="defaultColor heading-md/semibold header" data-text-variant="heading-md/semibold">${bodyText}</h2>\n                    <div class="text-sm/normal" data-text-variant="text-sm/normal" style="color: var(--text-default);">${subtitleText}</div>\n                `;
+                const heading = document.createElement("h2");
+                heading.className = "defaultColor heading-md/semibold header";
+                heading.setAttribute("data-text-variant", "heading-md/semibold");
+                heading.textContent = bodyText;
+                const subtitle = document.createElement("div");
+                subtitle.className = "text-sm/normal";
+                subtitle.setAttribute("data-text-variant", "text-sm/normal");
+                subtitle.style.color = "var(--text-default)";
+                subtitle.textContent = subtitleText;
+                placeholder.appendChild(heading);
+                placeholder.appendChild(subtitle);
                 contentContainer.appendChild(placeholder);
             }
             placeholder.style.display = "";
@@ -7689,6 +7911,8 @@ return false;
                     if (!this._mutedBlockedUserIds) this._mutedBlockedUserIds = new Set;
                     this._setBlockedUserLocalMute(userId, true);
                     this._mutedBlockedUserIds.add(userId);
+                } else if (this._mutedBlockedUserIds?.has(userId)) {
+                    this._releaseVoiceMuteForUser(userId);
                 }
             }
         } catch (_) {}
@@ -8382,6 +8606,7 @@ return false;
                     self._voiceStateRafId = null;
                     if (!self.isRunning || !self.settings.places?.voiceChannels) return;
                     try { self.hideVoiceUsers(); } catch (_) {}
+                    try { self.fixVoiceChannelIconColors(); } catch (_) {}
                 });
                 if (!self._voiceStateTimers) self._voiceStateTimers = 0;
                 self._voiceStateTimers++;
@@ -8391,6 +8616,7 @@ return false;
                         if (timerId !== self._voiceStateTimers) return;
                         if (!self.isRunning || !self.settings.places?.voiceChannels) return;
                         try { self.hideVoiceUsers(); } catch (_) {}
+                        try { self.fixVoiceChannelIconColors(); } catch (_) {}
                     }, delay);
                 });
                 return;
