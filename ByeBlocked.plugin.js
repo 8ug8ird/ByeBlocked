@@ -2,8 +2,8 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.2
- * @description Hides blocked and ignored users from chat, voice, and member lists.
+ * @version 2.4.3
+ * @description Remove blocked and ignored users from your Discord view.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
@@ -86,11 +86,12 @@ class HealthMonitor {
         this._timer = null;
         this._degraded = {};
     }
-    register(name, checkFn, fallbackFn, recoverFn) {
-        this.checks[name] = { checkFn, fallbackFn, recoverFn, failStreak: 0 };
+    register(name, checkFn, fallbackFn, recoverFn, failThreshold = 2) {
+        this.checks[name] = { checkFn, fallbackFn, recoverFn, failStreak: 0, failThreshold };
     }
     start() {
         if (this._timer) return;
+        this._runAll();
         this._timer = setInterval(() => this._runAll(), this.intervalMs);
     }
     stop() {
@@ -107,7 +108,7 @@ class HealthMonitor {
         catch (_) { healthy = false; }
         if (!healthy) {
             entry.failStreak++;
-            if (entry.failStreak >= 2 && !this._degraded[name]) {
+            if (entry.failStreak >= (entry.failThreshold ?? 2) && !this._degraded[name]) {
                 this._degraded[name] = true;
                 try { console.warn(`[ByeBlocked] HealthMonitor: '${name}' parece ter falhado, ativando reforço DOM.`); } catch (_) {}
                 try { entry.fallbackFn?.(); } catch (_) {}
@@ -163,8 +164,42 @@ function _findCloseButton(dialog) {
     return null;
 }
 
+(function byeBlockedBootGuard() {
+    let rowAtRequireTime = null;
+    try {
+        try {
+            const t0 = performance.now();
+            rowAtRequireTime = document.querySelector('[data-list-item-id*="private-channels"][data-list-item-id*="___"]');
+            console.info(`[ByeBlocked][DIAG][BOOTGUARD] módulo avaliado (require) em performance.now()=${t0.toFixed(0)}ms | document.readyState=${document.readyState} | linha de Group DM já existe no DOM nesse instante? ${!!rowAtRequireTime}${rowAtRequireTime ? ` | texto="${rowAtRequireTime.textContent}"` : ''}`);
+        } catch (_) {}
+        if (document.getElementById('ByeBlocked-bootguard')) return;
+        let groupDmsEnabled = true;
+        try {
+            const stored = BdApi?.Data?.load?.('ByeBlocked', 'settings');
+            if (stored && stored.places && typeof stored.places.groupDms === 'boolean') {
+                groupDmsEnabled = stored.places.groupDms;
+            }
+        } catch (_) {}
+        if (!groupDmsEnabled) return;
+        const style = document.createElement('style');
+        style.id = 'ByeBlocked-bootguard';
+        style.textContent = `
+            li[data-list-item-id*="private-channels"]:not([data-nmb-relabeled="true"]):has([class*="avatarStack"], [class*="groupAvatar"], [class*="avatarMulti"]) {
+                visibility: hidden !important;
+            }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+        try {
+            if (rowAtRequireTime && rowAtRequireTime.isConnected) {
+                const cs = getComputedStyle(rowAtRequireTime).visibility;
+                console.info(`[ByeBlocked][DIAG][BOOTGUARD] <style> injetada em performance.now()=${performance.now().toFixed(0)}ms | visibility computado da linha logo após injeção: "${cs}" (esperado "hidden" se a regra pegou a tempo)`);
+            }
+        } catch (_) {}
+    } catch (_) {}
+})();
+
 module.exports = class ByeBlocked {
-    static VERSION="2.4.2";
+    static VERSION="2.4.3";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static BLOCKED_BANNER_PATTERNS = [
@@ -244,6 +279,10 @@ module.exports = class ByeBlocked {
             EMBEDDED_ACTIVITY_UPDATE_V2: "EMBEDDED_ACTIVITY_UPDATE_V2",
             VOICE_CHANNEL_EFFECT_SEND: "VOICE_CHANNEL_EFFECT_SEND",
             GUILD_SETTINGS_MODAL_OPEN: "GUILD_SETTINGS_MODAL_OPEN",
+            CALL_CREATE: "CALL_CREATE",
+            CALL_UPDATE: "CALL_UPDATE",
+            CALL_DELETE: "CALL_DELETE",
+            VOICE_CHANNEL_SELECT: "VOICE_CHANNEL_SELECT",
             CHANNEL_STATUS_REGEX: /CHANNEL_STATUS|VOICE_STATUS|VOICE_CHANNEL_STATUS/i,
         };
     }
@@ -271,6 +310,7 @@ module.exports = class ByeBlocked {
         autoCheckUpdates: 'Auto-check updates on startup',
         muteVoiceJoinLeaveSound: 'Silence join/leave sounds for blocked users',
         muteBlockedVoiceAudio: 'Mute blocked users\' voice/mic audio in calls',
+        blockRingingFromBlocked: 'Don\'t ring / auto-join for calls started by blocked users in group DMs',
         suppressTaskbarBadge: 'Hide taskbar & tray badge for blocked-only activity'
     };
     constructor() {
@@ -282,6 +322,7 @@ module.exports = class ByeBlocked {
         this.hiddenElements = new Set;
         this.hiddenParents = new Set;
         this.observer = null;
+        this._patchedStoreMethods = new WeakMap();
         
         this.settings = this.loadSettings();
         
@@ -317,6 +358,8 @@ module.exports = class ByeBlocked {
         this._voiceChannelMemberIds = new Map;
         this._voiceFakeTimers = new Map;
         this._voiceFakeTimerTick = null;
+        this._selfJoinTimestamp = 0;
+        this._lastSelfVoiceChannelId = null;
         this._mutedBlockedUserIds = new Set;
         this._blockedChannelStatuses = new Map;
 
@@ -341,6 +384,9 @@ module.exports = class ByeBlocked {
         this._readStateRecheckScheduled = false;
         this._readStateRecheckInFlight = false;
         this._readStateRecheckTimer = null;
+
+        this._suppressGroupAddSoundMessageId = null;
+        this._suppressMentionSoundUntil = 0;
         this._readStateReloadRecheckTimers = null;
         this._rawGetMessages = null;
         
@@ -537,18 +583,108 @@ module.exports = class ByeBlocked {
         } catch (_) {}
         return false;
     }
+    _wpPatchPropsBySourceHeuristic(rewriteProps, matchingStrings, requiredMatches = 1) {
+        const self = this;
+        const unwrapComponent = v => {
+            if (typeof v === "function") return v;
+            if (v && typeof v === "object") {
+                const typeofTag = v.$$typeof?.toString?.() || "";
+                if (typeofTag.includes("react.memo") && typeof v.type === "function") return v.type;
+                if (typeofTag.includes("react.forward_ref") && typeof v.render === "function") return v.render;
+            }
+            return null;
+        };
+        const doPatch = (mod, key) => {
+            const raw = mod?.[key];
+            const fn = unwrapComponent(raw);
+            if (!fn) return false;
+            let patchTarget = mod, patchKey = key;
+            if (raw !== fn) {
+                patchTarget = raw;
+                patchKey = (typeof raw.type === "function") ? "type" : "render";
+            }
+            self.patchBefore(patchTarget, patchKey, function(ctx, args) {
+                try {
+                    const props = args?.[0];
+                    if (!props || typeof props !== "object") return;
+                    const patchedProps = rewriteProps(props, ctx, args);
+                    if (patchedProps && patchedProps !== props) args[0] = patchedProps;
+                } catch (_) {}
+            });
+            return true;
+        };
+        const srcFilter = m => {
+            const fn = unwrapComponent(m);
+            if (!fn) return false;
+            try {
+                const src = Function.prototype.toString.call(fn);
+                const hits = matchingStrings.filter(s => src.includes(s));
+                return hits.length >= requiredMatches;
+            } catch (_) { return false; }
+        };
+        try {
+            const mod = this._wpGetModule(srcFilter, { searchExports: true });
+            if (mod) {
+                if (doPatch(mod.prototype, "render")) return true;
+                if (doPatch(mod, "default")) return true;
+            }
+        } catch (_) {}
+        try {
+            const found = this._wpGetModuleWithKey(srcFilter);
+            if (found?.[0] && found[1] && typeof found[0] === "object") {
+                if (doPatch(found[0], found[1])) return true;
+            }
+        } catch (_) {}
+        try {
+            const wholeModule = this._wpGetModule(exportsObj => {
+                if (!exportsObj || typeof exportsObj !== "object") return false;
+                try {
+                    return Object.values(exportsObj).some(srcFilter);
+                } catch (_) { return false; }
+            }, { defaultExport: false });
+            if (wholeModule && typeof wholeModule === "object") {
+                for (const key of Object.keys(wholeModule)) {
+                    let val;
+                    try { val = wholeModule[key]; } catch (_) { continue; }
+                    if (!srcFilter(val)) continue;
+                    if (doPatch(wholeModule, key)) return true;
+                }
+            }
+        } catch (_) {}
+        return false;
+    }
     _formatDate(timestamp) {
         if (!timestamp) return "No check yet";
         try {
             const date = new Date(timestamp);
-            return date.toLocaleString("en-US", {
-                month: "2-digit",
-                day: "2-digit",
-                year: "numeric",
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMin = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMs / 3600000);
+
+            const isToday = date.toDateString() === now.toDateString();
+            const yesterday = new Date(now);
+            yesterday.setDate(yesterday.getDate() - 1);
+            const isYesterday = date.toDateString() === yesterday.toDateString();
+
+            const time = date.toLocaleString("en-US", {
                 hour: "2-digit",
                 minute: "2-digit",
-                second: "2-digit",
                 hour12: true
+            });
+
+            if (diffMin < 1) return "just now";
+            if (diffMin < 60) return `${diffMin} min ago`;
+            if (isToday) return `today, ${time}`;
+            if (isYesterday) return `yesterday, ${time}`;
+            if (diffHours < 24 * 7) {
+                const days = Math.floor(diffHours / 24);
+                return `${days} day${days === 1 ? "" : "s"} ago`;
+            }
+            return date.toLocaleDateString("en-US", {
+                month: "2-digit",
+                day: "2-digit",
+                year: "numeric"
             });
         } catch (_) {
             return "Invalid date";
@@ -608,10 +744,10 @@ module.exports = class ByeBlocked {
                     this._lastNotifiedVersion = remote;
                     this._removeNotice();
                     try {
-                        this._updateNotice = BdApi.UI.showNotice(`🎉 ByeBlocked v${remote} is out! You're on v${local} - update available.`, {
+                        this._updateNotice = BdApi.UI.showNotice(`ByeBlocked - Version v${remote} is now available!`, {
                             timeout: 0,
                             buttons: [ {
-                                label: "Install now",
+                                label: "Update now",
                                 onClick: () => {
                                     if (this._updateNotice) {
                                         try {
@@ -629,7 +765,7 @@ module.exports = class ByeBlocked {
                             } ]
                         });
                     } catch (_) {
-                        this.toast(`🎉 ByeBlocked v${remote} available! Go to settings.`, "info");
+                        this.toast(`ByeBlocked - Version v${remote} is now available! Check settings.`, "info");
                     }
                 }
                 this._updateState = {
@@ -713,10 +849,10 @@ module.exports = class ByeBlocked {
                 this._renderUpdateBtn(panelRef);
                 if (!silent) {
                     try {
-                        this._updateNotice = BdApi.UI.showNotice(`🎉 ByeBlocked v${remote} is out! You're on v${local} - update available.`, {
+                        this._updateNotice = BdApi.UI.showNotice(`ByeBlocked - Version v${remote} is now available!`, {
                             timeout: 0,
                             buttons: [ {
-                                label: "Install now",
+                                label: "Update now",
                                 onClick: () => {
                                     if (this._updateNotice) {
                                         try {
@@ -903,13 +1039,6 @@ module.exports = class ByeBlocked {
         if (!panelRef) return;
         const btn = panelRef.querySelector("[data-nmb-update-btn]");
         if (!btn) return;
-        const iconPaths = {
-            idle: `<path d="M14 2v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 7A5.5 5.5 0 1 1 10.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
-            checking: `<path d="M14 2v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.5 7A5.5 5.5 0 1 1 10.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
-            upToDate: `<path d="M2.5 8.5l3.5 3.5 7.5-7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`,
-            available: `<path d="M8 2v8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M5 7l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 13h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>`,
-            error: `<path d="M8 3.5v5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11.5" r="0.75" fill="currentColor"/>`
-        };
         const states = {
             idle: {
                 label: "Check for updates",
@@ -917,7 +1046,7 @@ module.exports = class ByeBlocked {
                 disabled: false
             },
             checking: {
-                label: "Checkingâ€¦",
+                label: "Checking",
                 cls: "is-checking",
                 disabled: true
             },
@@ -938,11 +1067,8 @@ module.exports = class ByeBlocked {
             }
         };
         const s = states[this._updateState.status] || states.idle;
-        const icon = iconPaths[this._updateState.status] || iconPaths.idle;
         const labelEl = btn.querySelector(".nmb-btn-label");
-        const iconEl = btn.querySelector(".nmb-btn-icon");
         if (labelEl) labelEl.textContent = s.label;
-        if (iconEl) iconEl.innerHTML = icon;
         btn.disabled = s.disabled;
         btn.className = "nmb-update-btn " + s.cls;
         btn.title = this._updateState.status === "available" && this._updateState.latestVersion ? `v${this._updateState.latestVersion} available` : "";
@@ -966,6 +1092,7 @@ module.exports = class ByeBlocked {
                 autoCheckUpdates: true,
                 muteVoiceJoinLeaveSound: true,
                 muteBlockedVoiceAudio: true,
+                blockRingingFromBlocked: true,
                 suppressTaskbarBadge: true
             }
         };
@@ -1307,6 +1434,7 @@ module.exports = class ByeBlocked {
                 const ch = cs?.getChannel?.(channelId);
                 if (ch?.isDM?.() && this.shouldHide(ch.recipient?.id || ch.recipientId)) return;
                 if (ch?.guild_id && !this._channelHasVisibleUnread(channelId)) return;
+                if (!ch?.guild_id && !ch?.isDM?.() && this._hasBlockedOnlyReadActivity(channelId)) return;
                 total += count;
             } catch (_) {}
         });
@@ -1354,12 +1482,12 @@ module.exports = class ByeBlocked {
         }
     }
     _bootstrapBlockedUnreadSuppression() {
-        if (!this.settings.places?.messages) return;
         const helpers = this._getReadStateHelpers();
         let changed = false;
         this._forEachKnownChannel((channelId, channel) => {
             if (!this._channelHasRawUnread(channelId)) return;
             if (this._hasBlockedOnlyReadActivity(channelId)) return;
+            if (!this.settings.places?.messages) return;
             try {
                 if (helpers.isForumParentChannel(channelId)) {
                     const forumResult = helpers.hasVisibleForumActivity(channelId);
@@ -1528,6 +1656,17 @@ module.exports = class ByeBlocked {
                 if (args[0] !== "UNREAD") return;
                 const count = self._recomputeTaskbarBadgeCount();
                 if (!count) args[0] = "DEFAULT";
+            });
+        }
+        const flashModule = typeof electron.flashFrame === "function"
+            ? electron
+            : (typeof DiscordNative !== "undefined" && typeof DiscordNative?.window?.flashFrame === "function" ? DiscordNative.window : null);
+        if (flashModule && typeof flashModule.flashFrame === "function") {
+            this._patcher.before(flashModule, "flashFrame", (_, args) => {
+                if (!self._taskbarBadgeEnabled()) return;
+                if (args[0] !== true && args[0] !== 1) return;
+                const count = self._recomputeTaskbarBadgeCount();
+                if (!count) args[0] = false;
             });
         }
         this._taskbarElectronPatched = true;
@@ -1773,6 +1912,46 @@ module.exports = class ByeBlocked {
         }
         return false;
     }
+    _forceInitialRerender() {
+        if (this._didForceInitialRerender) return;
+        const root = document.getElementById('app-mount')
+            || document.querySelector('[class*="app-"]')
+            || document.body;
+        if (!root) return;
+        let fiber = null;
+        try {
+            fiber = BdApi.ReactUtils.getInternalInstance(root);
+        } catch (err) {
+            this._patcher._logFail('forceInitialRerender:getInternalInstance', err);
+        }
+        if (!fiber) return;
+        const seen = new Set();
+        let forced = 0;
+        const MAX_FORCED = 6;
+        const MAX_DEPTH = 60;
+        const walk = (node, depth) => {
+            if (!node || forced >= MAX_FORCED || depth > MAX_DEPTH || seen.has(node)) return;
+            seen.add(node);
+            const inst = node.stateNode;
+            if (inst && typeof inst.forceUpdate === 'function' && !(inst instanceof HTMLElement)) {
+                try {
+                    inst.forceUpdate();
+                    forced++;
+                    return;
+                } catch (err) {
+                    this._patcher._logFail('forceInitialRerender:forceUpdate', err);
+                }
+            }
+            walk(node.child, depth + 1);
+            walk(node.sibling, depth + 1);
+        };
+        try {
+            walk(fiber.child || fiber, 0);
+        } catch (err) {
+            this._patcher._logFail('forceInitialRerender:walk', err);
+        }
+        this._didForceInitialRerender = true;
+    }
     _restartObserver() {
         this.observer?.disconnect();
         this._stageObserver?.disconnect();
@@ -1789,7 +1968,7 @@ module.exports = class ByeBlocked {
             if (this.isRunning && this.settings.places?.reactions) {
                 try { this._fastHideReactionsFromMutations(mutations); } catch (_) {}
             }
-            if (this.isRunning && this.settings.places?.messages) {
+            if (this.isRunning && (this.settings.places?.messages || this.settings.places?.memberList)) {
                 try { this._fastHideFromMutations(mutations); } catch (_) {}
             }
             if (this._observerFramePending) return;
@@ -1897,6 +2076,31 @@ module.exports = class ByeBlocked {
             ByeBlocked._domGuardInstalled = false;
         };
     }
+    _runEarlyPatches() {
+        const p = this._patcher;
+        p.safe('patchReadState', () => this.patchReadState());
+        p.safe('scheduleReadStateReloadRechecks', () => this._scheduleReadStateReloadRechecks());
+        p.safe('addStyles', () => this.addStyles());
+        p.safe('patchStores', () => this.patchStores());
+        p.safe('patchChannelPinsStore', () => this.patchChannelPinsStore());
+        p.safe('patchPinFlux', () => this.patchPinFlux());
+        p.safe('patchPrivateChannelStore', () => this.patchPrivateChannelStore());
+        p.safe('patchGroupDMChannelPrototype', () => this.patchGroupDMChannelPrototype());
+        p.safe('patchGroupDMUnreadSectionObserver', () => this.patchGroupDMUnreadSectionObserver());
+        p.safe('patchPrivateChannelRowComponent', () => this.patchPrivateChannelRowComponent());
+        p.safe('patchGuildScheduledEventStore', () => this.patchGuildScheduledEventStore());
+        p.safe('patchEventsSidebarUnread', () => this.patchEventsSidebarUnread());
+        p.safe('patchGuildMemberStore', () => this.patchGuildMemberStore());
+        p.safe('patchActivePostsPopoverComponent', () => this.patchActivePostsPopoverComponent());
+        p.safe('patchReactions', () => this.patchReactions());
+        p.safe('patchRelationshipUpdates', () => this.patchRelationshipUpdates());
+        p.safe('patchBlockedMessageGroup', () => this.patchBlockedMessageGroup());
+        p.safe('patchMessagesWrapComponent', () => this.patchMessagesWrapComponent());
+        p.safe('patchForumPostComponent', () => this.patchForumPostComponent());
+        p.safe('patchCallGridParticipants', () => {});
+        p.safe('patchMessageStore', () => this.patchMessageStore());
+        p.safe('patchMessageItemComponent', () => this.patchMessageItemComponent());
+    }
     start(_retryAttempt = 0) {
         if (this.isRunning) return;
         this.isRunning = true;
@@ -1907,6 +2111,14 @@ module.exports = class ByeBlocked {
         this.removeStyles();
         this._injectGuildSwitchGuard();
         this._patcher.safe('resolveModules', () => this.resolveModules());
+        this._runEarlyPatches();
+        if (this._relationshipStoreJustAppeared) {
+            this._relationshipStoreJustAppeared = false;
+            try { this._onRelationshipChanged(); } catch (_) {}
+        }
+        if (this.settings.places?.groupDms) {
+            this._patcher.safe('hidePrivateChannelsSync', () => this.hidePrivateChannels());
+        }
         if (!this.modules.RelationshipStore?.isBlocked) {
             const maxAttempts = 20;
             if (_retryAttempt < maxAttempts) {
@@ -1922,25 +2134,7 @@ module.exports = class ByeBlocked {
         }
         clearTimeout(this._moduleRetryTimeout);
         const p = this._patcher;
-        p.safe('patchReadState', () => this.patchReadState());
-        p.safe('scheduleReadStateReloadRechecks', () => this._scheduleReadStateReloadRechecks());
-        p.safe('addStyles', () => this.addStyles());
-        p.safe('patchStores', () => this.patchStores());
-        p.safe('patchChannelPinsStore', () => this.patchChannelPinsStore());
-        p.safe('patchPinFlux', () => this.patchPinFlux());
-        p.safe('patchPrivateChannelStore', () => this.patchPrivateChannelStore());
-        p.safe('patchGuildScheduledEventStore', () => this.patchGuildScheduledEventStore());
-        p.safe('patchEventsSidebarUnread', () => this.patchEventsSidebarUnread());
-        p.safe('patchGuildMemberStore', () => this.patchGuildMemberStore());
-        p.safe('patchActivePostsPopoverComponent', () => this.patchActivePostsPopoverComponent());
-        p.safe('patchReactions', () => this.patchReactions());
-        p.safe('patchRelationshipUpdates', () => this.patchRelationshipUpdates());
-        p.safe('patchBlockedMessageGroup', () => this.patchBlockedMessageGroup());
-        p.safe('patchMessagesWrapComponent', () => this.patchMessagesWrapComponent());
-        p.safe('patchForumPostComponent', () => this.patchForumPostComponent());
-        p.safe('patchCallGridParticipants', () => {});
-        p.safe('patchMessageStore', () => this.patchMessageStore());
-        p.safe('patchMessageItemComponent', () => this.patchMessageItemComponent());
+        this._runEarlyPatches();
         p.safe('restartObserver', () => this._restartObserver());
         p.safe('startReactionClickWatcher', () => this._startReactionClickWatcher());
         p.safe('startChannelSwitchWatcher', () => this._startChannelSwitchWatcher());
@@ -1948,6 +2142,11 @@ module.exports = class ByeBlocked {
         p.safe('registerHealthChecks', () => this._registerHealthChecks());
         this.scanInterval = setInterval(() => this.queueScan(), 4e3);
         this.queueRefresh();
+        if (this.settings.places?.groupDms) {
+            for (const delay of [300, 800, 1500, 2500, 4000, 6000, 8000]) {
+                setTimeout(() => { if (this.isRunning) { try { this.hidePrivateChannels(); } catch (_) {} } }, delay);
+            }
+        }
         this._waitForChatReady(0);
         setTimeout(() => {
             try {
@@ -1967,10 +2166,14 @@ module.exports = class ByeBlocked {
             p.safe('patchMemberListRow', () => this.patchMemberListRow());
             p.safe('patchAutocompleteRowComponent', () => this.patchAutocompleteRowComponent());
             p.safe('patchSoundboardEffects', () => this.patchSoundboardEffects());
-            if (this.settings.behavior.muteVoiceJoinLeaveSound || this.settings.behavior.muteBlockedVoiceAudio)
-                p.safe('patchSound', () => this.patchSound());
+            p.safe('patchSound', () => this.patchSound());
             if (this.settings.behavior.muteBlockedVoiceAudio)
                 p.safe('patchVoiceMute', () => this.patchVoiceMute());
+            if (this.settings.behavior.blockRingingFromBlocked) {
+                p.safe('patchBlockedCallRinging', () => this.patchBlockedCallRinging());
+                p.safe('patchRingtoneAudio', () => this.patchRingtoneAudio());
+                p.safe('patchHideBlockedCallUI', () => this.patchHideBlockedCallUI());
+            }
         }, 2e3);
         setTimeout(() => {
             p.safe('patchStageRenderComponent', () => this.patchStageRenderComponent());
@@ -2012,6 +2215,8 @@ module.exports = class ByeBlocked {
     }
     stop() {
         this.isRunning = false;
+        this._didForceInitialRerender = false;
+        document.getElementById('ByeBlocked-bootguard')?.remove();
         if (typeof ByeBlocked._domGuardRestore === "function") {
             ByeBlocked._domGuardRestore();
             ByeBlocked._domGuardRestore = null;
@@ -2079,6 +2284,18 @@ module.exports = class ByeBlocked {
         }
         this._statusModalObserver?.disconnect();
         this._statusModalObserver = null;
+        this._groupDMUnreadSectionObserver?.disconnect();
+        this._groupDMUnreadSectionObserver = null;
+        this._groupDMUnreadSectionObserverPatched = false;
+        this._removeGroupDMUnreadSectionGhostStyle();
+        try {
+            document.querySelectorAll('#guild-list-unread-dms [data-nmb-ghost="true"]').forEach(el => {
+                const prev = el.getAttribute("data-nmb-prev-ghost-style");
+                if (prev) el.setAttribute("style", prev); else el.removeAttribute("style");
+                delete el.dataset.nmbGhost;
+                el.removeAttribute("data-nmb-prev-ghost-style");
+            });
+        } catch (_) {}
         clearInterval(this.scanInterval);
         clearTimeout(this.scanTimeout);
         clearTimeout(this.refreshTimeout);
@@ -2099,6 +2316,11 @@ module.exports = class ByeBlocked {
             this._releaseAllVoiceMutes();
         } catch (_) {}
         this._voiceMutePatched = false;
+        try {
+            this._unpatchRingtoneAudio();
+        } catch (_) {}
+        this._callRingingPatched = false;
+        this._blockedRingingChannels?.clear();
         try {
             this.modules.RelationshipStore?.removeChangeListener?.(this.relationshipChangeHandler);
         } catch (_) {}
@@ -2129,6 +2351,36 @@ module.exports = class ByeBlocked {
         this._channelSwitchChangeHandler = null;
         this._lastWatchedChannelId = null;
         this._forumRetryScheduled = false;
+        try {
+            if (this._groupDMPrototypeRef && this._groupDMRecipientsSyms) {
+                const proto = this._groupDMPrototypeRef;
+                const { RAW_RECIPIENTS, RAW_RECIPIENT_IDS } = this._groupDMRecipientsSyms;
+                for (const [key, sym] of [["recipients", RAW_RECIPIENT_IDS], ["rawRecipients", RAW_RECIPIENTS]]) {
+                    const desc = Object.getOwnPropertyDescriptor(proto, key);
+                    if (desc && desc.get && desc.get.__nmbPatched) {
+                        Object.defineProperty(proto, key, {
+                            configurable: true,
+                            enumerable: true,
+                            get: function() { return this[sym]; },
+                            set: function(value) { this[sym] = value; }
+                        });
+                        try {
+                            const cs = this.modules.ChannelStore;
+                            const all = cs?.getPrivateChannels ? cs.getPrivateChannels() : null;
+                            const list = all ? (Array.isArray(all) ? all : Object.values(all)) : [];
+                            for (const ch of list) {
+                                if (ch && Object.prototype.hasOwnProperty.call(ch, sym)) {
+                                    ch[key] = ch[sym];
+                                    delete ch[sym];
+                                }
+                            }
+                        } catch (_) {}
+                    }
+                }
+            }
+        } catch (_) {}
+        this._groupDMPrototypeRef = null;
+        this._groupDMRecipientsSyms = null;
         this._patcher?.cleanup();
         this.restoreAllElements();
         this.removeStyles();
@@ -2171,6 +2423,7 @@ module.exports = class ByeBlocked {
         this._guildMemberStorePatched = false;
         this._eventsSidebarUnreadPatched = false;
         this._memberListRowPatched = false;
+        this._groupDMPrototypePatched = false;
         this._stageRenderComponentPatched = false;
         this._activityPanelComponentPatched = false;
         this._blockedMsgGroupPatched = false;
@@ -2190,7 +2443,9 @@ module.exports = class ByeBlocked {
     resolveModules() {
         const getStore = (...names) => this._wpGetStore(...names);
         const getModule = (filter, opts) => this._wpGetModule(filter, opts);
+        const hadRelationshipStore = !!this.modules.RelationshipStore?.isBlocked;
         this.modules.RelationshipStore = getStore(...ByeBlocked.STORE_NAMES.RELATIONSHIP);
+        const relationshipStoreJustAppeared = !hadRelationshipStore && !!this.modules.RelationshipStore?.isBlocked;
         this.modules.GuildMemberStore = getStore(...ByeBlocked.STORE_NAMES.GUILD_MEMBER);
         this.modules.ReactionsStore = getStore(...ByeBlocked.STORE_NAMES.REACTIONS);
         this.modules.SortedVoiceStateStore = getStore(...ByeBlocked.STORE_NAMES.VOICE_STATE);
@@ -2204,13 +2459,17 @@ module.exports = class ByeBlocked {
         this.modules.SelectedGuildStore = getStore("SelectedGuildStore", "SelectedGuildIdStore");
         this.modules.RelationshipUtils = getModule(m => m?.addRelationship && m?.removeRelationship);
         this.modules.SelectedChannelStore = getStore("SelectedChannelStore", "ChannelSelectedStore");
+        this.modules.CallStore = getStore("CallStore", "VoiceCallStore");
         this.modules.VoiceStateStore = getStore("VoiceStateStore", "VoiceStatesStore");
         this.modules.MediaEngineStore = getStore("MediaEngineStore", "MediaEngineManagerStore");
         this.modules.ReadStateStore = getStore("ReadStateStore", "ChannelReadStateStore", "ReadStatesStore");
         this.modules.GuildReadStateStore = getStore("GuildReadStateStore", "GuildUnreadStore", "GuildReadStatesStore");
         this.modules.GuildChannelStore = getStore("GuildChannelStore", "GuildChannelsStore");
         this.modules.GuildStore = getStore("GuildStore", "GuildsStore");
-        this.modules.PrivateChannelStore = getStore("PrivateChannelStore", "PrivateChannelsStore");
+        this.modules.PrivateChannelStore = getStore("PrivateChannelStore", "PrivateChannelsStore")
+            || (["getPrivateChannels", "getPrivateChannelIds", "getMutablePrivateChannels"].some(k => typeof this.modules.ChannelStore?.[k] === "function")
+                ? this.modules.ChannelStore
+                : null);
         this.modules.NotificationSettingsStore = getStore("NotificationSettingsStore", "NotificationStore");
         this.modules.ChannelPinsStore = getStore("ChannelPinsStore", "PinnedMessagesStore");
         this.modules.ActiveJoinedThreadsStore = getStore("ActiveJoinedThreadsStore", "JoinedThreadsStore");
@@ -2227,6 +2486,7 @@ module.exports = class ByeBlocked {
             this.modules.InviteQueryComposeKey = null;
         }
         this._resolveSoundUtils();
+        this._relationshipStoreJustAppeared = relationshipStoreJustAppeared;
         this._nmbReportMissingModules();
     }
     _resolveSoundUtils() {
@@ -2395,18 +2655,26 @@ module.exports = class ByeBlocked {
         const pcs = this.modules.PrivateChannelStore;
         if (!pcs || this._privateChannelStorePatched) return;
         const self = this;
+        const migrateIfGroupDM = ch => {
+            try {
+                if (ch?.isGroupDM?.() && self._migrateGroupDMInstanceValue && self._groupDMRecipientsSyms) {
+                    const { RAW_RECIPIENTS, RAW_RECIPIENT_IDS } = self._groupDMRecipientsSyms;
+                    self._migrateGroupDMInstanceValue(ch, "recipients", RAW_RECIPIENT_IDS);
+                    self._migrateGroupDMInstanceValue(ch, "rawRecipients", RAW_RECIPIENTS);
+                }
+            } catch (_) {}
+        };
         const filterIds = ids => {
-            if (!self.settings.places.groupDms && !self.settings.places.messages) return ids;
             if (!Array.isArray(ids)) return ids;
+            for (const id of ids) {
+                try { migrateIfGroupDM(self.modules.ChannelStore?.getChannel?.(id)); } catch (_) {}
+            }
+            if (!self.settings.places.messages) return ids;
             return ids.filter(id => {
                 try {
                     const ch = self.modules.ChannelStore?.getChannel?.(id);
                     if (!ch) return true;
                     if (ch.isDM?.() && self.shouldHide(ch.recipient?.id || ch.recipientId)) return false;
-                    if (self.settings.places.groupDms && ch.isGroupDM?.()) {
-                        const recipients = ch.recipients || ch.rawRecipients?.map(u => u?.id || u) || [];
-                        if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) return false;
-                    }
                     return true;
                 } catch (_) {
                     return true;
@@ -2414,17 +2682,14 @@ module.exports = class ByeBlocked {
             });
         };
         const filterMutable = obj => {
-            if (!obj || typeof obj !== "object" || !self.settings.places.groupDms && !self.settings.places.messages) return obj;
+            if (!obj || typeof obj !== "object") return obj;
             const out = Array.isArray(obj) ? [] : {};
             const entries = Array.isArray(obj) ? obj.entries() : Object.entries(obj);
             for (const [key, ch] of entries) {
                 const id = ch?.id || key;
                 const channel = ch || self.modules.ChannelStore?.getChannel?.(id);
-                if (channel?.isDM?.() && self.shouldHide(channel.recipient?.id || channel.recipientId)) continue;
-                if (self.settings.places.groupDms && channel?.isGroupDM?.()) {
-                    const recipients = channel.recipients || channel.rawRecipients?.map(u => u?.id || u) || [];
-                    if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) continue;
-                }
+                migrateIfGroupDM(channel);
+                if (self.settings.places.messages && channel?.isDM?.() && self.shouldHide(channel.recipient?.id || channel.recipientId)) continue;
                 if (Array.isArray(out)) out.push(ch); else out[key] = ch;
             }
             return out;
@@ -2890,18 +3155,172 @@ return false;
             this._patcher._logFail("patchMemberListRow", new Error("esgotou tentativas — indicadores não encontraram módulo; ver notas de manutenção"));
         }
     }
+    patchGroupDMChannelPrototype(attempt = 0) {
+        if (!this.settings.places.groupDms || this._groupDMPrototypePatched) return;
+        const self = this;
+        try {
+            const cs = this.modules.ChannelStore;
+            let proto = null;
+            try {
+                const ChannelClass = this._r?.get(m => typeof m === "function" && m.prototype && typeof m.prototype.isGroupDM === "function" && typeof m.prototype.isDM === "function");
+                if (ChannelClass?.prototype) {
+                    proto = ChannelClass.prototype;
+                }
+            } catch (_) {}
+            if (!proto) {
+                let sampleChannel = null;
+                if (cs?.getPrivateChannels) {
+                    try {
+                        const all = cs.getPrivateChannels();
+                        const list = Array.isArray(all) ? all : Object.values(all || {});
+                        sampleChannel = list.find(ch => ch?.isGroupDM?.());
+                    } catch (_) {}
+                }
+                if (!sampleChannel && cs?.getMutablePrivateChannels) {
+                    try {
+                        const all = cs.getMutablePrivateChannels();
+                        const list = Array.isArray(all) ? all : Object.values(all || {});
+                        sampleChannel = list.find(ch => ch?.isGroupDM?.());
+                    } catch (_) {}
+                }
+                if (!sampleChannel) {
+                    this._scheduleGroupDMPrototypeRetryOnDataReady(attempt);
+                    return;
+                }
+                proto = Object.getPrototypeOf(sampleChannel);
+            }
+            if (!proto || proto === Object.prototype) {
+                if (attempt < 20) setTimeout(() => this.patchGroupDMChannelPrototype(attempt + 1), 2500);
+                else this._patcher._logFail("patchGroupDMChannelPrototype", new Error("protótipo de Channel inválido — ver notas de manutenção"));
+                return;
+            }
+            const RAW_RECIPIENTS = Symbol.for("nmbRawRecipients");
+            const RAW_RECIPIENT_IDS = Symbol.for("nmbRawRecipientIds");
+            const defineFilteredGetter = (key, storageSym, mapToId) => {
+                const desc = Object.getOwnPropertyDescriptor(proto, key);
+                if (desc && desc.get && desc.get.__nmbPatched) return true;
+                Object.defineProperty(proto, key, {
+                    configurable: true,
+                    enumerable: true,
+                    get: function() {
+                        const raw = this[storageSym];
+                        if (!Array.isArray(raw)) return raw;
+                        if (!self.settings.places.groupDms) return raw;
+                        try {
+                            if (!this.isGroupDM?.()) return raw;
+                            return raw.filter(item => !self.shouldHide(mapToId(item)));
+                        } catch (_) { return raw; }
+                    },
+                    set: function(value) { this[storageSym] = value; }
+                });
+                const newDesc = Object.getOwnPropertyDescriptor(proto, key);
+                newDesc.get.__nmbPatched = true;
+                return true;
+            };
+            const migrateInstanceValue = (instance, key, storageSym) => {
+                if (Object.prototype.hasOwnProperty.call(instance, key)) {
+                    const own = Object.getOwnPropertyDescriptor(instance, key);
+                    if (own && "value" in own) {
+                        instance[storageSym] = own.value;
+                        delete instance[key];
+                        return true;
+                    }
+                }
+                return false;
+            };
+            this._migrateGroupDMInstanceValue = migrateInstanceValue;
+            if (cs?.getChannel) {
+                this.patchAfter(cs, "getChannel", (_, __, channel) => {
+                    if (!channel || typeof channel !== "object") return channel;
+                    try {
+                        if (channel.isGroupDM?.()) {
+                            migrateInstanceValue(channel, "recipients", RAW_RECIPIENT_IDS);
+                            migrateInstanceValue(channel, "rawRecipients", RAW_RECIPIENTS);
+                        }
+                    } catch (_) {}
+                    return channel;
+                });
+            }
+            defineFilteredGetter("recipients", RAW_RECIPIENT_IDS, r => r?.id || r);
+            defineFilteredGetter("rawRecipients", RAW_RECIPIENTS, u => u?.id || u);
+            try {
+                const allChannels = [];
+                if (cs?.getPrivateChannels) {
+                    const all = cs.getPrivateChannels();
+                    allChannels.push(...(Array.isArray(all) ? all : Object.values(all || {})));
+                }
+                for (const ch of allChannels) {
+                    if (!ch?.isGroupDM?.()) continue;
+                    migrateInstanceValue(ch, "recipients", RAW_RECIPIENT_IDS);
+                    migrateInstanceValue(ch, "rawRecipients", RAW_RECIPIENTS);
+                }
+            } catch (_) {}
+            this._groupDMRecipientsSyms = { RAW_RECIPIENTS, RAW_RECIPIENT_IDS };
+            this._groupDMPrototypeRef = proto;
+            this._groupDMPrototypePatched = true;
+            try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
+            try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+        } catch (e) {
+            if (attempt < 20) setTimeout(() => this.patchGroupDMChannelPrototype(attempt + 1), 2500);
+            else this._patcher._logFail("patchGroupDMChannelPrototype", e);
+        }
+    }
+    _scheduleGroupDMPrototypeRetryOnDataReady(attempt) {
+        if (attempt >= 20) {
+            this._patcher._logFail("patchGroupDMChannelPrototype", new Error("nenhum Group DM encontrado para localizar o protótipo — ver notas de manutenção"));
+            return;
+        }
+        let done = false;
+        const stores = [this.modules.PrivateChannelStore, this.modules.ChannelStore].filter(s => s?.addChangeListener && s?.removeChangeListener);
+        const cleanup = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            for (const s of stores) { try { s.removeChangeListener(onChange); } catch (_) {} }
+        };
+        const onChange = () => {
+            if (done || this._groupDMPrototypePatched) return;
+            cleanup();
+            this.patchGroupDMChannelPrototype(attempt + 1);
+        };
+        for (const s of stores) { try { s.addChangeListener(onChange); } catch (_) {} }
+        const timer = setTimeout(() => {
+            if (done || this._groupDMPrototypePatched) return;
+            cleanup();
+            this.patchGroupDMChannelPrototype(attempt + 1);
+        }, 2500);
+    }
+    getGroupDMRawRecipientIds(channel) {
+        if (!channel) return [];
+        const syms = this._groupDMRecipientsSyms;
+        const sym = syms?.RAW_RECIPIENT_IDS;
+        if (!sym) return channel.recipients || [];
+        if (Object.prototype.hasOwnProperty.call(channel, sym)) return channel[sym] || [];
+        if (this._migrateGroupDMInstanceValue) {
+            try {
+                this._migrateGroupDMInstanceValue(channel, "recipients", sym);
+                if (Object.prototype.hasOwnProperty.call(channel, sym)) return channel[sym] || [];
+            } catch (_) {}
+        }
+        try {
+            const cs = this.modules.ChannelStore;
+            const fresh = channel.id && cs?.getChannel ? cs.getChannel(channel.id) : null;
+            if (fresh && Object.prototype.hasOwnProperty.call(fresh, sym)) return fresh[sym] || [];
+        } catch (_) {}
+        return null;
+    }
     patchStores() {
         const voiceStore = this.modules.SortedVoiceStateStore;
         if (voiceStore?.getVoiceStatesForChannel) {
             this.originalVoiceMethods.getVoiceStatesForChannel = voiceStore.getVoiceStatesForChannel.bind(voiceStore);
-            this.patchAfter(voiceStore, "getVoiceStatesForChannel", (_, __, ret) => {
+            this._patchStoreMethodOnce(voiceStore, "getVoiceStatesForChannel", (_, __, ret) => {
                 if (!this.settings.places.voiceChannels) return ret;
                 try { return this.filterVoiceStates(ret); } catch (_) { return ret; }
             });
         }
         if (voiceStore?.getVoiceStates) {
             this.originalVoiceMethods.getVoiceStates = voiceStore.getVoiceStates.bind(voiceStore);
-            this.patchAfter(voiceStore, "getVoiceStates", (_, __, ret) => {
+            this._patchStoreMethodOnce(voiceStore, "getVoiceStates", (_, __, ret) => {
                 if (!this.settings.places.voiceChannels) return ret;
                 try { return this.filterVoiceStates(ret); } catch (_) { return ret; }
             });
@@ -2937,34 +3356,29 @@ return false;
             return ret;
         };
         if (stageStore?.getMutableParticipants) {
-            this.patchAfter(stageStore, "getMutableParticipants", (_, __, ret) => {
+            this._patchStoreMethodOnce(stageStore, "getMutableParticipants", (_, __, ret) => {
                 if (!this.settings.places.voiceChannels) return ret;
                 try { return filterStageParticipants(ret); } catch (_) { return ret; }
             });
         }
         if (stageStore?.getParticipants) {
-            this.patchAfter(stageStore, "getParticipants", (_, __, ret) => {
+            this._patchStoreMethodOnce(stageStore, "getParticipants", (_, __, ret) => {
                 if (!this.settings.places.voiceChannels) return ret;
                 try { return filterStageParticipants(ret); } catch (_) { return ret; }
             });
         }
-        const patchedStageKeys = new Set;
         for (const key of ["getSpeakers", "getListeners", "getAudience", "getStageSpeakers", "getStageListeners"]) {
-            if (patchedStageKeys.has(key)) continue;
             if (typeof stageStore?.[key] === "function") {
-                this.patchAfter(stageStore, key, (_, __, ret) => {
+                this._patchStoreMethodOnce(stageStore, key, (_, __, ret) => {
                     if (!this.settings.places.voiceChannels) return ret;
                     try { return filterStageParticipants(ret); } catch (_) { return ret; }
                 });
-                patchedStageKeys.add(key);
             }
         }
         const activityStore = this.modules.ActivityStore;
-        const patchedActivityKeys = new Set;
         for (const key of ["getParticipants", "getActivityParticipants", "getEmbeddedActivityParticipants"]) {
-            if (patchedActivityKeys.has(key)) continue;
             if (typeof activityStore?.[key] === "function") {
-                this.patchAfter(activityStore, key, (_, __, ret) => {
+                this._patchStoreMethodOnce(activityStore, key, (_, __, ret) => {
                     if (!this.settings.places.voiceChannels) return ret;
                     try {
                         if (Array.isArray(ret)) {
@@ -2974,12 +3388,11 @@ return false;
                         return ret;
                     } catch (_) { return ret; }
                 });
-                patchedActivityKeys.add(key);
             }
         }
         const channelStore = this.modules.ChannelStore;
         if (channelStore?.getChannel) {
-            this.patchAfter(channelStore, "getChannel", (_, __, channel) => {
+            this._patchStoreMethodOnce(channelStore, "getChannel", (_, __, channel) => {
                 if (!channel) return channel;
                 if (this.settings.places.groupDms && channel.isGroupDM?.()) {
                     const clone = Object.assign(Object.create(Object.getPrototypeOf(channel)), channel);
@@ -2991,7 +3404,7 @@ return false;
             });
         }
         if (this.modules.ThreadStore && typeof this.modules.ThreadStore.getThreadsForParent === "function") {
-            this.patchAfter(this.modules.ThreadStore, "getThreadsForParent", (_, args, ret) => {
+            this._patchStoreMethodOnce(this.modules.ThreadStore, "getThreadsForParent", (_, args, ret) => {
                 if (!this.settings.places.messages) return ret;
                 if (!ret || typeof ret !== "object") return ret;
                 const isArray = Array.isArray(ret);
@@ -3010,7 +3423,7 @@ return false;
                 return filtered;
             });
         } else if (this.modules.ThreadStore && typeof this.modules.ThreadStore.getThreadsForChannel === "function") {
-            this.patchAfter(this.modules.ThreadStore, "getThreadsForChannel", (_, args, ret) => {
+            this._patchStoreMethodOnce(this.modules.ThreadStore, "getThreadsForChannel", (_, args, ret) => {
                 if (!this.settings.places.messages) return ret;
                 if (!ret || !Array.isArray(ret)) return ret;
                 return ret.filter(thread => {
@@ -3161,6 +3574,10 @@ return false;
         this.queueRefresh();
         this._shouldHideCache = new Map;
         this._voiceStateFilterCache = new WeakMap;
+        if (this.settings.places.groupDms) {
+            try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
+            try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+        }
         if (this.settings.places.voiceChannels) {
             this._emitVoiceStateChanges();
             try { this.hideVoiceUsers(); } catch (_) {}
@@ -3183,6 +3600,7 @@ return false;
         }
     }
     patchRelationshipUpdates() {
+        if (this._relationshipUpdatesPatched) return;
         this.relationshipChangeHandler = () => {
             this._forceReadStateRecheck();
             this._onRelationshipChanged();
@@ -3193,6 +3611,7 @@ return false;
         const utils = this.modules.RelationshipUtils;
         if (utils?.addRelationship) this.patchAfter(utils, "addRelationship", () => this._onRelationshipChanged());
         if (utils?.removeRelationship) this.patchAfter(utils, "removeRelationship", () => this._onRelationshipChanged());
+        this._relationshipUpdatesPatched = true;
     }
     patchForumPostComponent() {
         if (!this.settings.places.messages) return;
@@ -3405,6 +3824,106 @@ return false;
             }
         } catch (_) {}
     }
+    patchPrivateChannelRowComponent(attempt = 0) {
+        if (!this.settings.places.groupDms) return;
+        if (this._privateChannelRowPatched) return;
+        const self = this;
+        const buildFilteredChannel = channel => {
+            try {
+                if (!channel || !channel.isGroupDM?.()) return channel;
+                const recipients = channel.recipients;
+                const rawRecipients = channel.rawRecipients;
+                if (!Array.isArray(recipients) && !Array.isArray(rawRecipients)) return channel;
+                const filteredRecipients = Array.isArray(recipients) ? recipients.filter(id => !id || !self.shouldHide(id?.id || id)) : recipients;
+                const filteredRaw = Array.isArray(rawRecipients) ? rawRecipients.filter(u => !u || !self.shouldHide(u?.id || u)) : rawRecipients;
+                if (filteredRecipients?.length === recipients?.length && filteredRaw?.length === rawRecipients?.length) return channel;
+                const clone = Object.create(Object.getPrototypeOf(channel));
+                Object.assign(clone, channel, { recipients: filteredRecipients, rawRecipients: filteredRaw });
+                return clone;
+            } catch (_) {
+                return channel;
+            }
+        };
+        const applyToProps = props => {
+            if (!props || typeof props !== "object" || !props.channel) return;
+            try {
+                const filtered = buildFilteredChannel(props.channel);
+                if (filtered !== props.channel) props.channel = filtered;
+            } catch (_) {}
+        };
+        const ROW_SELECTOR = '[data-list-item-id*="private-channels"][data-list-item-id*="___"]';
+        const looksLikeGroupDmChannel = ch => !!ch && typeof ch === "object" && typeof ch.isGroupDM === "function";
+        const findRowComponentFromEl = el => {
+            try {
+                let fiber = BdApi.ReactUtils.getInternalInstance(el);
+                for (let i = 0; i < 40 && fiber; i++, fiber = fiber.return) {
+                    const type = fiber.type;
+                    if (typeof type !== "function") continue;
+                    const props = fiber.memoizedProps || fiber.pendingProps;
+                    if (looksLikeGroupDmChannel(props?.channel)) {
+                        return type;
+                    }
+                }
+            } catch (err) {
+                this._patcher._logFail("patchPrivateChannelRowComponent:fiberWalk", err);
+            }
+            return null;
+        };
+        const findModuleHolding = targetFn => {
+            try {
+                const mod = BdApi.Webpack.getModule(m => m && typeof m === "object" && Object.values(m).includes(targetFn), { searchExports: true });
+                if (!mod) return null;
+                const key = Object.keys(mod).find(k => mod[k] === targetFn);
+                return key ? [mod, key] : null;
+            } catch (_) {
+                return null;
+            }
+        };
+        const tryPatchFromEl = el => {
+            const Comp = findRowComponentFromEl(el);
+            if (!Comp) return false;
+            if (Comp.prototype && typeof Comp.prototype.render === "function") {
+                console.info("[ByeBlocked] patchPrivateChannelRowComponent: achou via Fiber (componente de classe)", Comp.displayName || Comp.name);
+                this.patchBefore(Comp.prototype, "render", context => { applyToProps(context?.props); });
+                this._privateChannelRowPatched = true;
+                return true;
+            }
+            const found = findModuleHolding(Comp);
+            if (found) {
+                const [moduleObj, key] = found;
+                console.info("[ByeBlocked] patchPrivateChannelRowComponent: achou via Fiber (componente funcional, módulo localizado por identidade)", key);
+                this.patchBefore(moduleObj, key, (_, args) => { applyToProps(args?.[0]); });
+                this._privateChannelRowPatched = true;
+                return true;
+            }
+            const inner = (Comp && (Comp.type || Comp.render));
+            if (typeof inner === "function") {
+                const innerFound = findModuleHolding(inner);
+                if (innerFound) {
+                    const [moduleObj, key] = innerFound;
+                    console.info("[ByeBlocked] patchPrivateChannelRowComponent: achou via Fiber (memo/forwardRef, módulo localizado por identidade)", key);
+                    this.patchBefore(moduleObj, key, (_, args) => { applyToProps(args?.[0]); });
+                    this._privateChannelRowPatched = true;
+                    return true;
+                }
+            }
+            return false;
+        };
+        try {
+            const rows = document.querySelectorAll(ROW_SELECTOR);
+            for (const row of rows) {
+                if (tryPatchFromEl(row)) return;
+            }
+        } catch (err) {
+            this._patcher._logFail("patchPrivateChannelRowComponent:domScan", err);
+        }
+        if (attempt < 20) {
+            clearTimeout(this._rowPatchRetryTimeout);
+            this._rowPatchRetryTimeout = setTimeout(() => this.patchPrivateChannelRowComponent(attempt + 1), 1500);
+        } else {
+            this._patcher._logFail("patchPrivateChannelRowComponent", new Error("nenhuma linha de grupo DM encontrada no DOM após várias tentativas — ver notas de manutenção"));
+        }
+    }
     _filterParticipantArray(arr) {
         if (!Array.isArray(arr) || !arr.length) return arr;
         let changed = false;
@@ -3558,9 +4077,13 @@ return false;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") return;
         const self = this;
         this.patchBefore(Dispatcher, "dispatch", function(_, args) {
-            if (!self.settings.places?.messages) return;
             const action = args?.[0];
             if (!action || typeof action !== "object") return;
+            if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && action.message?.type === 1) {
+                self._handleGroupRecipientAdd(action.message);
+                return;
+            }
+            if (!self.settings.places?.messages) return;
             if (action.type === self.constructor.ACTIONS.MESSAGE_PIN_ADD) {
                 self._handlePinAdd(action);
                 return;
@@ -3703,7 +4226,17 @@ return false;
     patchReadState() {
         this._ensureTaskbarElectronPatch();
         if (!this.modules.ReadStateStore) return;
-        if (this._readStatePatched) return;
+        if (this._readStatePatchesRegistered) {
+            this._applyBlockedReadCacheOnStartup();
+            this._bootstrapBlockedUnreadSuppression();
+            const relationshipStoreReady = !!this.modules.RelationshipStore?.isBlocked;
+            if (relationshipStoreReady) {
+                this._readStatePatched = true;
+                this._refreshTaskbarBadge();
+            }
+            return;
+        }
+        this._readStatePatchesRegistered = true;
         const self = this;
         this.patchAfter(this.modules.ReadStateStore, "getUnreadCount", function(_, args, ret) {
             if (!self.settings.places?.messages) return ret;
@@ -3721,9 +4254,16 @@ return false;
                 return ret;
             }
         });
+        if (typeof this.modules.ReadStateStore.getMentionCount === "function") {
+            this.patchInstead(this.modules.ReadStateStore, "getMentionCount", function(ctx, args, orig) {
+                const channelId = args?.[0];
+                if (channelId && self._hasBlockedOnlyReadActivity(channelId)) return 0;
+                return orig.apply(ctx, args);
+            });
+        }
         this.patchInstead(this.modules.ReadStateStore, "hasUnread", function(ctx, args, orig) {
             const channelId = args?.[0];
-            if (channelId && self.settings.places?.messages && self._hasBlockedOnlyReadActivity(channelId)) return false;
+            if (channelId && self._hasBlockedOnlyReadActivity(channelId)) return false;
             const ret = orig.apply(ctx, args);
             if (!ret) return ret;
             if (!self.settings.places?.messages) return ret;
@@ -3768,7 +4308,7 @@ return false;
             if (typeof this.modules.ReadStateStore[methodName] !== "function") continue;
             this.patchInstead(this.modules.ReadStateStore, methodName, function(ctx, args, orig) {
                 const channelId = args?.[0];
-                if (channelId && self.settings.places?.messages && self._hasBlockedOnlyReadActivity(channelId)) return false;
+                if (channelId && self._hasBlockedOnlyReadActivity(channelId)) return false;
                 const ret = orig.apply(ctx, args);
                 if (!ret) return ret;
                 if (!self.settings.places?.messages) return ret;
@@ -3840,7 +4380,7 @@ return false;
                 return ret;
             }
         });
-        if (this.modules.ChannelPinsStore?.addChangeListener) {
+        if (this.modules.ChannelPinsStore?.addChangeListener && !this._channelPinsChangeHandler) {
             this._channelPinsChangeHandler = () => {
                 const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
                 if (channelId) {
@@ -4008,6 +4548,7 @@ return false;
                         } catch (_) {}
                         if (self.shouldHide(authorId) || self._isBlockedMessage(msg)) {
                             self._markBlockedOnlyReadActivity(channelId, parentId, msg?.id);
+                            self._suppressMentionSoundUntil = Date.now() + 3000;
                             scheduleRefresh();
                         } else {
                             self._clearBlockedOnlyReadActivity(channelId);
@@ -4034,10 +4575,17 @@ return false;
                 self._notificationDispatcherPatched = true;
             }
         }
-        this._readStatePatched = true;
+        const relationshipStoreReady = !!this.modules.RelationshipStore?.isBlocked;
+        if (relationshipStoreReady) {
+            this._readStatePatched = true;
+        }
         self._applyBlockedReadCacheOnStartup();
         self._bootstrapBlockedUnreadSuppression();
-        self._refreshTaskbarBadge();
+        self._scanAllGroupDMsForRecipientAdds();
+        self._applyGroupDMUnreadSectionGhosting();
+        if (relationshipStoreReady) {
+            self._refreshTaskbarBadge();
+        }
     }
     _getReadStateHelpers() {
         return {
@@ -4058,6 +4606,19 @@ return false;
     patchBefore(target, method, callback) { this._patcher?.before(target, method, callback); }
     patchInstead(target, method, callback) { this._patcher?.instead(target, method, callback); }
     patchAfter(target, method, callback) { this._patcher?.after(target, method, callback); }
+    _patchStoreMethodOnce(store, method, callback, kind = "after") {
+        if (!store || typeof store[method] !== "function") return;
+        let methodSet = this._patchedStoreMethods.get(store);
+        if (!methodSet) {
+            methodSet = new Set();
+            this._patchedStoreMethods.set(store, methodSet);
+        }
+        if (methodSet.has(method)) return;
+        methodSet.add(method);
+        if (kind === "before") this.patchBefore(store, method, callback);
+        else if (kind === "instead") this.patchInstead(store, method, callback);
+        else this.patchAfter(store, method, callback);
+    }
     filterVoiceStates(value) {
         if (!value) return value;
         if (!this._voiceStateFilterCache) this._voiceStateFilterCache = new WeakMap();
@@ -4127,6 +4688,7 @@ return false;
     shouldHide(userId, isSpammer = false) {
         if (!userId) return false;
         if (isSpammer) return true;
+        if (!this.modules.RelationshipStore?.isBlocked) return false;
         if (this._shouldHideCache?.has(userId)) return this._shouldHideCache.get(userId);
         try {
             let result = false;
@@ -4323,18 +4885,23 @@ return false;
             "groupDms",
             () => {
                 if (!this.settings.places?.groupDms && !this.settings.places?.messages) return true;
-                const els = document.querySelectorAll('[data-list-item-id^="private-channels___"]:not([data-hidden-blocked="true"]), [class*="privateChannels"] [class*="channel"]:not([data-hidden-blocked="true"])');
+                const els = document.querySelectorAll('[data-list-item-id*="private-channels"][data-list-item-id*="___"]:not([data-hidden-blocked="true"]), [class*="privateChannels"] [class*="channel"]:not([data-hidden-blocked="true"])');
                 let sample = 0;
                 for (let i = 0; i < els.length && sample < 40; i++) {
                     const row = els[i];
                     sample++;
-                    const userId = this.findUserId(row);
-                    if (userId && this.shouldHide(userId)) return false;
+                    if (this._isGroupDmRow(row)) {
+                        if (this._groupDmRowLeaksBlockedName(row)) return false;
+                    } else {
+                        const userId = this.findUserId(row);
+                        if (userId && this.shouldHide(userId)) return false;
+                    }
                 }
                 return true;
             },
-            () => { try { this.hidePrivateChannels(); } catch (_) {} },
-            () => {}
+            () => { try { this.hidePrivateChannels(); this.refreshGroupDmLabels(); } catch (_) {} },
+            () => {},
+            1
         );
 
         this._health.register(
@@ -5169,15 +5736,250 @@ return false;
     }
     hidePrivateChannels() {
         try {
-            const dmRows = document.querySelectorAll('[data-list-item-id^="private-channels___"]:not([data-hidden-blocked="true"]), [class*="privateChannels"] [class*="channel"]:not([data-hidden-blocked="true"])');
+            const dmRows = document.querySelectorAll('[data-list-item-id*="private-channels"][data-list-item-id*="___"]:not([data-hidden-blocked="true"]), [class*="privateChannels"] [class*="channel"]:not([data-hidden-blocked="true"])');
             for (let i = 0; i < dmRows.length; i++) {
                 const row = dmRows[i];
+                if (this._isGroupDmRow(row)) {
+                    if (row.dataset.nmbRelabeled !== "true") {
+                        row.setAttribute("data-nmb-relabel-pending", "true");
+                    }
+                    this.relabelGroupDmRow(row);
+                    continue;
+                }
                 const userId = this.findUserId(row);
                 if (userId && this.shouldHide(userId)) {
                     this.hideElement(row, "dm-blocked", userId);
                 }
             }
         } catch (_) {}
+    }
+    relabelGroupDmRow(row) {
+        try {
+            const channelId = this.findChannelId(row);
+            const channel = channelId ? this.modules.ChannelStore?.getChannel?.(channelId) : null;
+            if (!channel?.isGroupDM?.()) {
+                row.dataset.nmbRelabeled = "true";
+                row.removeAttribute("data-nmb-relabel-pending");
+                return;
+            }
+            this._relabelGroupDmAvatarStack(row);
+            const rawResult = this.getGroupDMRawRecipientIds(channel);
+            if (rawResult === null) {
+                const retryCount = Number(row.dataset.nmbRelabelRetryCount || 0);
+                if (retryCount >= 10) {
+                    row.dataset.nmbRelabeled = "true";
+                    row.removeAttribute("data-nmb-relabel-pending");
+                    return;
+                }
+                if (!row.dataset.nmbRelabelRetryScheduled) {
+                    row.dataset.nmbRelabelRetryScheduled = "true";
+                    setTimeout(() => {
+                        delete row.dataset.nmbRelabelRetryScheduled;
+                        row.dataset.nmbRelabelRetryCount = String(retryCount + 1);
+                        if (row.isConnected) this.relabelGroupDmRow(row);
+                        else row.removeAttribute?.("data-nmb-relabel-pending");
+                    }, 400);
+                }
+                return;
+            }
+            const allIds = rawResult;
+            if (!allIds.length) {
+                row.dataset.nmbRelabeled = "true";
+                row.removeAttribute("data-nmb-relabel-pending");
+                return;
+            }
+            const visibleIds = allIds.filter(id => !this.shouldHide(id?.id || id));
+            const userStore = this.modules.UserStore;
+            const nameFor = id => {
+                try {
+                    const u = userStore?.getUser?.(id?.id || id);
+                    return u?.globalName || u?.username || (id?.id || id);
+                } catch (_) { return id?.id || id; }
+            };
+            const newName = visibleIds.length
+                ? visibleIds.map(nameFor).join(", ")
+                : (row.querySelector(".nmb-empty-group-fallback-name")?.textContent || "Grupo");
+            const memberCount = visibleIds.length + 1;
+            row.querySelectorAll('[class*="name__"] [class*="overflow"], [class*="channelNameMeasurement"]').forEach(el => {
+                if (el.textContent === newName) return;
+                if (el.dataset.nmbOrigText === undefined) el.dataset.nmbOrigText = el.textContent;
+                el.textContent = newName;
+            });
+            row.querySelectorAll('[class*="subtext__"]').forEach(el => {
+                const formatted = this._formatMemberCount(memberCount, el.textContent);
+                if (el.textContent === formatted) return;
+                if (el.dataset.nmbOrigText === undefined) el.dataset.nmbOrigText = el.textContent;
+                el.textContent = formatted;
+            });
+            const link = row.querySelector("a[aria-label]");
+            if (link) {
+                const suffix = link.getAttribute("aria-label")?.match(/\(([^)]*)\),\s*\d+\s*.*/)?.[1];
+                const newAriaLabel = `${newName}${suffix ? ` (${suffix})` : ""}, ${this._formatMemberCount(memberCount, "")}`.trim();
+                if (link.getAttribute("aria-label") !== newAriaLabel) {
+                    if (link.dataset.nmbOrigAriaLabel === undefined) link.dataset.nmbOrigAriaLabel = link.getAttribute("aria-label") || "";
+                    link.setAttribute("aria-label", newAriaLabel);
+                }
+            }
+            row.dataset.nmbRelabeled = "true";
+            row.removeAttribute("data-nmb-relabel-pending");
+        } catch (_) {}
+    }
+    static get GROUP_DM_DEFAULT_AVATAR_SRC() {
+        return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAMAAADVRocKAAAAclBMVEXkQjX////zrKf85+b40Mz1uLPrcWf629nnWU776OblTULnWk7+8/LmTkLlTkL63Nn2xL/uiYHtfXTxoJr629rzraf0rKfuiYDqcWj98/LvlY3vlI3zrKbsfXTyoJrwlY3xoZr75+btiYH0ubPwlI3pZVsifO9tAAABD0lEQVR4Xu3Vx2oFMQyF4XNsTy+3l/T+/q+YKxADJslA7miToG/zgzfC2CD8lnPOOeecc86dQ0OuihriSWqqPVDd42KIUksVJ6sRwFZr5UA13aGXmqmZKQHstDYKZgKAUmtjz0wE0GltMEc9498Z0DBTARi0NgIzBYCz1kbJTCcztUaOnOjvjFI7w4qTagRw0poZjlRhBNBGqa2u2JMvoYTYaieufQ3rpif7JoVNDWunxEzaQKCULvcQ+UXcQDxKF2rf+K1ixEWSLtJWzOWrueulSyT+KOFiJ13gmTNuAQzaK9WRM25GAEl7nRNn3QF4l5q/gFoD+NBep+GsqI8QzZb93PL//wOcc84555xz7hP3uQljb066+AAAAABJRU5ErkJggg==";
+    }
+    getGroupDMIconURL(channel) {
+        if (!channel) return null;
+        try {
+            if (channel.icon) {
+                return `https://cdn.discordapp.com/channel-icons/${channel.id}/${channel.icon}.png?size=128`;
+            }
+        } catch (_) {}
+        return ByeBlocked.GROUP_DM_DEFAULT_AVATAR_SRC;
+    }
+    _relabelGroupDmAvatarStack(row) {
+        try {
+            const existingFresh = row.querySelector('img[data-nmb-fresh-avatar="true"]');
+            if (existingFresh) {
+                if (existingFresh.parentElement && existingFresh.parentElement.matches?.('[class*="avatarStack"], [class*="avatarMulti"]')) {
+                    return;
+                }
+                const leakedStacks = row.querySelectorAll('[class*="avatarStack"], [class*="avatarMulti"]');
+                for (const stack of leakedStacks) {
+                    if (stack.contains(existingFresh)) continue;
+                    const imgs = stack.querySelectorAll("img");
+                    for (const img of imgs) img.remove();
+                    stack.style.clipPath = "none";
+                    stack.style.overflow = "visible";
+                    stack.appendChild(existingFresh);
+                    break;
+                }
+                return;
+            }
+            const avatarImgs = Array.from(row.querySelectorAll?.(
+                'img[src*="/avatars/"], img[src*="/embed/avatars/"], img[src*="/assets/"], img[src*="/channel-icons/"], [class*="avatarStack"] img, [class*="avatar__"] img'
+            ) || []);
+            if (!avatarImgs.length) return;
+            const channelId = this.findChannelId(row);
+            const channel = channelId ? this.modules.ChannelStore?.getChannel?.(channelId) : null;
+            const defaultSrc = this.getGroupDMIconURL(channel);
+            if (!defaultSrc) return;
+            let visibleCount = null;
+            try {
+                if (channel?.isGroupDM?.()) {
+                    const allIds = this.getGroupDMRawRecipientIds(channel);
+                    if (Array.isArray(allIds)) {
+                        visibleCount = allIds.filter(id => !this.shouldHide(id?.id || id)).length;
+                    }
+                }
+            } catch (_) {}
+            const shouldCollapseToSingle = visibleCount !== null && visibleCount <= 1 && avatarImgs.length > 1;
+            if (shouldCollapseToSingle) {
+                const stackContainer = row.querySelector('[class*="avatarStack"], [class*="avatarMulti"]') || avatarImgs[0].closest('a, div');
+                if (stackContainer) {
+                    const freshImg = document.createElement("img");
+                    freshImg.src = defaultSrc;
+                    freshImg.alt = "";
+                    freshImg.setAttribute("data-nmb-fresh-avatar", "true");
+                    freshImg.style.cssText = "width:32px;height:32px;min-width:32px;min-height:32px;border-radius:50%;object-fit:cover;display:block;";
+                    while (stackContainer.firstChild) stackContainer.removeChild(stackContainer.firstChild);
+                    stackContainer.style.clipPath = "none";
+                    stackContainer.style.overflow = "visible";
+                    stackContainer.appendChild(freshImg);
+                } else {
+                    const keep = avatarImgs[0];
+                    if (keep.dataset.nmbOrigSrc === undefined) keep.dataset.nmbOrigSrc = keep.src;
+                    keep.src = defaultSrc;
+                }
+                return;
+            }
+            for (const img of avatarImgs) {
+                const currentBase = (img.src || "").split("?")[0];
+                const targetBase = defaultSrc.split("?")[0];
+                if (currentBase === targetBase) continue;
+                if (img.dataset.nmbOrigSrc === undefined) img.dataset.nmbOrigSrc = img.src;
+                img.src = defaultSrc;
+            }
+        } catch (_) {}
+    }
+    _formatMemberCount(count, originalText) {
+        try {
+            const match = (originalText || "").match(/\d+\s*(.*)$/);
+            const label = match ? match[1] : (count === 1 ? "membro" : "membros");
+            return `${count} ${label}`;
+        } catch (_) {
+            return `${count} membros`;
+        }
+    }
+    _groupDmRowLeaksBlockedName(row) {
+        try {
+            const avatars = row.querySelectorAll?.('img[src*="/avatars/"]') || [];
+            for (const avatar of avatars) {
+                const m = avatar.src?.match(/\/avatars\/(\d{17,20})/);
+                if (m && this.shouldHide(m[1])) return true;
+            }
+        } catch (_) {}
+        try {
+            const channelId = this.findChannelId(row);
+            const channel = channelId ? this.modules.ChannelStore?.getChannel?.(channelId) : null;
+            if (channel?.isGroupDM?.()) {
+                const allIds = this.getGroupDMRawRecipientIds(channel) || [];
+                const userStore = this.modules.UserStore;
+                const blockedHashes = new Set();
+                for (const entry of allIds) {
+                    const id = entry?.id || entry;
+                    if (!id || !this.shouldHide(id)) continue;
+                    const u = userStore?.getUser?.(id);
+                    if (u?.avatar) blockedHashes.add(u.avatar);
+                }
+                if (blockedHashes.size) {
+                    const proxiedImgs = row.querySelectorAll?.('img[src*="/assets/"], [class*="avatarStack"] img, [class*="avatar__"] img') || [];
+                    for (const img of proxiedImgs) {
+                        const hashes = this._collectAvatarHashesFromImg(img);
+                        for (const h of hashes) {
+                            if (blockedHashes.has(h)) return true;
+                        }
+                    }
+                }
+            }
+        } catch (_) {}
+        try {
+            const uidEls = row.querySelectorAll?.("[data-user-id]") || [];
+            for (const node of uidEls) {
+                const id = node.dataset?.userId;
+                if (id && this.shouldHide(id)) return true;
+            }
+        } catch (_) {}
+        try {
+            if (row.dataset?.nmbRelabeled !== "true") {
+                const channelId = this.findChannelId(row);
+                const channel = channelId ? this.modules.ChannelStore?.getChannel?.(channelId) : null;
+                if (channel?.isGroupDM?.()) {
+                    const allIds = this.getGroupDMRawRecipientIds(channel) || [];
+                    if (allIds.some(id => this.shouldHide(id?.id || id))) return true;
+                }
+            }
+        } catch (_) {}
+        return false;
+    }
+    refreshGroupDmLabels() {
+        try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
+        try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+    }
+    _isGroupDmRow(row) {
+        if (row.dataset.nmbIsGroupDm === "true") return true;
+        try {
+            const channelId = this.findChannelId(row);
+            const channel = channelId ? this.modules.ChannelStore?.getChannel?.(channelId) : null;
+            if (channel?.isGroupDM) {
+                const result = channel.isGroupDM();
+                if (result) row.dataset.nmbIsGroupDm = "true";
+                return result;
+            }
+        } catch (_) {}
+        try {
+            if (row.querySelector?.('[class*="avatarStack"], [class*="groupAvatar"], [class*="avatarMulti"]')) return true;
+        } catch (_) {}
+        return false;
     }
     static get FIXED_DM_LIST_ITEM_SUFFIXES() {
         return [ "___friends", "___nitro", "___shop", "___quests" ];
@@ -5433,12 +6235,20 @@ return false;
                     this._scheduleForumRetry();
                 }
                 if (node.matches?.('[class*="container_"]')) this.hideTopicPanelItems();
-                if (node.matches?.('[data-list-item-id^="private-channels___"]')) this.hidePrivateChannels();
+                if (node.matches?.('[data-list-item-id*="private-channels"][data-list-item-id*="___"]') || node.closest?.('[data-list-item-id*="private-channels"][data-list-item-id*="___"]')) this.hidePrivateChannels();
                 if (places.memberList && (node.matches?.('[class*="memberRow"]') || node.querySelector?.('[class*="memberRow"]'))) {
                     this.hideMemberRows();
                 }
                 if (places.memberList && (node.matches?.('[data-list-id^="members-"]') || node.querySelector?.('[data-list-id^="members-"]'))) {
-                    this.hideMemberRows();
+                    const _container = node.matches?.('[data-list-id^="members-"]') ? node : node.querySelector('[data-list-id^="members-"]');
+                    if (_container) {
+                        try {
+                            const _items = _container.querySelectorAll('[data-list-item-id]');
+                            for (const _item of _items) {
+                                if (_item.dataset?.hiddenBlocked !== "true") this._fastHideNode(_item);
+                            }
+                        } catch (_) {}
+                    }
                 }
                 if (places.events) {
                     const eventsSidebarItem = node.matches?.('[data-list-item-id^="channels___upcoming-events-"]') ? node : node.querySelector?.('[data-list-item-id^="channels___upcoming-events-"]');
@@ -5511,6 +6321,20 @@ return false;
             }
         }
         if (this.settings.places.memberList && el.matches?.('[role="listitem"][data-list-item-id]')) {
+            const listId = el.dataset?.listItemId || "";
+            const looksLikeMemberItem = /^\d{17,20}$/.test(listId.split(/[_-]+/).pop() || "") || /^members?[_-]/.test(listId);
+            if (looksLikeMemberItem) {
+                const userId = this.findUserId(el);
+                if (userId && this.shouldHide(userId)) {
+                    this.hideElement(el, "fast-sidebar-member-row", userId);
+                    try {
+                        this.fixMemberGroupCounts();
+                    } catch (_) {}
+                    return;
+                }
+            }
+        }
+        if (this.settings.places.memberList && el.matches?.('[data-list-item-id]') && !el.matches?.('[role="listitem"]') && el.closest?.('[data-list-id^="members-"]')) {
             const listId = el.dataset?.listItemId || "";
             const looksLikeMemberItem = /^\d{17,20}$/.test(listId.split(/[_-]+/).pop() || "") || /^members?[_-]/.test(listId);
             if (looksLikeMemberItem) {
@@ -5695,6 +6519,9 @@ return false;
                 if (this.settings.places?.reactions) {
                     this.fixReactionCounts();
                     this.hideBlockedReactors();
+                }
+                if (this.settings.places?.groupDms || this.settings.places?.messages) {
+                    this.hidePrivateChannels();
                 }
                 return;
             }
@@ -5892,7 +6719,6 @@ return false;
         if (!el.hasAttribute("data-nmb-prev-ghost-style")) {
             el.setAttribute("data-nmb-prev-ghost-style", el.getAttribute("style") || "");
         }
-        el.style.cssText = `\n            display: none !important;\n            height: 0 !important;\n            min-height: 0 !important;\n            max-height: 0 !important;\n            padding: 0 !important;\n            margin: 0 !important;\n            overflow: hidden !important;\n            contain: size style !important;\n        `;
     }
     hidePinnedMessages() {
         if (!this.settings.places?.messages) return;
@@ -6017,6 +6843,22 @@ return false;
                 continue;
             }
             const reason = el.dataset?.nmbReason;
+            if (reason === "blocked-ringing-overlay") {
+                this.restoreElement(el);
+                const wrapper = el.closest('[class*="wrapper_"]');
+                if (wrapper) {
+                    delete wrapper.dataset.nmbRingingCollapsed;
+                    const prev = wrapper.getAttribute("data-nmb-prev-ringing-style");
+                    if (prev) wrapper.setAttribute("style", prev); else wrapper.removeAttribute("style");
+                    wrapper.removeAttribute("data-nmb-prev-ringing-style");
+                    const prevMin = wrapper.dataset?.nmbPrevMinClasses;
+                    if (prevMin) {
+                        wrapper.classList.add(...prevMin.split(' '));
+                        delete wrapper.dataset.nmbPrevMinClasses;
+                    }
+                }
+                continue;
+            }
             if (reason === "pin-by-blocked" || reason === "fast-pin-by-blocked") {
                 const listId = el.dataset?.listItemId || "";
                 const pinMatch = listId.match(/^pins_+(\d{17,20})$/);
@@ -6100,6 +6942,17 @@ return false;
             delete slot.dataset.nmbGhost;
             slot.removeAttribute("data-nmb-prev-ghost-style");
         });
+        document.querySelectorAll('[data-nmb-ringing-collapsed="true"]').forEach(wrapper => {
+            delete wrapper.dataset.nmbRingingCollapsed;
+            const prev = wrapper.getAttribute("data-nmb-prev-ringing-style");
+            if (prev) wrapper.setAttribute("style", prev); else wrapper.removeAttribute("style");
+            wrapper.removeAttribute("data-nmb-prev-ringing-style");
+            const prevMin = wrapper.dataset?.nmbPrevMinClasses;
+            if (prevMin) {
+                wrapper.classList.add(...prevMin.split(' '));
+                delete wrapper.dataset.nmbPrevMinClasses;
+            }
+        });
         document.querySelectorAll('[data-nmb-sidebar-hidden="true"]').forEach(el => this._clearEventsSidebarOverlay(el));
         document.querySelectorAll('[data-nmb-orig-text]').forEach(el => el.removeAttribute("data-nmb-orig-text"));
         document.querySelectorAll(".nmb-pins-empty-placeholder").forEach(el => el.remove());
@@ -6108,6 +6961,13 @@ return false;
             const prev = el.getAttribute("data-nmb-prev-footer-html");
             if (prev !== null) el.innerHTML = prev;
             el.removeAttribute("data-nmb-prev-footer-html");
+        });
+        document.querySelectorAll("[data-nmb-prev-ringing-style]").forEach(el => {
+            const prev = el.getAttribute("data-nmb-prev-ringing-style");
+            if (prev != null) el.setAttribute("style", prev); else el.removeAttribute("style");
+            el.removeAttribute("data-nmb-prev-ringing-style");
+            el.removeAttribute("data-nmb-ringing-collapsed");
+            el.removeAttribute("data-nmb-prev-min-classes");
         });
         document.querySelectorAll("[data-nmb-prev-residue-style]").forEach(el => {
             const prev = el.getAttribute("data-nmb-prev-residue-style");
@@ -6129,6 +6989,39 @@ return false;
         document.querySelectorAll('[data-nmb-topic-scroller-hidden="true"]').forEach(scrollerContent => {
             const listRoot = scrollerContent.parentElement;
             this._restoreTopicPanelListLayout(listRoot, scrollerContent);
+        });
+        document.querySelectorAll('[data-nmb-ringing-collapsed="true"]').forEach(wrapper => {
+            const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+            if (!channelId) return;
+            const CallStore = this.modules.CallStore;
+            const call = CallStore?.getCall?.(channelId);
+            const hasRingingSignal = this._hasBlockedRinging(channelId);
+            let hasBlockedParticipant = false;
+            try {
+                const states = this.getRawVoiceStatesForChannel(channelId) || [];
+                if (states.length) {
+                    const selfId = this._getSelfUserId();
+                    const iAmIn = states.some(s => this.extractUserId(s) === selfId);
+                    if (!iAmIn) {
+                        hasBlockedParticipant = states.some(s => this.shouldHide(this.extractUserId(s)));
+                    }
+                }
+            } catch (_) {}
+            if (!hasRingingSignal && !(call && hasBlockedParticipant)) {
+                const prevStyle = wrapper.getAttribute("data-nmb-prev-ringing-style");
+                if (prevStyle != null) {
+                    wrapper.setAttribute("style", prevStyle);
+                } else {
+                    wrapper.removeAttribute("style");
+                }
+                wrapper.removeAttribute("data-nmb-prev-ringing-style");
+                wrapper.removeAttribute("data-nmb-ringing-collapsed");
+                const prevMinClasses = wrapper.dataset.nmbPrevMinClasses;
+                if (prevMinClasses) {
+                    prevMinClasses.split(' ').forEach(c => { if (c) wrapper.classList.add(c); });
+                }
+                wrapper.removeAttribute("data-nmb-prev-min-classes");
+            }
         });
         this.hiddenElements.clear();
         this.hiddenParents.clear();
@@ -6167,6 +7060,91 @@ return false;
         this.hideBlockedStageNotice();
         this.hideActivityUsers();
         this.hideCallGridTiles();
+        this.hideBlockedRingingOverlay();
+    }
+    hideBlockedRingingOverlay() {
+        if (!this.settings.behavior.blockRingingFromBlocked) return;
+        const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+        if (!channelId) return;
+        const CallStore = this.modules.CallStore;
+        const call = CallStore?.getCall?.(channelId);
+        const hasRingingSignal = this._hasBlockedRinging(channelId);
+        let hasBlockedParticipant = false;
+        let blockedUserId = null;
+        try {
+            const states = this.getRawVoiceStatesForChannel(channelId) || [];
+            if (states.length) {
+                const selfId = this._getSelfUserId();
+                const iAmIn = states.some(s => this.extractUserId(s) === selfId);
+                if (!iAmIn) {
+                    const blocked = states.find(s => this.shouldHide(this.extractUserId(s)));
+                    if (blocked) {
+                        hasBlockedParticipant = true;
+                        blockedUserId = this.extractUserId(blocked);
+                    }
+                }
+            }
+        } catch (_) {}
+        if (!hasRingingSignal && !(call && hasBlockedParticipant)) {
+            this._restoreBlockedRingingElements();
+            return;
+        }
+        const candidates = document.querySelectorAll(
+            '[class*="callContainer_"]:not([data-hidden-blocked="true"]),' +
+            '[class*="ringingSection"]:not([data-hidden-blocked="true"]),' +
+            '[class*="ringingBar_"]:not([data-hidden-blocked="true"]),' +
+            '[class*="callSection_"]:not([data-hidden-blocked="true"]),' +
+            '[class*="incomingCall"]:not([data-hidden-blocked="true"]),' +
+            '[class*="noChannel"]:not([data-hidden-blocked="true"]),' +
+            '[class*="emptyStatePreview"]:not([data-hidden-blocked="true"])'
+        );
+        for (let i = 0; i < candidates.length; i++) {
+            const el = candidates[i];
+            if (el.dataset?.hiddenBlocked === "true") continue;
+            const hasAvatars = !!el.querySelector('img[class*="avatar" i], [class*="avatar_"]');
+            const hasVoiceButtons = !!el.querySelector(
+                'button[aria-label*="chamada" i], button[aria-label*="call" i],' +
+                'button[aria-label*="vídeo" i], button[aria-label*="video" i]'
+            );
+            if (!hasAvatars || !hasVoiceButtons) continue;
+            this.hideElement(el, "blocked-ringing-overlay", blockedUserId);
+        }
+        const hiddenCalls = document.querySelectorAll(
+            '[class*="callContainer_"][data-hidden-blocked="true"][data-nmb-reason="blocked-ringing-overlay"]'
+        );
+        for (const callEl of hiddenCalls) {
+            const wrapper = callEl.closest('[class*="wrapper_"]');
+            if (!wrapper || wrapper.dataset?.nmbRingingCollapsed === "true") continue;
+            wrapper.dataset.nmbRingingCollapsed = "true";
+            if (!wrapper.hasAttribute("data-nmb-prev-ringing-style")) {
+                wrapper.setAttribute("data-nmb-prev-ringing-style", wrapper.getAttribute("style") || "");
+            }
+            const minClasses = Array.from(wrapper.classList).filter(c => c.includes('minimum'));
+            if (minClasses.length > 0) {
+                wrapper.dataset.nmbPrevMinClasses = minClasses.join(' ');
+                wrapper.classList.remove(...minClasses);
+            }
+            wrapper.style.setProperty("min-height", "0", "important");
+            wrapper.style.setProperty("background", "none", "important");
+        }
+    }
+    _restoreBlockedRingingElements() {
+        const hidden = document.querySelectorAll('[data-hidden-blocked="true"][data-nmb-reason="blocked-ringing-overlay"]');
+        for (const el of hidden) {
+            this.restoreElement(el);
+            const wrapper = el.closest('[class*="wrapper_"]');
+            if (wrapper) {
+                delete wrapper.dataset.nmbRingingCollapsed;
+                const prev = wrapper.getAttribute("data-nmb-prev-ringing-style");
+                if (prev) wrapper.setAttribute("style", prev); else wrapper.removeAttribute("style");
+                wrapper.removeAttribute("data-nmb-prev-ringing-style");
+                const prevMin = wrapper.dataset?.nmbPrevMinClasses;
+                if (prevMin) {
+                    wrapper.classList.add(...prevMin.split(' '));
+                    delete wrapper.dataset.nmbPrevMinClasses;
+                }
+            }
+        }
     }
     hideCallGridTiles() {
         const els = document.querySelectorAll('[class*="tileSizer"], [class*="tile_"], [class*="videoWrapper_"], [class*="voiceUserTile"], [class*="participants_"] > *, [class*="gridLayout_"] [class*="participant"], [class*="callContainer_"] [class*="wrapper_"], [class*="participantWrapper_"], [aria-label*="grid" i] [class*="participant"], [role="grid"] [class*="participant"]');
@@ -7514,6 +8492,7 @@ return false;
         }
         if (sawMember) return count;
         if (sawAnySibling && this._headerReportsNonZeroCount(header)) return 0;
+        if (!sawAnySibling && this._headerReportsNonZeroCount(header) && header.nextElementSibling && this.isMemberGroupHeader(header.nextElementSibling)) return 0;
         return null;
     }
     _headerReportsNonZeroCount(header) {
@@ -7724,6 +8703,11 @@ return false;
                 const memberIds = new Set(states.map(s => this.extractUserId(s)).filter(Boolean));
                 if (memberIds.size) this._voiceChannelMemberIds.set(channelId, memberIds);
             });
+            const seededVoiceChannelId = this._getSelfVoiceChannelId();
+            if (seededVoiceChannelId) {
+                this._lastSelfVoiceChannelId = seededVoiceChannelId;
+                if (!this._selfJoinTimestamp) this._selfJoinTimestamp = Date.now();
+            }
         } catch (_) {}
         this._seedBlockedChannelStatuses();
     }
@@ -7789,6 +8773,10 @@ return false;
                 if (newChannelId) statusChannelsToReevaluate.add(newChannelId);
             }
             if (selfId && userId === selfId) {
+                if (oldChannelId !== newChannelId) {
+                    this._selfJoinTimestamp = Date.now();
+                    this._lastSelfVoiceChannelId = newChannelId || null;
+                }
                 if (oldChannelId) this._voiceFakeTimers.delete(oldChannelId);
                 if (!newChannelId) {
                     this._releaseAllVoiceMutes();
@@ -7802,12 +8790,14 @@ return false;
 
                 if (selfId && userId === selfId) {
                     let othersBeforeIEntered = [ ...existingMembers ].filter(id => id !== selfId);
+                    let usedFallback = false;
 
                     if (!othersBeforeIEntered.length) {
                         const rawStates = this.getRawVoiceStatesForChannel(newChannelId) || [];
                         othersBeforeIEntered = rawStates
                             .map(s => this.extractUserId(s))
                             .filter(id => id && id !== selfId);
+                        usedFallback = true;
                     }
 
                     const anyBlockedBefore = othersBeforeIEntered.some(id => this.shouldHide(id));
@@ -7818,6 +8808,33 @@ return false;
                     try {
                         this._applyVoiceMuteForChannel(newChannelId);
                     } catch (_) {}
+
+                    if (usedFallback && !othersBeforeIEntered.length) {
+                        const recheck = (attempt) => {
+                            if (!this.isRunning) return;
+                            const currentChannelId = this._getMediaEngineContext()?.channelId || null;
+                            if (currentChannelId !== newChannelId) return;
+                            const existingTimer = this._voiceFakeTimers.get(newChannelId);
+                            if (existingTimer?.joinStamp === this._selfJoinTimestamp) return;
+                            const rawStates = this.getRawVoiceStatesForChannel(newChannelId) || [];
+                            const memberIds = rawStates.map(s => this.extractUserId(s)).filter(id => id && id !== selfId);
+                            if (memberIds.length) {
+                                const memberSet = prevMembers.get(newChannelId) || new Set;
+                                for (const id of memberIds) memberSet.add(id);
+                                memberSet.add(selfId);
+                                prevMembers.set(newChannelId, memberSet);
+                            }
+                            const stillBlockedOnly = memberIds.length && memberIds.every(id => this.shouldHide(id));
+                            if (stillBlockedOnly) {
+                                this._resetFakeVoiceTimer(newChannelId);
+                                try { this._applyVoiceMuteForChannel(newChannelId); } catch (_) {}
+                                try { this.fixVoiceChannelIconColors(); } catch (_) {}
+                            } else if (attempt < 2) {
+                                setTimeout(() => recheck(attempt + 1), 800);
+                            }
+                        };
+                        setTimeout(() => recheck(0), 400);
+                    }
                 }
             }
         }
@@ -7969,12 +8986,173 @@ return false;
             }
         }
     }
+    _getSelfVoiceChannelId() {
+        try {
+            const rtcChannelId = this._getMediaEngineContext()?.channelId || null;
+            if (rtcChannelId) return rtcChannelId;
+        } catch (_) {}
+        try {
+            return this.modules.SelectedChannelStore?.getVoiceChannelId?.() || null;
+        } catch (_) {}
+        return this._lastSelfVoiceChannelId || null;
+    }
+    _isSelfInBlockedOnlyCall(channelId, states) {
+        if (!channelId) return false;
+        const selfId = this._getSelfUserId();
+        const selfHere = this._channelContainsSelf(channelId, states)
+            || this._getSelfVoiceChannelId() === channelId
+            || this._lastSelfVoiceChannelId === channelId;
+        if (!selfHere) return false;
+        const others = (Array.isArray(states) ? states : [])
+            .map(s => this.extractUserId(s))
+            .filter(id => id && id !== selfId);
+        if (!others.length) {
+            const rawStates = this.getRawVoiceStatesForChannel(channelId) || [];
+            const fallbackOthers = rawStates
+                .map(s => this.extractUserId(s))
+                .filter(id => id && id !== selfId);
+            return fallbackOthers.length > 0 && fallbackOthers.every(id => this.shouldHide(id));
+        }
+        return others.every(id => this.shouldHide(id));
+    }
     _resetFakeVoiceTimer(channelId) {
         this._voiceFakeTimers.set(channelId, {
             startedAt: Date.now(),
-            active: true
+            active: true,
+            joinStamp: this._selfJoinTimestamp || Date.now()
         });
         this._ensureFakeTimerTicker();
+    }
+    patchBlockedCallRinging() {
+        if (this._callRingingPatched) return;
+        const Dispatcher = this.modules.Dispatcher;
+        if (!Dispatcher || typeof Dispatcher.dispatch !== "function") return;
+        this._callRingingPatched = true;
+        this._blockedRingingChannels = this._blockedRingingChannels || new Map;
+        const self = this;
+        this.patchInstead(Dispatcher, "dispatch", function(ctx, args, orig) {
+            let action = args[0];
+            if (!self.settings.behavior.blockRingingFromBlocked || !action || typeof action !== "object") {
+                return orig.apply(ctx, args);
+            }
+            try {
+                if ((action.type === self.constructor.ACTIONS.CALL_CREATE || action.type === self.constructor.ACTIONS.CALL_UPDATE)
+                    && action.ongoingRings && typeof action.ongoingRings === "object") {
+                    const selfId = self._getSelfUserId();
+                    const starterId = selfId ? action.ongoingRings[selfId] : null;
+                    if (selfId && starterId && self.shouldHide(starterId)) {
+                        self._blockedRingingChannels.set(action.channelId, true);
+                        self._blockedAutoJoinGuard = self._blockedAutoJoinGuard || new Map;
+                        self._blockedAutoJoinGuard.set(action.channelId, Date.now());
+                        const nextRings = { ...action.ongoingRings };
+                        delete nextRings[selfId];
+                        action = { ...action, ongoingRings: nextRings };
+                        args = [action, ...args.slice(1)];
+                    } else if (selfId && !starterId) {
+                        self._blockedRingingChannels.delete(action.channelId);
+                    }
+                } else if (action.type === self.constructor.ACTIONS.CALL_DELETE) {
+                    self._blockedRingingChannels.delete(action.channelId);
+                    self._blockedAutoJoinGuard?.delete(action.channelId);
+                } else if (action.type === self.constructor.ACTIONS.VOICE_CHANNEL_SELECT) {
+                    const targetChannelId = action.channelId;
+                    const markedAt = targetChannelId ? self._blockedAutoJoinGuard?.get(targetChannelId) : null;
+                    if (markedAt && Date.now() - markedAt < 5000 && !action.currentVoiceChannelId) {
+                        return;
+                    }
+                }
+            } catch (_) {}
+            return orig.apply(ctx, args);
+        });
+    }
+    patchHideBlockedCallUI() {
+        if (this._callUiPatched) return;
+        let CallButtons = null;
+        try {
+            const mod = this._wpGetModuleBySourceAny("renderVoiceCallButton", "renderVideoCallButton");
+            if (mod && typeof mod === "object") {
+                for (const key of Object.keys(mod)) {
+                    const val = mod[key];
+                    if (val && val.prototype && typeof val.prototype.render === "function" && typeof val.prototype.renderVoiceCallButton === "function") {
+                        CallButtons = val;
+                        break;
+                    }
+                }
+                if (!CallButtons) {
+                    if (mod.prototype && typeof mod.prototype.render === "function") CallButtons = mod;
+                }
+            }
+        } catch (_) {}
+        if (!CallButtons || !CallButtons.prototype || typeof CallButtons.prototype.render !== "function") return;
+        this._callUiPatched = true;
+        this._blockedRingingChannels = this._blockedRingingChannels || new Map;
+        const self = this;
+        this.patchBefore(CallButtons.prototype, "render", function(ctx) {
+            try {
+                const props = ctx?.props;
+                if (!self.settings.behavior.blockRingingFromBlocked || !props || typeof props !== "object") return;
+                const channelId = props.channel?.id;
+                if (channelId && self._hasBlockedRinging(channelId) && props.callActive) {
+                    ctx.__byeblockedOrigProps = props;
+                    ctx.props = { ...props, callActive: false, inCall: false };
+                }
+            } catch (_) {}
+        });
+        this.patchAfter(CallButtons.prototype, "render", function(ctx) {
+            try {
+                if (ctx?.__byeblockedOrigProps) {
+                    ctx.props = ctx.__byeblockedOrigProps;
+                    delete ctx.__byeblockedOrigProps;
+                }
+            } catch (_) {}
+        });
+    }
+    _hasBlockedRinging(channelId) {
+        if (!channelId || !this._blockedRingingChannels) return false;
+        return !!this._blockedRingingChannels.get(channelId);
+    }
+    patchRingtoneAudio() {
+        if (this._ringtoneAudioPatched) return;
+        this._ringtoneAudioPatched = true;
+        const self = this;
+        const proto = HTMLMediaElement.prototype;
+        const origPlay = proto.play;
+        this._origMediaPlay = origPlay;
+        proto.play = function(...args) {
+            try {
+                if (self.settings.behavior.blockRingingFromBlocked && this.loop) {
+                    if (self._hasRecentBlockedRinging()) {
+                        try { this.pause(); } catch (_) {}
+                        try { this.muted = true; } catch (_) {}
+                        return Promise.resolve();
+                    }
+                    const el = this;
+                    setTimeout(() => {
+                        try {
+                            if (!el.paused && el.loop && self._hasRecentBlockedRinging()) {
+                                el.pause();
+                                el.muted = true;
+                            }
+                        } catch (_) {}
+                    }, 120);
+                }
+            } catch (_) {}
+            return origPlay.apply(this, args);
+        };
+    }
+    _hasRecentBlockedRinging() {
+        if (!this._blockedRingingChannels || !this._blockedRingingChannels.size) return false;
+        for (const [, marked] of this._blockedRingingChannels) {
+            if (marked) return true;
+        }
+        return false;
+    }
+    _unpatchRingtoneAudio() {
+        if (this._origMediaPlay) {
+            HTMLMediaElement.prototype.play = this._origMediaPlay;
+            this._origMediaPlay = null;
+        }
+        this._ringtoneAudioPatched = false;
     }
     _ensureFakeTimerTicker() {
         if (this._voiceFakeTimerTick) return;
@@ -8031,14 +9209,29 @@ return false;
     _showFakeVoiceTimer(channelRow, channelId) {
         let state = this._voiceFakeTimers.get(channelId);
         if (!state) {
-            state = { startedAt: Date.now(), active: true };
+            state = { startedAt: Date.now(), active: true, joinStamp: this._selfJoinTimestamp || Date.now() };
             this._voiceFakeTimers.set(channelId, state);
             this._ensureFakeTimerTicker();
         } else if (!state.active) {
             state.active = true;
         }
         const timerContainer = channelRow.querySelector('[class*="tabularNumbers"], [class*="timer"][role="timer"]');
-        if (!timerContainer) { state.active = false; return; }
+        if (!timerContainer) {
+            if (!state.retryCount) state.retryCount = 0;
+            if (state.retryCount < 10) {
+                state.retryCount++;
+                state.active = true;
+                setTimeout(() => {
+                    if (!this.isRunning) return;
+                    const freshRow = this._findChannelRowById(channelId);
+                    if (freshRow) this._showFakeVoiceTimer(freshRow, channelId);
+                }, 150);
+            } else {
+                state.active = false;
+            }
+            return;
+        }
+        state.retryCount = 0;
         if (timerContainer.dataset.hiddenBlocked === "true") {
             this.restoreElement(timerContainer);
         }
@@ -8077,6 +9270,7 @@ return false;
                 anchor.appendChild(fakeEl);
             }
         }
+        if (fakeEl.dataset.hiddenBlocked === "true") this.restoreElement(fakeEl);
         fakeEl.style.cssText = `
             font-family: ${computedSnapshot.fontFamily};
             font-size: ${computedSnapshot.fontSize};
@@ -8144,14 +9338,19 @@ return false;
             const isHiddenOnly = allHidden || activeOnlyByDom;
             const hasBlockedUsers = anyBlocked || activeOnlyByDom;
             const isMixedChannel = states.length > 0 && anyBlocked && !allHidden;
-            let fakeResetExists = this._voiceFakeTimers.has(channelId);
-            const selfHereWithOnlyBlocked = isHiddenOnly && !isMixedChannel && this._channelContainsSelf(channelId, states);
-            let mySelectedVoiceChannelId = null;
-            try { mySelectedVoiceChannelId = this.modules.SelectedChannelStore?.getVoiceChannelId?.() || null; } catch (_) {}
-            const selfDefinitelyElsewhere = mySelectedVoiceChannelId && mySelectedVoiceChannelId !== channelId;
-            if (this.settings.places.voiceChannels && !fakeResetExists && selfHereWithOnlyBlocked && !selfDefinitelyElsewhere) {
-                this._resetFakeVoiceTimer(channelId);
-                fakeResetExists = true;
+            let timerState = this._voiceFakeTimers.get(channelId);
+            let fakeResetExists = !!timerState;
+            const selfInBlockedOnlyCall = this._isSelfInBlockedOnlyCall(channelId, states);
+            const myVoiceChannelId = this._getSelfVoiceChannelId();
+            const selfOnThisChannel = myVoiceChannelId === channelId
+                || (!myVoiceChannelId && this._lastSelfVoiceChannelId === channelId);
+            const selfDefinitelyElsewhere = myVoiceChannelId && myVoiceChannelId !== channelId;
+            if (this.settings.places.voiceChannels && selfInBlockedOnlyCall && selfOnThisChannel) {
+                if (!timerState || timerState.joinStamp !== this._selfJoinTimestamp) {
+                    this._resetFakeVoiceTimer(channelId);
+                    timerState = this._voiceFakeTimers.get(channelId);
+                    fakeResetExists = true;
+                }
             }
             if (fakeResetExists && selfDefinitelyElsewhere) {
                 this._voiceFakeTimers.delete(channelId);
@@ -8425,6 +9624,51 @@ return false;
         }
         return found;
     }
+    findAllUserIds(el) {
+        if (!el) return [];
+        const ids = new Set();
+        try {
+            const uidEls = el.querySelectorAll?.("[data-user-id]") || [];
+            for (const node of uidEls) {
+                const id = node.dataset?.userId;
+                if (id) ids.add(id);
+            }
+            if (el.dataset?.userId) ids.add(el.dataset.userId);
+        } catch (_) {}
+        try {
+            const avatars = el.querySelectorAll?.('img[src*="/avatars/"]') || [];
+            for (const avatar of avatars) {
+                const m = avatar.src?.match(/\/avatars\/(\d{17,20})/);
+                if (m) ids.add(m[1]);
+            }
+        } catch (_) {}
+        try {
+            this._walkFiberPropsShallow(el, props => {
+                for (const id of this._extractAllUserIds(props)) ids.add(id);
+            });
+        } catch (_) {}
+        if (!ids.size) {
+            const single = this.findUserId(el);
+            if (single) ids.add(single);
+        }
+        return Array.from(ids);
+    }
+    _extractAllUserIds(value, depth = 0, out = new Set()) {
+        if (!value || depth > 3 || typeof value !== "object") return out;
+        const recipients = value.recipients || value.rawRecipients || value.channel?.recipients || value.channel?.rawRecipients;
+        if (Array.isArray(recipients)) {
+            for (const r of recipients) {
+                const id = r?.id || r;
+                if (id && /^\d{17,20}$/.test(String(id))) out.add(String(id));
+            }
+        }
+        const single = this.extractUserId(value, depth);
+        if (single) out.add(single);
+        for (const key of [ "props", "memoizedProps", "pendingProps", "channel" ]) {
+            if (value[key]) this._extractAllUserIds(value[key], depth + 1, out);
+        }
+        return out;
+    }
     _walkFiberPropsShallow(el, visitor) {
         try {
             let fiber = BdApi.ReactUtils.getInternalInstance(el);
@@ -8468,10 +9712,13 @@ return false;
     findChannelId(el) {
         if (!el) return null;
         try {
-            const listId = el.dataset?.listItemId || "";
+            const listId = el.dataset?.listItemId || el.querySelector?.("[data-list-item-id]")?.dataset?.listItemId || "";
             const ids = listId.match(/\d{17,20}/g) || el.id?.match(/\d{17,20}/g);
             if (ids?.length) return ids[ids.length - 1];
             if (el.dataset?.channelId) return el.dataset.channelId;
+            const hrefEl = el.matches?.("a[href*='/channels/']") ? el : el.querySelector?.("a[href*='/channels/']");
+            const hrefMatch = hrefEl?.getAttribute?.("href")?.match(/\/channels\/(?:@me|\d+)\/(\d{17,20})/);
+            if (hrefMatch) return hrefMatch[1];
         } catch (_) {}
         return null;
     }
@@ -8510,7 +9757,7 @@ return false;
         el.removeAttribute("data-nmb-prev-text");
     }
     patchSound() {
-        if (!this.settings.behavior.muteVoiceJoinLeaveSound && !this.settings.behavior.muteBlockedVoiceAudio) return;
+        const voiceSoundsEnabled = this.settings.behavior.muteVoiceJoinLeaveSound || this.settings.behavior.muteBlockedVoiceAudio;
         const SoundUtils = this.modules.SoundUtils;
         if (!SoundUtils) return;
         const primaryKey = this._soundPlayKey || "playSound";
@@ -8522,6 +9769,21 @@ return false;
         this.patchInstead(SoundUtils, targetKey, function(context, args, originalMethod) {
             try {
                 const soundType = args[0];
+                if (soundType === "message1") {
+                    const pendingId = self._suppressGroupAddSoundMessageId;
+                    if (pendingId) {
+                        self._suppressGroupAddSoundMessageId = null;
+                        return;
+                    }
+                    if (self._suppressMentionSoundUntil && Date.now() <= self._suppressMentionSoundUntil) {
+                        self._suppressMentionSoundUntil = 0;
+                        return;
+                    }
+                    return originalMethod.apply(context, args);
+                }
+                if (!voiceSoundsEnabled) {
+                    return originalMethod.apply(context, args);
+                }
                 const isVoiceEvent = [ "disconnect", "user_join", "user_leave", "user_moved", "stream_started", "stream_ended", "activity_launch" ].includes(soundType);
                 if (!isVoiceEvent) {
                     return originalMethod.apply(context, args);
@@ -8830,6 +10092,153 @@ return false;
             const items = this.modules.ChannelPinsStore?.getPins?.(channelId)?.items;
             this._processPinStoreItems(channelId, items);
         } catch (_) {}
+    }
+    _handleGroupRecipientAdd(msg) {
+        try {
+            if (!msg || msg.type !== 1) return;
+            const channelId = msg.channel_id || msg.channelId;
+            const messageId = msg.id;
+            if (!channelId || !messageId) return;
+            const adderId = this._getAuthorId(msg);
+            if (!adderId) return;
+            if (this.shouldHide(adderId)) return;
+            this._markBlockedOnlyReadActivity(channelId, null, messageId);
+            this._suppressGroupAddSoundMessageId = String(messageId);
+            this._refreshTaskbarBadge();
+        } catch (_) {}
+    }
+    _scanExistingGroupRecipientAddsForChannel(channelId) {
+        try {
+            if (!channelId) return;
+            const list = this._getChannelMessagesList(channelId);
+            for (let i = 0; i < list.length; i++) {
+                const msg = list[i];
+                if (msg?.type === 1) this._handleGroupRecipientAdd(msg);
+            }
+        } catch (_) {}
+    }
+    _scanAllGroupDMsForRecipientAdds() {
+        try {
+            const pcs = this.modules.PrivateChannelStore;
+            const cs = this.modules.ChannelStore;
+            if (!pcs || !cs) return;
+            const ids = new Set;
+            try { (pcs.getPrivateChannelIds?.() || []).forEach(id => ids.add(id)); } catch (_) {}
+            try {
+                const mutable = pcs.getMutablePrivateChannels?.();
+                if (mutable && typeof mutable === "object") Object.keys(mutable).forEach(id => ids.add(id));
+            } catch (_) {}
+            for (const channelId of ids) {
+                try {
+                    const channel = cs.getChannel?.(channelId);
+                    if (channel?.isGroupDM?.()) this._scanExistingGroupRecipientAddsForChannel(channelId);
+                } catch (_) {}
+            }
+        } catch (_) {}
+    }
+    _updateGroupDMUnreadSectionGhostStyle() {
+        try {
+            const section = document.getElementById("guild-list-unread-dms");
+            if (!section) { this._removeGroupDMUnreadSectionGhostStyle(); return; }
+            const items = section.querySelectorAll('[data-list-item-id^="guildsnav___"]');
+            const suppressedIds = [];
+            for (const item of items) {
+                const listId = item.getAttribute("data-list-item-id") || "";
+                const channelId = listId.replace(/^guildsnav___/, "");
+                if (channelId && this._isChannelOnlySuppressedActivity(channelId)) {
+                    suppressedIds.push(listId);
+                }
+            }
+            const signature = suppressedIds.slice().sort().join(",");
+            if (signature === this._groupDMUnreadGhostSignature) return;
+            this._groupDMUnreadGhostSignature = signature;
+            const styleId = "ByeBlocked-guildsnav-ghost";
+            let styleEl = document.getElementById(styleId);
+            if (!suppressedIds.length) {
+                styleEl?.remove();
+                return;
+            }
+            if (!styleEl) {
+                styleEl = document.createElement("style");
+                styleEl.id = styleId;
+                (document.head || document.documentElement).appendChild(styleEl);
+            }
+            const selectors = suppressedIds.map(id => {
+                const esc = id.replace(/(["\\])/g, "\\$1");
+                return `div[style*="height"]:has([data-list-item-id="${esc}"])`;
+            }).join(",\n");
+            styleEl.textContent = `${selectors} {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }`;
+        } catch (_) {}
+    }
+    _removeGroupDMUnreadSectionGhostStyle() {
+        try {
+            document.getElementById("ByeBlocked-guildsnav-ghost")?.remove();
+            this._groupDMUnreadGhostSignature = null;
+        } catch (_) {}
+    }
+    _isChannelOnlySuppressedActivity(channelId) {
+        if (!channelId) return false;
+        try {
+            if (!this._hasBlockedOnlyReadActivity(channelId)) return false;
+            return !this._channelHasVisibleUnread(channelId);
+        } catch (_) {
+            return false;
+        }
+    }
+    _findGuildsnavItemWrapper(channelId) {
+        try {
+            const el = document.querySelector(`[data-list-item-id="guildsnav___${channelId}"]`);
+            if (!el) return null;
+            const listItem = el.closest('.listItem__650eb, [class*="listItem_"]');
+            if (listItem?.parentElement && /height\s*:/.test(listItem.parentElement.getAttribute('style') || '')) {
+                return listItem.parentElement;
+            }
+            return listItem || el.closest('div[style*="height"]') || el;
+        } catch (_) {
+            return null;
+        }
+    }
+    _applyGroupDMUnreadSectionGhosting() {
+        this._updateGroupDMUnreadSectionGhostStyle();
+    }
+    patchGroupDMUnreadSectionObserver() {
+        if (this._groupDMUnreadSectionObserverPatched) return;
+        const self = this;
+        const attach = () => {
+            const section = document.getElementById("guild-list-unread-dms");
+            if (!section) return false;
+            if (this._groupDMUnreadSectionObserver) return true;
+            this._applyGroupDMUnreadSectionGhosting();
+            this._groupDMUnreadSectionObserver = new MutationObserver(() => {
+                if (self._groupDMUnreadSectionScheduled) return;
+                self._groupDMUnreadSectionScheduled = true;
+                setTimeout(() => {
+                    self._groupDMUnreadSectionScheduled = false;
+                    self._applyGroupDMUnreadSectionGhosting();
+                }, 30);
+            });
+            this._groupDMUnreadSectionObserver.observe(section, { childList: true, subtree: true });
+            return true;
+        };
+        if (attach()) {
+            this._groupDMUnreadSectionObserverPatched = true;
+            return;
+        }
+        const nav = document.querySelector('nav[aria-label] [role="tree"][data-list-id="guildsnav"]')
+            || document.querySelector('[role="tree"][data-list-id="guildsnav"]');
+        if (!nav) {
+            if ((this._groupDMUnreadSectionBootAttempts = (this._groupDMUnreadSectionBootAttempts || 0) + 1) < 20) {
+                setTimeout(() => this.patchGroupDMUnreadSectionObserver(), 1000);
+            }
+            return;
+        }
+        const bootObserver = new MutationObserver(() => {
+            if (attach()) {
+                bootObserver.disconnect();
+                this._groupDMUnreadSectionObserverPatched = true;
+            }
+        });
+        bootObserver.observe(nav, { childList: true, subtree: true });
     }
     resolveInviteQueryModule() {
         const PRIMARY_SOURCES = ["queryFriends", "queryDMUsers", "friendSuggestions"];
@@ -9216,10 +10625,18 @@ return false;
     }
     addStyles() {
         this.removeStyles();
+        document.getElementById('ByeBlocked-bootguard')?.remove();
         const hideBlockedBanner = this.settings.places.messages ? `\n            [class*="messageGroupBlocked"],\n            [class*="blockedSystemMessage"],\n            [class*="groupStart"]:has([class*="blocked"]),\n            li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),\n            li[class*="messageListItem"]:has([class*="blockedSystemMessage"]),\n            li[class*="messageListItem"]:has([class*="blocked"][class*="message"]),\n            [class*="messageListItem"]:has([class*="messageGroupBlocked"]) {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n        ` : "";
         const eventsSidebarNameRule = "";
         const noticeButtonStyles = `\n            .bd-notice button,\n            .bd-notice .bd-button,\n            .bd-notice [class*="button"],\n            .bd-notice [role="button"] {\n                background: transparent !important;\n                border: 1px solid var(--text-muted) !important;\n                color: var(--text-normal) !important;\n                transition: background 0.15s, border-color 0.15s !important;\n            }\n            .bd-notice button:hover,\n            .bd-notice .bd-button:hover,\n            .bd-notice [class*="button"]:hover,\n            .bd-notice [role="button"]:hover {\n                background: rgba(255, 255, 255, 0.08) !important;\n                border-color: var(--brand-experiment) !important;\n                color: var(--text-normal) !important;\n            }\n        `;
-        BdApi.DOM.addStyle(this.pluginName, `\n            [data-hidden-blocked="true"],\n            [data-hidden-blocked="true"] * { ${this.hideStyles} }\n            [data-nmb-mention-hidden="true"] {\n                display: none !important;\n                visibility: hidden !important;\n                pointer-events: none !important;\n                width: 0 !important;\n                height: 0 !important;\n                min-width: 0 !important;\n                min-height: 0 !important;\n                max-width: 0 !important;\n                max-height: 0 !important;\n                font-size: 0 !important;\n                line-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                border: 0 !important;\n                overflow: hidden !important;\n                position: absolute !important;\n                transform: scale(0) !important;\n            }\n            h1[data-nmb-header-hidden="true"] {\n                font-size: 0 !important;\n                line-height: 0 !important;\n            }\n            h1[data-nmb-header-hidden="true"] [data-nmb-header-overlay="true"] {\n                font-size: var(--nmb-header-restore-size, 20px) !important;\n                line-height: var(--nmb-header-restore-line-height, normal) !important;\n            }\n            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [data-nmb-status-overridden="true"] {\n                display: none !important;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-header-minimal {\n                display: flex;\n                align-items: baseline;\n                gap: 10px;\n                margin-bottom: 12px;\n                padding-bottom: 10px;\n                border-bottom: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-plugin-name { font-size: 22px; font-weight: 700; color: var(--header-primary); }\n            .nmb-version { font-size: 15px; color: var(--text-muted); font-weight: 500; }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 8px;\n                margin-top: 28px;\n                padding: 12px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-btn-icon { width: 14px; height: 14px; flex-shrink: 0; }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-checking .nmb-btn-icon { animation: nmb-spin 0.8s linear infinite; }\n            @keyframes nmb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: flex-start;\n                text-align: center;\n                padding-top: 32px;\n                padding-bottom: 16px;\n                flex-shrink: 0;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c,\n            .nmb-pins-empty-placeholder .nmb-pins-empty-icon {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n                display: flex;\n                align-items: center;\n                justify-content: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer,\n            .nmb-injected-tip-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n\n            ${noticeButtonStyles}\n        `);
+        BdApi.DOM.addStyle(this.pluginName, `\n            [data-hidden-blocked="true"],\n            [data-hidden-blocked="true"] * { ${this.hideStyles} }\n            [data-nmb-mention-hidden="true"] {\n                display: none !important;\n                visibility: hidden !important;\n                pointer-events: none !important;\n                width: 0 !important;\n                height: 0 !important;\n                min-width: 0 !important;\n                min-height: 0 !important;\n                max-width: 0 !important;\n                max-height: 0 !important;\n                font-size: 0 !important;\n                line-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                border: 0 !important;\n                overflow: hidden !important;\n                position: absolute !important;\n                transform: scale(0) !important;\n            }\n            h1[data-nmb-header-hidden="true"] {\n                font-size: 0 !important;\n                line-height: 0 !important;\n            }\n            h1[data-nmb-header-hidden="true"] [data-nmb-header-overlay="true"] {\n                font-size: var(--nmb-header-restore-size, 20px) !important;\n                line-height: var(--nmb-header-restore-line-height, normal) !important;\n            }\n            [data-nmb-ringing-collapsed="true"] {
+                min-height: 0 !important;
+                background: none !important;
+                background-color: transparent !important;
+                border: none !important;
+                box-shadow: none !important;
+            }
+            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [data-nmb-status-overridden="true"] {\n                display: none !important;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 14px;\n                margin-top: 28px;\n                padding: 14px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: flex-start;\n                text-align: center;\n                padding-top: 32px;\n                padding-bottom: 16px;\n                flex-shrink: 0;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c,\n            .nmb-pins-empty-placeholder .nmb-pins-empty-icon {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n                display: flex;\n                align-items: center;\n                justify-content: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer,\n            .nmb-injected-tip-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n            [data-nmb-relabel-pending="true"] {\n                visibility: hidden !important;\n            }\n            /* Anti-flash PREVENTIVO: esconde qualquer linha de Group DM (usa o\n               mesmo indicador visual de _isGroupDmRow — avatarStack/groupAvatar/\n               avatarMulti — que o próprio Discord já inclui no HTML desde o\n               primeiro render) que ainda não foi confirmada como relabelada.\n               Diferente de [data-nmb-relabel-pending], que só é setado pelo JS\n               DEPOIS que hidePrivateChannels() já rodou pelo menos uma vez, esta\n               regra é CSS puro e já está ativa desde addStyles() — ou seja,\n               antes do React sequer montar a sidebar no boot. Cobre a janela\n               que nenhuma correção via JS reativo consegue cobrir, porque roda\n               sempre depois do primeiro paint por definição. Removida junto com\n               data-nmb-relabel-pending assim que relabelGroupDmRow() confirma\n               data-nmb-relabeled="true" (ver relabelGroupDmRow).\n            */\n            li[data-list-item-id*="private-channels"]:not([data-nmb-relabeled="true"]):has([class*="avatarStack"], [class*="groupAvatar"], [class*="avatarMulti"]) {\n                visibility: hidden !important;\n            }\n\n            ${noticeButtonStyles}\n        `);
     }
     removeStyles() {
         try {
@@ -9237,7 +10654,7 @@ return false;
     getSettingsPanel() {
         const panel = document.createElement("div");
         panel.className = "nmb-panel";
-        panel.innerHTML = `\n            <div class="nmb-header-minimal">\n                <span class="nmb-plugin-name">\n                    <span class="nmb-version"> v${ByeBlocked.VERSION}</span>\n                </span>\n            </div>\n            ${this._renderSettingsSection("types", "Hide users by type", true)}\n            ${this._renderSettingsSection("places", "Where to hide", true)}\n            ${this._renderSettingsSection("behavior", "Behavior", true)}\n            <div class="nmb-actions">\n                <button class="nmb-update-btn" data-nmb-update-btn>\n                    <svg class="nmb-btn-icon" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">\n                        <path d="M14 2v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>\n                        <path d="M13.5 7A5.5 5.5 0 1 1 10.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>\n                    </svg>\n                    <span class="nmb-btn-label">Check for updates</span>\n                </button>\n                <span class="nmb-last-check" data-nmb-last-check>Last check: ${this._formatDate(this._lastCheckTimestamp)}</span>\n            </div>\n        `;
+        panel.innerHTML = `\n            ${this._renderSettingsSection("types", "Who to hide", true)}\n            ${this._renderSettingsSection("places", "Where to hide", true)}\n            ${this._renderSettingsSection("behavior", "Other settings", true)}\n            <div class="nmb-actions">\n                <button class="nmb-update-btn" data-nmb-update-btn>\n                    <span class="nmb-btn-label">Check for updates</span>\n                </button>\n                <span class="nmb-last-check" data-nmb-last-check>Last check: ${this._formatDate(this._lastCheckTimestamp)}</span>\n            </div>\n        `;
         if (this._updateState.status === "available") {
             this._renderUpdateBtn(panel);
         } else {
@@ -9253,7 +10670,7 @@ return false;
         setTimeout(() => {
             panel.scrollIntoView({
                 block: "start",
-                behavior: "smooth"
+                behavior: "instant"
             });
         }, 50);
         return panel;
@@ -9297,6 +10714,16 @@ return false;
             } else {
                 this._releaseAllVoiceMutes();
                 this.toast("Please reload the plugin for changes to take effect.", "warn");
+            }
+        }
+        if (section === "behavior" && key === "blockRingingFromBlocked") {
+            if (next) {
+                this.patchBlockedCallRinging();
+                this.patchRingtoneAudio();
+                this.patchHideBlockedCallUI();
+                this.toast("Calls started by blocked users in group DMs will be ignored.", "info");
+            } else {
+                this.toast("Ringing suppression disabled.", "info");
             }
         }
         if (section === "behavior" && key === "suppressTaskbarBadge") {
