@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.3
+ * @version 2.4.4
  * @description Remove blocked and ignored users from your Discord view.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -199,7 +199,7 @@ function _findCloseButton(dialog) {
 })();
 
 module.exports = class ByeBlocked {
-    static VERSION="2.4.3";
+    static VERSION="2.4.4";
     static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static BLOCKED_BANNER_PATTERNS = [
@@ -744,7 +744,7 @@ module.exports = class ByeBlocked {
                     this._lastNotifiedVersion = remote;
                     this._removeNotice();
                     try {
-                        this._updateNotice = BdApi.UI.showNotice(`ByeBlocked - Version v${remote} is now available!`, {
+                        this._updateNotice = BdApi.UI.showNotice(`ByeBlocked v${remote} is now available!`, {
                             timeout: 0,
                             buttons: [ {
                                 label: "Update now",
@@ -765,7 +765,7 @@ module.exports = class ByeBlocked {
                             } ]
                         });
                     } catch (_) {
-                        this.toast(`ByeBlocked - Version v${remote} is now available! Check settings.`, "info");
+                        this.toast(`ByeBlocked v${remote} is now available! Check settings.`, "info");
                     }
                 }
                 this._updateState = {
@@ -849,7 +849,7 @@ module.exports = class ByeBlocked {
                 this._renderUpdateBtn(panelRef);
                 if (!silent) {
                     try {
-                        this._updateNotice = BdApi.UI.showNotice(`ByeBlocked - Version v${remote} is now available!`, {
+                        this._updateNotice = BdApi.UI.showNotice(`ByeBlocked v${remote} is now available!`, {
                             timeout: 0,
                             buttons: [ {
                                 label: "Update now",
@@ -2097,7 +2097,7 @@ module.exports = class ByeBlocked {
         p.safe('patchBlockedMessageGroup', () => this.patchBlockedMessageGroup());
         p.safe('patchMessagesWrapComponent', () => this.patchMessagesWrapComponent());
         p.safe('patchForumPostComponent', () => this.patchForumPostComponent());
-        p.safe('patchCallGridParticipants', () => {});
+        p.safe('patchCallGridParticipants', () => this.patchCallGridParticipants());
         p.safe('patchMessageStore', () => this.patchMessageStore());
         p.safe('patchMessageItemComponent', () => this.patchMessageItemComponent());
     }
@@ -3953,82 +3953,56 @@ return false;
             }
         } catch (_) {}
     }
-    patchCallGridParticipants() {
+    patchCallGridParticipants(attempt = 0) {
         if (!this.settings.places.voiceChannels) return;
         if (this._callGridPatched) return;
         const self = this;
-        const hasFilteredParticipants = fn => {
-            if (typeof fn !== "function") return false;
-            try {
-                return Function.prototype.toString.call(fn).includes("filteredParticipants");
-            } catch (_) {
-                return false;
+
+        const gridSelector = '[class*="gridLayout_"], [class*="callContainer_"], [role="grid"]';
+        const findLiveGridClass = () => {
+            const els = document.querySelectorAll(gridSelector);
+            for (const el of els) {
+                try {
+                    let fiber = BdApi.ReactUtils.getInternalInstance(el);
+                    for (let hop = 0; hop < 20 && fiber; hop++, fiber = fiber.return) {
+                        const props = fiber.memoizedProps;
+                        if (props && Array.isArray(props.participants) && Array.isArray(props.filteredParticipants) && typeof fiber.type === "function") {
+                            return fiber.type;
+                        }
+                    }
+                } catch (_) {}
             }
-        };
-        const resolveRealFnHolder = fn => {
-            if (typeof fn !== "function") return null;
-            if (hasFilteredParticipants(fn)) return { holder: fn, prop: null, realFn: fn };
-            if (fn.type && typeof fn.type === "function" && hasFilteredParticipants(fn.type)) return { holder: fn, prop: "type", realFn: fn.type };
-            if (fn.render && typeof fn.render === "function" && hasFilteredParticipants(fn.render)) return { holder: fn, prop: "render", realFn: fn.render };
             return null;
         };
-        const patchHolder = info => {
-            if (!info) return false;
+
+        const tryPatchClass = GridClass => {
+            if (!GridClass?.prototype?.render) return false;
+            if (GridClass.prototype.render.__nmbCallGridPatched) return true;
             try {
-                if (info.prop) {
-                    self._patcher.before(info.holder, info.prop, (_, args) => self._filterCallGridProps(args?.[0]));
-                } else {
-                    return false;
-                }
+                self._patcher.before(GridClass.prototype, "render", thisObj => {
+                    try { self._filterCallGridProps(thisObj?.props); } catch (_) {}
+                });
+                GridClass.prototype.render.__nmbCallGridPatched = true;
                 return true;
             } catch (_) {
                 return false;
             }
         };
-        let patchedAny = false;
-        try {
-            const raw = BdApi.Webpack.getModule(m => {
-                if (!m || typeof m !== "object") return false;
-                for (const val of Object.values(m)) {
-                    if (resolveRealFnHolder(val)) return true;
-                }
-                return false;
-            }, { searchExports: true });
-            if (raw && typeof raw === "object") {
-                for (const [key, val] of Object.entries(raw)) {
-                    const info = resolveRealFnHolder(val);
-                    if (!info) continue;
-                    if (info.prop) {
-                        if (patchHolder(info)) {
-                            patchedAny = true;
-                            break;
-                        }
-                    } else {
-                        self._patcher.before(raw, key, (_, args) => self._filterCallGridProps(args?.[0]));
-                        patchedAny = true;
-                        break;
-                    }
-                }
-            }
-        } catch (_) {}
-        if (!patchedAny) {
-            try {
-                const result = BdApi.Webpack.getWithKey(m => {
-                    return !!resolveRealFnHolder(m);
-                }, { searchExports: true });
-                if (result) {
-                    const [moduleObj, key] = result;
-                    const info = resolveRealFnHolder(moduleObj[key]);
-                    if (info && info.prop) {
-                        patchedAny = patchHolder(info);
-                    } else if (info) {
-                        self._patcher.before(moduleObj, key, (_, args) => self._filterCallGridProps(args?.[0]));
-                        patchedAny = true;
-                    }
-                }
-            } catch (_) {}
+
+        const GridClass = findLiveGridClass();
+        if (GridClass && tryPatchClass(GridClass)) {
+            this._callGridPatched = true;
+
+            try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+            return;
         }
-        if (patchedAny) this._callGridPatched = true;
+
+
+        if (attempt < 40) {
+            setTimeout(() => this.patchCallGridParticipants(attempt + 1), 3000);
+        } else {
+            this._patcher._logFail("patchCallGridParticipants", new Error("esgotou tentativas — elemento do grid nunca encontrado; ver notas de manutenção"));
+        }
     }
     patchMessageStore() {
         if (!this.settings.places.messages) return;
@@ -6523,6 +6497,10 @@ return false;
                 if (this.settings.places?.groupDms || this.settings.places?.messages) {
                     this.hidePrivateChannels();
                 }
+                if (this.settings.places?.events) {
+                    try { this.hideBlockedStageChannelNotice(); } catch (_) {}
+                    try { this.hideBlockedGuildStageBadge(); } catch (_) {}
+                }
                 return;
             }
             const p = this.settings.places;
@@ -7867,6 +7845,11 @@ return false;
     }
     resolveEventCreatorId(scope) {
         if (!scope) return null;
+
+        const structural = this.findEventCreatorId(scope);
+        if (structural) return structural;
+
+
         const hiddenSpans = scope.querySelectorAll('[class*="hiddenVisually"]');
         for (let i = 0; i < hiddenSpans.length; i++) {
             const text = (hiddenSpans[i].textContent || "").trim();
@@ -7887,7 +7870,7 @@ return false;
             const id = this.resolveUserIdByName((nameEl.textContent || "").trim());
             if (id) return id;
         }
-        return this.findEventCreatorId(scope);
+        return null;
     }
     resolveUserIdByName(name) {
         if (!name) return null;
@@ -7989,58 +7972,142 @@ return false;
                 if (!isLiveStageNotice) continue;
 
                 const channelId = this._resolveStageNoticeChannelId(notice);
-                if (!channelId) continue;
+                if (!channelId) {
+                    this._retryStageNoticeSoon();
+                    continue;
+                }
 
-                const allConnectedBlocked = this._areAllStageChannelUsersBlocked(channelId);
+                const uids = this._getStageChannelUserIds(channelId);
+                if (!uids || !uids.length) {
+                    this._retryStageNoticeSoon();
+                    continue;
+                }
+
+                const allConnectedBlocked = uids.every(uid => this.shouldHide(uid));
                 if (allConnectedBlocked) {
                     this.hideElement(outer, "stage-channel-notice", false);
                 }
             }
         } catch (_) {}
     }
+    _retryStageNoticeSoon() {
+        if (this._stageNoticeRetryPending) return;
+        this._stageNoticeRetryPending = true;
+        setTimeout(() => {
+            this._stageNoticeRetryPending = false;
+            try { this.hideBlockedStageChannelNotice(); } catch (_) {}
+        }, 350);
+    }
+
+    _getStageChannelUserIds(channelId) {
+        const ids = new Set();
+        try {
+            const vss = this.modules.VoiceStateStore;
+            const map = vss?.getVoiceStatesForChannel?.(channelId);
+            if (map && typeof map === "object") {
+                for (const val of Object.values(map)) {
+                    const uid = val?.userId || val?.user_id || val?.user?.id;
+                    if (uid) ids.add(String(uid));
+                }
+            }
+        } catch (_) {}
+        if (!ids.size) {
+            try {
+                const states = this.getRawVoiceStatesForChannel(channelId);
+                (states || []).forEach(s => {
+                    const uid = this.extractUserId(s);
+                    if (uid) ids.add(String(uid));
+                });
+            } catch (_) {}
+        }
+        return [...ids];
+    }
+
+    _getGuildStageChannels(guildId) {
+        try {
+            const groups = guildId ? this.modules.GuildChannelStore?.getChannels?.(guildId) : null;
+            if (!groups) return [];
+            return Object.values(groups).flat()
+                .map(entry => entry?.channel || entry)
+                .filter(ch => ch?.type === 13);
+        } catch (_) {
+            return [];
+        }
+    }
     _resolveStageNoticeChannelId(notice) {
-        let found = null;
+
         try {
             const currentChannelId = this.modules.SelectedChannelStore?.getChannelId?.();
             if (currentChannelId) {
                 const ch = this.modules.ChannelStore?.getChannel?.(currentChannelId);
-                if (ch?.type === 13) found = String(currentChannelId);
+                if (ch?.type === 13) return String(currentChannelId);
             }
         } catch (_) {}
-        if (!found) {
-            this.walkFiberProps(notice, props => {
-                if (found || !props) return;
-                const direct = props.channelId;
-                if (direct && /^\d{17,20}$/.test(String(direct))) { found = String(direct); return; }
-                const nested = props.channel?.id;
-                if (nested && /^\d{17,20}$/.test(String(nested))) found = String(nested);
-            }, 14);
-        }
-        if (found) return found;
 
-        const nameEl = notice.querySelector('[class*="channelName_"]');
-        const name = (nameEl?.textContent || "").trim();
-        if (!name) return null;
-        const links = document.querySelectorAll('[data-list-item-id^="channels___"]');
-        for (let i = 0; i < links.length; i++) {
-            const link = links[i];
-            const label = link.getAttribute("aria-label") || "";
-            if (label.startsWith(name + " (") && /canal palco|stage channel/i.test(label)) {
-                const listId = link.dataset?.listItemId || "";
-                const idMatch = listId.match(/(\d{17,20})$/);
-                if (idMatch) return idMatch[1];
+
+        try {
+            const guildId = this.modules.SelectedGuildStore?.getGuildId?.();
+            const stageStore = this.modules.StageInstanceStore;
+            if (guildId && stageStore?.getStageInstancesByGuild) {
+                const instances = stageStore.getStageInstancesByGuild(guildId);
+                const channelIds = Object.keys(instances || {});
+                if (channelIds.length === 1) return channelIds[0];
+                if (channelIds.length > 1) {
+
+                    const nameEl = notice.querySelector('[class*="eventName_"], [class*="channelName_"]');
+                    const name = (nameEl?.textContent || "").trim();
+                    if (name) {
+                        for (const cid of channelIds) {
+                            const inst = instances[cid];
+                            if (inst?.topic === name) return cid;
+                        }
+                    }
+                    return channelIds[0];
+                }
             }
-        }
-        return null;
+        } catch (_) {}
+
+
+        let found = null;
+        this.walkFiberProps(notice, props => {
+            if (found || !props) return;
+            const direct = props.channelId;
+            if (direct && /^\d{17,20}$/.test(String(direct))) { found = String(direct); return; }
+            const nested = props.channel?.id;
+            if (nested && /^\d{17,20}$/.test(String(nested))) found = String(nested);
+        }, 14);
+        return found;
     }
     _areAllStageChannelUsersBlocked(channelId) {
         try {
-            const states = this.getRawVoiceStatesForChannel(channelId);
-            if (!states || !states.length) return false;
-            return states.every(s => {
-                const uid = this.extractUserId(s);
-                return uid && this.shouldHide(uid);
-            });
+            const uids = this._getStageChannelUserIds(channelId);
+            if (!uids.length) return false;
+            return uids.every(uid => this.shouldHide(uid));
+        } catch (_) {
+            return false;
+        }
+    }
+    _isLiveStageBadge(badgeWrapper, itemContainer) {
+
+        let found = null;
+        try {
+            this.walkFiberProps(badgeWrapper, props => {
+                if (found !== null || !props) return;
+                if (typeof props.mediaState?.liveStage === "boolean") found = props.mediaState.liveStage;
+            }, 16);
+            if (found === null && itemContainer) {
+                this.walkFiberProps(itemContainer, props => {
+                    if (found !== null || !props) return;
+                    if (typeof props.mediaState?.liveStage === "boolean") found = props.mediaState.liveStage;
+                }, 16);
+            }
+        } catch (_) {}
+        if (found !== null) return found;
+
+
+        try {
+            const a11yText = Array.from(itemContainer.querySelectorAll('[class*="hiddenVisually"]')).map(s => s.textContent || "").join(" | ");
+            return /palco ao vivo|stage.*live|live.*stage/i.test(a11yText);
         } catch (_) {
             return false;
         }
@@ -8054,8 +8121,7 @@ return false;
                 const itemContainer = badgeWrapper.closest("li") || badgeWrapper.closest('[class*="blobContainer"]') || badgeWrapper.parentElement?.parentElement;
                 if (!itemContainer) continue;
 
-                const a11yText = Array.from(itemContainer.querySelectorAll('[class*="hiddenVisually"]')).map(s => s.textContent || "").join(" | ");
-                const isStageBadge = /palco ao vivo|stage.*live|live.*stage/i.test(a11yText);
+                const isStageBadge = this._isLiveStageBadge(badgeWrapper, itemContainer);
 
                 if (badgeWrapper.dataset?.hiddenBlocked === "true") {
                     if (!isStageBadge) {
@@ -8083,9 +8149,18 @@ return false;
                 if (!guildId) continue;
 
                 const channelId = this._resolveGuildActiveStageChannelId(guildId);
-                if (!channelId) continue;
+                if (!channelId) {
+                    this._retryStageBadgeSoon(guildId);
+                    continue;
+                }
 
-                const allConnectedBlocked = this._areAllStageChannelUsersBlocked(channelId);
+                const uids = this._getStageChannelUserIds(channelId);
+                if (!uids.length) {
+                    this._retryStageBadgeSoon(guildId);
+                    continue;
+                }
+
+                const allConnectedBlocked = uids.every(uid => this.shouldHide(uid));
                 if (allConnectedBlocked) {
                     this.hideElement(badgeWrapper, "guild-stage-badge", false);
                     badgeWrapper.dataset.nmbGuildBadge = "true";
@@ -8093,6 +8168,16 @@ return false;
                 }
             }
         } catch (_) {}
+    }
+    _retryStageBadgeSoon(guildId) {
+        const key = String(guildId || "any");
+        if (this._stageBadgeRetryPending?.[key]) return;
+        if (!this._stageBadgeRetryPending) this._stageBadgeRetryPending = {};
+        this._stageBadgeRetryPending[key] = true;
+        setTimeout(() => {
+            if (this._stageBadgeRetryPending) delete this._stageBadgeRetryPending[key];
+            try { this.hideBlockedGuildStageBadge(); } catch (_) {}
+        }, 350);
     }
     _restoreGuildIconMask(itemContainer) {
         try {
@@ -9756,17 +9841,54 @@ return false;
         if (previous !== null) el.textContent = previous;
         el.removeAttribute("data-nmb-prev-text");
     }
-    patchSound() {
+    patchSound(retryCount = 0) {
+
+        const MAX_SOUND_PATCH_RETRIES = 10;
         const voiceSoundsEnabled = this.settings.behavior.muteVoiceJoinLeaveSound || this.settings.behavior.muteBlockedVoiceAudio;
         const SoundUtils = this.modules.SoundUtils;
-        if (!SoundUtils) return;
+        if (!SoundUtils) {
+            if (retryCount < MAX_SOUND_PATCH_RETRIES) {
+                const delay = Math.min(1000 * (retryCount + 1), 5000);
+                setTimeout(() => { if (this.isRunning) this.patchSound(retryCount + 1); }, delay);
+            } else {
+                this._warn?.('patchSound', new Error('SoundUtils indisponível após múltiplas tentativas.'));
+            }
+            return;
+        }
         const primaryKey = this._soundPlayKey || "playSound";
         const fallbackKey = this._soundFileKey || (primaryKey === "playSound" ? "playFile" : "playSound");
         const targetKey = typeof SoundUtils[primaryKey] === "function" ? primaryKey : (typeof SoundUtils[fallbackKey] === "function" ? fallbackKey : null);
-        if (!targetKey) return;
+        if (!targetKey) {
+            if (retryCount < MAX_SOUND_PATCH_RETRIES) {
+                const delay = Math.min(1000 * (retryCount + 1), 5000);
+                setTimeout(() => { if (this.isRunning) this.patchSound(retryCount + 1); }, delay);
+            } else {
+                this._warn?.('patchSound', new Error('Método de reprodução de som não encontrado após múltiplas tentativas.'));
+            }
+            return;
+        }
         const RTCUtils = this.modules.RTCConnectionUtils;
         const self = this;
-        this.patchInstead(SoundUtils, targetKey, function(context, args, originalMethod) {
+
+        const originalMethod = SoundUtils[targetKey];
+        try {
+            Object.defineProperty(SoundUtils, targetKey, {
+                configurable: true,
+                enumerable: true,
+                writable: true,
+                value: function(...args) {
+                    return _byeBlockedSoundInterceptor.call(this, this, args, originalMethod);
+                }
+            });
+        } catch (e) {
+            this._warn?.('patchSound', e);
+
+            this.patchInstead(SoundUtils, targetKey, function(context, args, orig) {
+                return _byeBlockedSoundInterceptor.call(context, context, args, orig);
+            });
+            return;
+        }
+        function _byeBlockedSoundInterceptor(context, args, originalMethod) {
             try {
                 const soundType = args[0];
                 if (soundType === "message1") {
@@ -9817,24 +9939,40 @@ return false;
                         const candidate = self.modules.SelectedChannelStore?.getVoiceChannelId?.();
                         if (candidate) {
                             const resolved = self.modules.ChannelStore?.getChannel?.(candidate);
-                            if (resolved && (resolved.type === 2 || resolved.type === 13)) {
+
+                            if (resolved && (resolved.type === 2 || resolved.type === 13 || resolved.type === 1 || resolved.type === 3)) {
                                 channelId = candidate;
                             }
                         }
                     } catch (_) {}
                 }
                 if (!channelId) return originalMethod.apply(context, args);
-                let voiceStatesList = [];
-                try {
-                    voiceStatesList = self.getRawVoiceStatesForChannel(channelId) || [];
-                } catch (_) {}
-                const currentIds = new Set(voiceStatesList.map(s => self.extractUserId(s)).filter(Boolean));
-                const previousIds = self._oldUnblockedConnectedUsers instanceof Set ? self._oldUnblockedConnectedUsers : new Set((self._oldUnblockedConnectedUsers || []).map(s => self.extractUserId(s)).filter(Boolean));
-                self._oldUnblockedConnectedUsers = currentIds;
-                if (!currentIds.size && !previousIds.size) return originalMethod.apply(context, args);
-                const joined = [ ...currentIds ].filter(id => !previousIds.has(id));
-                const left = [ ...previousIds ].filter(id => !currentIds.has(id));
-                const changedIds = [ ...joined, ...left ];
+
+                const selfId = self._getSelfUserId?.();
+                const nowTs = Date.now();
+                const recentBuffer = self._recentVoiceStateChanges || [];
+                const relevantChanges = recentBuffer.filter(e => {
+                    if (nowTs - e.ts > 1200) return false;
+                    if (e.userId === selfId) return false;
+                    return e.channelId === channelId || e.channelId === null;
+                });
+                let changedIds;
+                if (relevantChanges.length) {
+                    changedIds = [ ...new Set(relevantChanges.map(e => e.userId)) ];
+                } else {
+
+                    let voiceStatesList = [];
+                    try {
+                        voiceStatesList = self.getRawVoiceStatesForChannel(channelId) || [];
+                    } catch (_) {}
+                    const currentIds = new Set(voiceStatesList.map(s => self.extractUserId(s)).filter(Boolean));
+                    const previousIds = self._oldUnblockedConnectedUsers instanceof Set ? self._oldUnblockedConnectedUsers : new Set((self._oldUnblockedConnectedUsers || []).map(s => self.extractUserId(s)).filter(Boolean));
+                    self._oldUnblockedConnectedUsers = currentIds;
+                    if (!currentIds.size && !previousIds.size) return originalMethod.apply(context, args);
+                    const joined = [ ...currentIds ].filter(id => !previousIds.has(id));
+                    const left = [ ...previousIds ].filter(id => !currentIds.has(id));
+                    changedIds = [ ...joined, ...left ];
+                }
                 if (!changedIds.length) return originalMethod.apply(context, args);
                 const allChangedAreBlocked = changedIds.every(id => self.shouldHide(id));
                 if (allChangedAreBlocked) return;
@@ -9842,18 +9980,39 @@ return false;
             } catch (_) {
                 try { return originalMethod.apply(context, args); } catch (_) { return; }
             }
-        });
+        }
     }
-    patchSoundboardEffects() {
+    patchSoundboardEffects(retryCount = 0) {
+
+        const MAX_SOUNDBOARD_PATCH_RETRIES = 10;
         if (this._soundboardPatched) return;
         const Dispatcher = this.modules.Dispatcher;
-        if (!Dispatcher || typeof Dispatcher.dispatch !== "function") return;
+        if (!Dispatcher || typeof Dispatcher.dispatch !== "function") {
+            if (retryCount < MAX_SOUNDBOARD_PATCH_RETRIES) {
+                const delay = Math.min(1000 * (retryCount + 1), 5000);
+                setTimeout(() => { if (this.isRunning) this.patchSoundboardEffects(retryCount + 1); }, delay);
+            } else {
+                this._warn?.('patchSoundboardEffects', new Error('Dispatcher indisponível após múltiplas tentativas.'));
+            }
+            return;
+        }
         this._soundboardPatched = true;
         const self = this;
         this.patchBefore(Dispatcher, "dispatch", function(context, args) {
             const action = args[0];
             if (!action || typeof action !== "object") return;
             if (action.type === self.constructor.ACTIONS.VOICE_STATE_UPDATES && Array.isArray(action.voiceStates)) {
+
+                self._recentVoiceStateChanges = self._recentVoiceStateChanges || [];
+                const nowTs = Date.now();
+                for (const vs of action.voiceStates) {
+                    if (!vs) continue;
+                    const userId = vs.userId || self.extractUserId(vs);
+                    if (!userId) continue;
+                    self._recentVoiceStateChanges.push({ userId, channelId: vs.channelId || null, ts: nowTs });
+                }
+
+                self._recentVoiceStateChanges = self._recentVoiceStateChanges.filter(e => nowTs - e.ts < 3000);
                 for (const vs of action.voiceStates) {
                     if (vs && vs.selfStream === true && vs.userId) {
                         self._lastStreamerId = vs.userId;
