@@ -1,7 +1,7 @@
 <div align="center">
 <img src="assets/1660570983851754491.png" width="900" alt="ByeBlocked Banner">
 
-**Discord reminds you they're blocked. ByeBlocked makes you forget they exist**
+**Discord reminds you they're blocked. ByeBlocked makes you forget they exist.**
 
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-plugin-5865F2)](https://betterdiscord.app)
 [![Version](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
@@ -36,8 +36,9 @@ Requires [BetterDiscord](https://betterdiscord.app) to be installed.
 
 ## Feedback
 
-Found a bug or an edge case? Feel free to open an [Issue](https://github.com).
-Bug reports, feature requests, and implementation ideas are always welcome.
+Found a bug or an edge case?
+
+Feel free to open an [Issue](https://github.com/8ug8ird/ByeBlocked/issues). Bug reports, feature requests, and implementation ideas are always welcome.
 
 <br>
 
