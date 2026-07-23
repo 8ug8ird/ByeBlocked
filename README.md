@@ -1,19 +1,16 @@
 <div align="center">
+<img src="assets/1660570983851754491.png" width="900" alt="ByeBlocked Banner">
 
-### ByeBlocked
+**Discord reminds you they're blocked. ByeBlocked makes you forget they exist**
 
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-plugin-5865F2)](https://betterdiscord.app)
+[![Version](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total)](https://github.com/8ug8ird/ByeBlocked/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
-
-**Block them once. Stop hearing, seeing, or noticing them**
-
-<img src="assets/Discord_ubFapzaaLs-output.gif" width="800">
 
 </div>
 
-<br>
-
-ByeBlocked extends Discord's default blocking behavior, hiding and silencing blocked and ignored users across chat, voice, calls, and notifications. A block finally behaves like one everywhere in the client.
+---
 
 ## Features
 
@@ -25,19 +22,24 @@ ByeBlocked extends Discord's default blocking behavior, hiding and silencing blo
 - **Events** - Hides blocked users from scheduled events
 - **Notifications** - Suppresses the taskbar/tray badge when unread activity is only from blocked users
 
+<br>
+
+<div align="center">
+<img src="assets/Discord_ubFapzaaLs-output.gif" width="800" alt="ByeBlocked Preview">
+</div>
+
 ## Installation
 
 Requires [BetterDiscord](https://betterdiscord.app) to be installed.
 
-1. Download [`ByeBlocked.plugin.js`](https://github.com/8ug8ird/ByeBlocked/releases/latest/download/ByeBlocked.plugin.js)
+1. Download [`ByeBlocked.plugin.js`](https://github.com)
 2. Go to **Settings > Plugins > Open Plugins Folder**
 3. Drop the file in and enable it
 
 ## Feedback
 
-Found a bug or an edge case?
-
-Feel free to open an [Issue](https://github.com/8ug8ird/ByeBlocked/issues). Bug reports, feature requests, and implementation ideas are always welcome.
+Found a bug or an edge case? Feel free to open an [Issue](https://github.com).
+Bug reports, feature requests, and implementation ideas are always welcome.
 
 <br>
 
