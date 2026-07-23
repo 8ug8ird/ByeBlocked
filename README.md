@@ -21,7 +21,7 @@ ByeBlocked extends Discord's default blocking behavior, hiding and silencing blo
 
 - **Chat & Forum** - Hides messages, replies, mentions, forum posts, reactions and pins from blocked users
 - **Voice** - Hides blocked users in real-time, mutes their mic audio, and silences their join/leave sounds
-- **Calls & Group DMs** - Ignores calls started by blocked users in group DMs and hides blocked profiles and recipients
+- **Calls & Group DMs** - Ignores calls from blocked users and hides them from group DMs
 - **Member List** - Hides blocked profiles and empty role sections
 - **Autocomplete** - Excludes blocked users from mention and invite suggestions
 - **Events** - Hides blocked users from scheduled events
