@@ -10,8 +10,6 @@
 
 </div>
 
----
-
 ## Features
 
 - **Chat & Forum** - Hides messages, replies, mentions, forum posts, reactions and pins from blocked users
