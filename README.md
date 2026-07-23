@@ -3,8 +3,6 @@
 ### ByeBlocked
 
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-plugin-5865F2)](https://betterdiscord.app)
-[![Version](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total)](https://github.com/8ug8ird/ByeBlocked/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
 **Block them once. Stop hearing, seeing, or noticing them**
