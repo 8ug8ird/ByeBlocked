@@ -7,7 +7,7 @@
 [![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total)](https://github.com/8ug8ird/ByeBlocked/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
-**Block them once. Stop hearing, seeing, and knowing they're there**
+**Block them once. Stop hearing, seeing, or noticing them**
 
 <img src="assets/Discord_ubFapzaaLs-output.gif" width="800">
 
@@ -29,7 +29,7 @@ ByeBlocked extends Discord's default blocking behavior, hiding and silencing blo
 
 ## Installation
 
-Requires [BetterDiscord](https://betterdiscord.app) installed.
+Requires [BetterDiscord](https://betterdiscord.app) to be installed.
 
 1. Download [`ByeBlocked.plugin.js`](https://github.com/8ug8ird/ByeBlocked/releases/latest/download/ByeBlocked.plugin.js)
 2. Go to **Settings > Plugins > Open Plugins Folder**
@@ -38,7 +38,8 @@ Requires [BetterDiscord](https://betterdiscord.app) installed.
 ## Feedback
 
 Found a bug or an edge case?
-Feel free to open an [Issue](https://github.com/8ug8ird/ByeBlocked/issues). Feedback, feature requests, and implementation ideas are always welcome.
+
+Feel free to open an [Issue](https://github.com/8ug8ird/ByeBlocked/issues). Bug reports, feature requests, and implementation ideas are always welcome.
 
 <br>
 
