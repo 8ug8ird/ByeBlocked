@@ -12,7 +12,7 @@
 
 ## Features
 
-- **Chat & Forum** - Hides messages, replies, mentions, forum posts, reactions and pins from blocked users
+- **Chat & Forum** - Hides messages, replies, mentions, forum posts, reactions, and pins from blocked users
 - **Voice** - Hides blocked users in real-time, mutes their mic audio, and silences their join/leave sounds
 - **Calls & Group DMs** - Ignores calls from blocked users and hides them from group DMs
 - **Member List** - Hides blocked profiles and empty role sections
