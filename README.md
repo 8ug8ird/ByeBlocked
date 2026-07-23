@@ -3,20 +3,28 @@
 ### ByeBlocked
 
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-plugin-5865F2)](https://betterdiscord.app)
+[![Version](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total)](https://github.com/8ug8ird/ByeBlocked/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
-**Remove blocked and ignored users from your Discord view**
+**Block them once. Stop hearing, seeing, and knowing they're there**
 
 <img src="assets/Discord_ubFapzaaLs-output.gif" width="800">
 
 </div>
 
+<br>
+
+ByeBlocked extends Discord's default blocking behavior, hiding and silencing blocked and ignored users across chat, voice, calls, and notifications. A block finally behaves like one everywhere in the client.
+
 ## Features
 
 - **Chat & Forum** - Hides messages, replies, mentions, forum posts, reactions and pins from blocked users
-- **Voice** - Hides blocked users in real-time, fixes channel counters, and silences their join/leave sounds
-- **Member List & Group DMs** - Hides blocked profiles, empty role sections, and group DM recipients
-- **Autocomplete & Events** - Excludes blocked users from mention/invite suggestions and scheduled events
+- **Voice** - Hides blocked users in real-time, mutes their mic audio, and silences their join/leave sounds
+- **Calls & Group DMs** - Ignores calls started by blocked users in group DMs and hides blocked profiles and recipients
+- **Member List** - Hides blocked profiles and empty role sections
+- **Autocomplete** - Excludes blocked users from mention and invite suggestions
+- **Events** - Hides blocked users from scheduled events
 - **Notifications** - Suppresses the taskbar/tray badge when unread activity is only from blocked users
 
 ## Installation
@@ -30,7 +38,6 @@ Requires [BetterDiscord](https://betterdiscord.app) installed.
 ## Feedback
 
 Found a bug or an edge case?
-
 Feel free to open an [Issue](https://github.com/8ug8ird/ByeBlocked/issues). Feedback, feature requests, and implementation ideas are always welcome.
 
 <br>
