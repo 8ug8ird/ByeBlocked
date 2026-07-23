@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.4
+ * @version 2.4.5
  * @description Remove blocked and ignored users from your Discord view.
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -199,9 +199,10 @@ function _findCloseButton(dialog) {
 })();
 
 module.exports = class ByeBlocked {
-    static VERSION="2.4.4";
-    static RAW_URL="https://raw.githubusercontent.com/8ug8ird/ByeBlocked/refs/heads/main/ByeBlocked.plugin.js";
+    static VERSION="2.4.5";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
+    static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
+    static ASSET_FILENAME="ByeBlocked.plugin.js";
     static BLOCKED_BANNER_PATTERNS = [
         /(?:^|\s)(?:\d+\s+)?blocked\s+messages?(?:\s|$)/i,                          // en
         /(?:^|\s)messages?\s+blocked(?:\s|$)/i,                                     // en (alt order)
@@ -724,6 +725,40 @@ module.exports = class ByeBlocked {
             this.toast("Go to BD Settings â†’ Plugins â†’ ByeBlocked âš™ï¸", "info");
         }
     }
+    async _fetchLatestRelease() {
+        const releaseJsonText = await this._httpsGet(ByeBlocked.RELEASES_API_URL);
+        let release;
+        try { release = JSON.parse(releaseJsonText); }
+        catch (_) { throw new Error("Resposta inválida da Releases API"); }
+        const tagName = release?.tag_name || "";
+        const versionMatch = tagName.match(/(\d+\.\d+\.\d+)/);
+        if (!versionMatch) throw new Error("Tag de release sem versão reconhecível");
+        const remoteVersion = versionMatch[1];
+        const asset = Array.isArray(release?.assets)
+            ? release.assets.find(a => a?.name === ByeBlocked.ASSET_FILENAME)
+            : null;
+        if (!asset?.browser_download_url) throw new Error("Asset da release não encontrado");
+        const text = await this._httpsGet(asset.browser_download_url);
+        const inFileVersionMatch = text.match(/@version\s+([\d.]+)/);
+        if (!inFileVersionMatch || inFileVersionMatch[1] !== remoteVersion) {
+            throw new Error("Versão do arquivo baixado não confere com a tag da release");
+        }
+        const sha256 = await this._sha256Hex(text);
+        return { version: remoteVersion, text, sha256, htmlUrl: release?.html_url || ByeBlocked.RELEASE_URL };
+    }
+    async _sha256Hex(text) {
+        try {
+            if (typeof crypto !== "undefined" && crypto.subtle) {
+                const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+                return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+            }
+        } catch (_) {}
+        try {
+            const nodeCrypto = require("crypto");
+            return nodeCrypto.createHash("sha256").update(text, "utf8").digest("hex");
+        } catch (_) {}
+        return null;
+    }
     async checkForUpdatesAuto() {
         if (this._updateState.status === "checking") return;
         this._updateState = {
@@ -732,10 +767,7 @@ module.exports = class ByeBlocked {
             remoteText: null
         };
         try {
-            const text = await this._httpsGet(ByeBlocked.RAW_URL);
-            const match = text.match(/@version\s+([\d.]+)/);
-            if (!match) throw new Error("Version tag not found");
-            const remote = match[1];
+            const { version: remote, text, sha256, htmlUrl } = await this._fetchLatestRelease();
             const local = ByeBlocked.VERSION;
             const hasUpdate = this._compareVersions(remote, local) > 0;
             this._updateLastCheckTime();
@@ -755,12 +787,12 @@ module.exports = class ByeBlocked {
                                         } catch (_) {}
                                         this._updateNotice = null;
                                     }
-                                    this._autoInstall(remote, text);
+                                    this._autoInstall(remote, text, sha256, null, htmlUrl);
                                 }
                             }, {
                                 label: "View on GitHub",
                                 onClick: () => {
-                                    this._safeOpenExternal(ByeBlocked.RELEASE_URL);
+                                    this._safeOpenExternal(htmlUrl);
                                 }
                             } ]
                         });
@@ -771,7 +803,9 @@ module.exports = class ByeBlocked {
                 this._updateState = {
                     status: "available",
                     latestVersion: remote,
-                    remoteText: text
+                    remoteText: text,
+                    sha256,
+                    htmlUrl
                 };
             } else {
                 this._updateState = {
@@ -832,10 +866,7 @@ module.exports = class ByeBlocked {
         };
         this._renderUpdateBtn(panelRef);
         try {
-            const text = await this._httpsGet(ByeBlocked.RAW_URL);
-            const match = text.match(/@version\s+([\d.]+)/);
-            if (!match) throw new Error("Version tag not found in remote file");
-            const remote = match[1];
+            const { version: remote, text, sha256, htmlUrl } = await this._fetchLatestRelease();
             const local = ByeBlocked.VERSION;
             const hasUpdate = this._compareVersions(remote, local) > 0;
             this._updateLastCheckTime();
@@ -844,7 +875,9 @@ module.exports = class ByeBlocked {
                 this._updateState = {
                     status: "available",
                     latestVersion: remote,
-                    remoteText: text
+                    remoteText: text,
+                    sha256,
+                    htmlUrl
                 };
                 this._renderUpdateBtn(panelRef);
                 if (!silent) {
@@ -860,16 +893,12 @@ module.exports = class ByeBlocked {
                                         } catch (_) {}
                                         this._updateNotice = null;
                                     }
-                                    this._autoInstall(remote, text, panelRef);
+                                    this._autoInstall(remote, text, sha256, panelRef, htmlUrl);
                                 }
                             }, {
                                 label: "View on GitHub",
                                 onClick: () => {
-                                    try {
-                                        require("electron").shell.openExternal(ByeBlocked.RELEASE_URL);
-                                    } catch (_) {
-                                        window.open(ByeBlocked.RELEASE_URL, "_blank");
-                                    }
+                                    this._safeOpenExternal(htmlUrl);
                                 }
                             } ]
                         });
@@ -933,13 +962,13 @@ module.exports = class ByeBlocked {
     }
     async _httpsGet(url, _redirectCount = 0) {
         if (_redirectCount > 5) throw new Error("Too many redirects");
+        const commonHeaders = {
+            "User-Agent": "ByeBlocked-UpdateChecker/1.0",
+            "Accept": "application/vnd.github+json",
+            "Cache-Control": "no-cache"
+        };
         if (typeof BdApi?.Net?.fetch === "function") {
-            const res = await BdApi.Net.fetch(url, {
-                headers: {
-                    "User-Agent": "ByeBlocked-UpdateChecker/1.0",
-                    "Cache-Control": "no-cache"
-                }
-            });
+            const res = await BdApi.Net.fetch(url, { headers: commonHeaders });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return res.text();
         }
@@ -953,10 +982,7 @@ module.exports = class ByeBlocked {
                         hostname: urlObj.hostname,
                         path: urlObj.pathname + urlObj.search,
                         method: "GET",
-                        headers: {
-                            "User-Agent": "ByeBlocked-UpdateChecker/1.0",
-                            "Cache-Control": "no-cache"
-                        }
+                        headers: commonHeaders
                     };
                     const req = https.request(options, res => {
                         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -983,12 +1009,7 @@ module.exports = class ByeBlocked {
                 }
             });
         }
-        const res = await fetch(url, {
-            headers: {
-                "User-Agent": "ByeBlocked-UpdateChecker/1.0",
-                "Cache-Control": "no-cache"
-            }
-        });
+        const res = await fetch(url, { headers: commonHeaders });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.text();
     }
@@ -1001,13 +1022,23 @@ module.exports = class ByeBlocked {
         }
         return 0;
     }
-    async _autoInstall(remoteVersion, remoteText, panelRef = null) {
+    async _autoInstall(remoteVersion, remoteText, expectedSha256, panelRef = null, htmlUrl = ByeBlocked.RELEASE_URL) {
         if (this._updateResetTimer) {
             clearTimeout(this._updateResetTimer);
             this._updateResetTimer = null;
         }
         try {
             this._removeNotice();
+            if (expectedSha256) {
+                const actualSha256 = await this._sha256Hex(remoteText);
+                if (!actualSha256 || actualSha256 !== expectedSha256) {
+                    throw new Error("Falha na verificação de integridade (hash não confere) — instalação cancelada por segurança.");
+                }
+            }
+            const inFileVersionMatch = remoteText.match(/@version\s+([\d.]+)/);
+            if (!inFileVersionMatch || inFileVersionMatch[1] !== remoteVersion) {
+                throw new Error("Versão do conteúdo baixado não confere com a versão esperada — instalação cancelada por segurança.");
+            }
             const fs = require("fs");
             const path = require("path");
             const pluginsDir = BdApi.Plugins.folder;
@@ -1031,8 +1062,8 @@ module.exports = class ByeBlocked {
                 }
             }, 800);
         } catch (err) {
-            this.toast("Auto-install failed: " + err.message + " â€” download manually from GitHub.", "error");
-            this._safeOpenExternal(ByeBlocked.RELEASE_URL);
+            this.toast("Auto-install failed: " + err.message + " — download manually from GitHub.", "error");
+            this._safeOpenExternal(htmlUrl);
         }
     }
     _renderUpdateBtn(panelRef) {
@@ -1061,7 +1092,7 @@ module.exports = class ByeBlocked {
                 disabled: false
             },
             error: {
-                label: "Error â€” try again",
+                label: "Error — try again",
                 cls: "is-error",
                 disabled: false
             }
@@ -2032,21 +2063,37 @@ module.exports = class ByeBlocked {
             this._historyPatchActive = true;
         } catch (_) {}
     }
+    _isNmbTrackedNode(node) {
+        if (!node) return false;
+        try {
+            if (this.hiddenElements?.has(node) || this.hiddenParents?.has(node)) return true;
+            if (node.nodeType === 1 && node.dataset) {
+                for (const key in node.dataset) {
+                    if (key.startsWith("nmb")) return true;
+                }
+            }
+        } catch (_) {}
+        return false;
+    }
     _installDomRemovalGuard() {
         if (ByeBlocked._domGuardInstalled) return;
         const proto = Node.prototype;
         const originalRemoveChild = proto.removeChild;
         const originalInsertBefore = proto.insertBefore;
+        const self = this;
         proto.removeChild = function(child) {
             if (child && child.parentNode !== this) {
-                console.warn("[ByeBlocked] removeChild bloqueado: nó já não era filho (evitando NotFoundError).", { parent: this, child: child });
-                return child;
+                if (self._isNmbTrackedNode(child)) {
+                    console.warn("[ByeBlocked] removeChild bloqueado: nó rastreado pelo ByeBlocked já não era filho (evitando NotFoundError).", { parent: this, child: child });
+                    return child;
+                }
+                return originalRemoveChild.call(this, child);
             }
             try {
                 return originalRemoveChild.call(this, child);
             } catch (err) {
-                if (err instanceof DOMException && err.name === "NotFoundError") {
-                    console.warn("[ByeBlocked] removeChild lançou NotFoundError nativo — engolido para evitar crash.", { parent: this, child: child });
+                if (err instanceof DOMException && err.name === "NotFoundError" && self._isNmbTrackedNode(child)) {
+                    console.warn("[ByeBlocked] removeChild lançou NotFoundError em nó rastreado pelo ByeBlocked — engolido para evitar crash.", { parent: this, child: child });
                     return child;
                 }
                 throw err;
@@ -2054,14 +2101,17 @@ module.exports = class ByeBlocked {
         };
         proto.insertBefore = function(newNode, referenceNode) {
             if (referenceNode && referenceNode.parentNode !== this) {
-                console.warn("[ByeBlocked] insertBefore bloqueado: nó de referência já não era filho (evitando NotFoundError).", { parent: this, referenceNode: referenceNode });
-                return this.appendChild(newNode);
+                if (self._isNmbTrackedNode(referenceNode)) {
+                    console.warn("[ByeBlocked] insertBefore bloqueado: nó de referência rastreado pelo ByeBlocked já não era filho (evitando NotFoundError).", { parent: this, referenceNode: referenceNode });
+                    return this.appendChild(newNode);
+                }
+                return originalInsertBefore.call(this, newNode, referenceNode);
             }
             try {
                 return originalInsertBefore.call(this, newNode, referenceNode);
             } catch (err) {
-                if (err instanceof DOMException && err.name === "NotFoundError") {
-                    console.warn("[ByeBlocked] insertBefore lançou NotFoundError nativo — engolido para evitar crash.", { parent: this, referenceNode: referenceNode });
+                if (err instanceof DOMException && err.name === "NotFoundError" && self._isNmbTrackedNode(referenceNode)) {
+                    console.warn("[ByeBlocked] insertBefore lançou NotFoundError em nó rastreado pelo ByeBlocked — engolido para evitar crash.", { parent: this, referenceNode: referenceNode });
                     return this.appendChild(newNode);
                 }
                 throw err;
@@ -2190,7 +2240,7 @@ module.exports = class ByeBlocked {
                 this._closeEventsPopoverFrom(link);
                 this._openGuildRolesSettings();
             } catch (_) {
-                this.toast("âš ï¸ NÃ£o foi possÃ­vel abrir as configuraÃ§Ãµes do servidor automaticamente.", "warn");
+                this.toast("⚠️ Não foi possível abrir as configurações do servidor automaticamente.", "warn");
             }
         };
         document.addEventListener("click", this._roleSettingsClickHandler, true);
@@ -2481,9 +2531,10 @@ module.exports = class ByeBlocked {
         this._resolveMediaEngineActions();
         try {
             this.resolveInviteQueryModule();
-        } catch (_) {
+        } catch (err) {
             this.modules.InviteQueryModule = null;
             this.modules.InviteQueryComposeKey = null;
+            this._patcher._warn('resolveModules:resolveInviteQueryModule', err);
         }
         this._resolveSoundUtils();
         this._relationshipStoreJustAppeared = relationshipStoreJustAppeared;
@@ -2648,6 +2699,7 @@ module.exports = class ByeBlocked {
         }
         this._nmbMissingCoreModules = missing;
         if (missing.length) {
+            console.warn(`[ByeBlocked] Módulos essenciais não encontrados: ${missing.join(", ")}. O Discord provavelmente mudou algo internamente — funcionalidades relacionadas podem não funcionar até uma atualização do plugin.`);
         }
         return missing;
     }
@@ -5501,7 +5553,7 @@ return false;
                     if (blockedMessage && blockedMessage.dataset?.hiddenBlocked === "true") {
                         shouldHide = true;
                     }
-                    if (placeholder && /Be the first|start this conversation|Seja o primeiro|comeÃ§ar essa conversa|empty/i.test(placeholder.textContent || "")) {
+                    if (placeholder && /Be the first|start this conversation|Seja o primeiro|começar essa conversa|empty/i.test(placeholder.textContent || "")) {
                         shouldHide = true;
                     }
                     if (messageContent && !messageContent.querySelector(':not([data-hidden-blocked="true"])')) {
@@ -6047,7 +6099,7 @@ return false;
         button.addEventListener("click", () => {
             const allButtons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(btn => btn !== button && !emptyRoot.contains(btn) && btn.offsetParent !== null);
             const normalize = el => (el.textContent || "").trim().toLowerCase();
-            let target = allButtons.find(btn => normalize(btn) === "create thread") || allButtons.find(btn => normalize(btn) === "create") || allButtons.find(btn => normalize(btn) === "criar") || allButtons.find(btn => normalize(btn) === "criar tÃ³pico");
+            let target = allButtons.find(btn => normalize(btn) === "create thread") || allButtons.find(btn => normalize(btn) === "create") || allButtons.find(btn => normalize(btn) === "criar") || allButtons.find(btn => normalize(btn) === "criar tópico");
             if (!target) return;
             try {
                 target.click();
@@ -7190,10 +7242,10 @@ return false;
 
             if (this._clickNativeInviteButton()) return;
 
-            this.toast?.("NÃ£o encontrei o convite automÃ¡tico nessa versÃ£o do Discord. Abra pelo menu de participantes do canal.", "info");
+            this.toast?.("Não encontrei o convite automático nessa versão do Discord. Abra pelo menu de participantes do canal.", "info");
         } catch (_) {
             try {
-                this.toast?.("NÃ£o encontrei o convite automÃ¡tico nessa versÃ£o do Discord. Abra pelo menu de participantes do canal.", "info");
+                this.toast?.("Não encontrei o convite automático nessa versão do Discord. Abra pelo menu de participantes do canal.", "info");
             } catch (_) {}
         }
     }
@@ -7395,7 +7447,7 @@ return false;
     }
     hideStageSpeakerRequests() {
         try {
-            const headingRe = /^(Pedidos para falar|Requests to Speak)(\s*[â€”-]\s*\d+)?$/i;
+            const headingRe = /^(Pedidos para falar|Requests to Speak)(\s*[—-]\s*\d+)?$/i;
             const t = _locale(_getLocale(), ByeBlocked.STAGE_LOCALE);
             const headings = document.querySelectorAll('[class*="listTitle__"]');
             let anyPanelProcessed = false;
@@ -7690,7 +7742,7 @@ return false;
     }
     _fixEventsSidebarCounter() {
         const items = document.querySelectorAll('nav [role="listitem"], nav a, nav div[role="button"], nav [class*="link__"], nav [class*="basicChannelRowLink"]');
-        const eventRegex = /\d+.*(?:event|evento|Ã©vÃ©nement)|(?:event|evento|Ã©vÃ©nement).*\d+/i;
+        const eventRegex = /\d+.*(?:event|evento|événement)|(?:event|evento|événement).*\d+/i;
         const seenNameEls = new Set;
         for (let i = 0; i < items.length; i++) {
             this._processEventsSidebarItem(items[i], eventRegex, seenNameEls);
@@ -7698,7 +7750,7 @@ return false;
     }
     _fixEventsSidebarCounterFor(focusItem) {
         if (!focusItem) return;
-        const eventRegex = /\d+.*(?:event|evento|Ã©vÃ©nement)|(?:event|evento|Ã©vÃ©nement).*\d+/i;
+        const eventRegex = /\d+.*(?:event|evento|événement)|(?:event|evento|événement).*\d+/i;
         const item = focusItem.matches?.('[role="listitem"], a, div[role="button"], [class*="link__"], [class*="basicChannelRowLink"]') ? focusItem : focusItem.querySelector?.('[role="listitem"], a, div[role="button"], [class*="link__"], [class*="basicChannelRowLink"]') || focusItem;
         this._processEventsSidebarItem(item, eventRegex, null);
     }
@@ -7929,7 +7981,7 @@ return false;
                 const closeBtn = _findCloseButton(dialog);
                 if (closeBtn) {
                     closeBtn.click();
-                    this.toast("ðŸš« Este evento foi criado por um usuÃ¡rio bloqueado.", "info");
+                    this.toast("🚫 Este evento foi criado por um usuário bloqueado.", "info");
                 }
             }
         }
@@ -8351,7 +8403,7 @@ return false;
             } catch (_) {}
         }
         if (!guildId) {
-            this.toast("âš ï¸ NÃ£o foi possÃ­vel identificar o servidor atual.", "warn");
+            this.toast("⚠️ Não foi possível identificar o servidor atual.", "warn");
             return;
         }
         const isSettingsGearIcon = el => {
@@ -8467,7 +8519,7 @@ return false;
                 return;
             }
         } catch (_) {}
-        this.toast("âš ï¸ NÃ£o foi possÃ­vel abrir automaticamente. Abra manualmente em ConfiguraÃ§Ãµes do servidor > Cargos.", "warn");
+        this.toast("⚠️ Não foi possível abrir automaticamente. Abra manualmente em Configurações do servidor > Cargos.", "warn");
     }
     fixGuildMembersPageCount() {
         if (!this.settings.places.memberList) return;
@@ -10838,7 +10890,7 @@ return false;
         const updateBtn = event.target.closest("[data-nmb-update-btn]");
         if (updateBtn) {
             if (this._updateState.status === "available" && this._updateState.remoteText) {
-                this._autoInstall(this._updateState.latestVersion, this._updateState.remoteText, panel);
+                this._autoInstall(this._updateState.latestVersion, this._updateState.remoteText, this._updateState.sha256, panel, this._updateState.htmlUrl);
             } else {
                 this.checkForUpdates(panel, false);
             }
