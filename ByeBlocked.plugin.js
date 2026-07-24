@@ -2,8 +2,8 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.5
- * @description Remove blocked and ignored users from your Discord view.
+ * @version 2.4.6
+ * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
@@ -199,7 +199,7 @@ function _findCloseButton(dialog) {
 })();
 
 module.exports = class ByeBlocked {
-    static VERSION="2.4.5";
+    static VERSION="2.4.6";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -725,26 +725,35 @@ module.exports = class ByeBlocked {
             this.toast("Go to BD Settings â†’ Plugins â†’ ByeBlocked âš™ï¸", "info");
         }
     }
-    async _fetchLatestRelease() {
+    async _fetchLatestReleaseMeta() {
         const releaseJsonText = await this._httpsGet(ByeBlocked.RELEASES_API_URL);
         let release;
         try { release = JSON.parse(releaseJsonText); }
-        catch (_) { throw new Error("Resposta inválida da Releases API"); }
+        catch (e) {
+            throw new Error("Resposta inválida da Releases API");
+        }
         const tagName = release?.tag_name || "";
         const versionMatch = tagName.match(/(\d+\.\d+\.\d+)/);
-        if (!versionMatch) throw new Error("Tag de release sem versão reconhecível");
+        if (!versionMatch) {
+            throw new Error("Tag de release sem versão reconhecível");
+        }
         const remoteVersion = versionMatch[1];
         const asset = Array.isArray(release?.assets)
             ? release.assets.find(a => a?.name === ByeBlocked.ASSET_FILENAME)
             : null;
-        if (!asset?.browser_download_url) throw new Error("Asset da release não encontrado");
-        const text = await this._httpsGet(asset.browser_download_url);
+        if (!asset?.browser_download_url) {
+            throw new Error("Asset da release não encontrado");
+        }
+        return { version: remoteVersion, downloadUrl: asset.browser_download_url, htmlUrl: release?.html_url || ByeBlocked.RELEASE_URL };
+    }
+    async _downloadReleaseAsset(meta) {
+        const text = await this._httpsGet(meta.downloadUrl);
         const inFileVersionMatch = text.match(/@version\s+([\d.]+)/);
-        if (!inFileVersionMatch || inFileVersionMatch[1] !== remoteVersion) {
+        if (!inFileVersionMatch || inFileVersionMatch[1] !== meta.version) {
             throw new Error("Versão do arquivo baixado não confere com a tag da release");
         }
         const sha256 = await this._sha256Hex(text);
-        return { version: remoteVersion, text, sha256, htmlUrl: release?.html_url || ByeBlocked.RELEASE_URL };
+        return { version: meta.version, text, sha256, htmlUrl: meta.htmlUrl };
     }
     async _sha256Hex(text) {
         try {
@@ -767,11 +776,14 @@ module.exports = class ByeBlocked {
             remoteText: null
         };
         try {
-            const { version: remote, text, sha256, htmlUrl } = await this._fetchLatestRelease();
+            const meta = await this._fetchLatestReleaseMeta();
+            const remote = meta.version;
+            const htmlUrl = meta.htmlUrl;
             const local = ByeBlocked.VERSION;
             const hasUpdate = this._compareVersions(remote, local) > 0;
             this._updateLastCheckTime();
             if (hasUpdate) {
+                const { text, sha256 } = await this._downloadReleaseAsset(meta);
                 if (remote !== this._lastNotifiedVersion) {
                     this._lastNotifiedVersion = remote;
                     this._removeNotice();
@@ -814,7 +826,7 @@ module.exports = class ByeBlocked {
                     remoteText: null
                 };
             }
-        } catch (_) {
+        } catch (err) {
             this._updateState = {
                 status: "idle",
                 latestVersion: null,
@@ -866,12 +878,15 @@ module.exports = class ByeBlocked {
         };
         this._renderUpdateBtn(panelRef);
         try {
-            const { version: remote, text, sha256, htmlUrl } = await this._fetchLatestRelease();
+            const meta = await this._fetchLatestReleaseMeta();
+            const remote = meta.version;
+            const htmlUrl = meta.htmlUrl;
             const local = ByeBlocked.VERSION;
             const hasUpdate = this._compareVersions(remote, local) > 0;
             this._updateLastCheckTime();
             this._updatePanelInfo(panelRef);
             if (hasUpdate) {
+                const { text, sha256 } = await this._downloadReleaseAsset(meta);
                 this._updateState = {
                     status: "available",
                     latestVersion: remote,
@@ -969,7 +984,9 @@ module.exports = class ByeBlocked {
         };
         if (typeof BdApi?.Net?.fetch === "function") {
             const res = await BdApi.Net.fetch(url, { headers: commonHeaders });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!res.ok) {
+                throw new Error(`HTTP ${res.status}`);
+            }
             return res.text();
         }
         const _require = typeof window !== "undefined" && typeof window.require === "function" ? window.require : typeof __non_webpack_require__ !== "undefined" ? __non_webpack_require__ : null;
@@ -998,7 +1015,9 @@ module.exports = class ByeBlocked {
                         res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
                         res.on("error", reject);
                     });
-                    req.on("error", reject);
+                    req.on("error", e => {
+                        reject(e);
+                    });
                     req.setTimeout(1e4, () => {
                         req.destroy();
                         reject(new Error("Timeout"));
@@ -1010,7 +1029,9 @@ module.exports = class ByeBlocked {
             });
         }
         const res = await fetch(url, { headers: commonHeaders });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+        }
         return res.text();
     }
     _compareVersions(a, b) {
