@@ -43,7 +43,7 @@ Feel free to open an [Issue](https://github.com/8ug8ird/ByeBlocked/issues). Bug 
 <br>
 
 > [!WARNING]
-> BetterDiscord goes against Discord's ToS. Use at your own risk.
+> BetterDiscord modifies the Discord client and technically violates Discord's ToS. Account action against individual users is uncommon in practice, but possible. Use at your own risk.
 
 <br>
 
