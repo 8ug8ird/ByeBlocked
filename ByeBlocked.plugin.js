@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.7
+ * @version 2.4.8
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -195,7 +195,7 @@ function _findCloseButton(dialog) {
 })();
 
 module.exports = class ByeBlocked {
-    static VERSION="2.4.7";
+    static VERSION="2.4.8";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -342,6 +342,9 @@ module.exports = class ByeBlocked {
         this._isNavigating = false;
         this._navStartedAt = null;
         this._scrollRestoreTimer = null;
+        this._scrollLoopActive = false;
+        this._scrollLoopNavToken = null;
+        this._navToken = 0;
         
         for (const flag of ['store','readState','taskbarBadge','taskbarElectron','forumPostComponent',
             'messagesWrap','inviteSuggestions','privateChannelStore','mentionAutocomplete',
@@ -1562,6 +1565,32 @@ module.exports = class ByeBlocked {
             }
         }
     }
+    _checkAndSuppressBlockedMentionForChannel(channelId, helpers) {
+        if (!channelId) return false;
+        if (this._hasBlockedOnlyReadActivity(channelId)) return false;
+        const store = this.modules.ReadStateStore;
+        if (!store) return false;
+        try {
+            const mentionCount = store.getMentionCount ? store.getMentionCount(channelId) : 0;
+            if (mentionCount <= 0) return false;
+            const ackId = store.ackMessageId ? store.ackMessageId(channelId) : null;
+            if (!ackId) return false;
+            const messages = helpers.getChannelMessages(channelId);
+            if (!messages.length) return false;
+            const unread = messages.filter(m => m?.id && this._snowflakeGreater(m.id, ackId));
+            if (!unread.length) return false;
+            const hasBlockedMention = unread.some(m => Array.isArray(m?.mentions) && m.mentions.some(mm => this.shouldHide(typeof mm === 'string' ? mm : (mm?.id || mm?.userId))));
+            const anyOtherVisibleUnread = unread.some(m => !helpers.isBlockedMessage(m));
+            if (hasBlockedMention && !anyOtherVisibleUnread) {
+                let parentId = null;
+                try { parentId = this.modules.ChannelStore?.getChannel?.(channelId)?.parent_id || null; } catch (_) {}
+                const lastMessageId = store.lastMessageId ? store.lastMessageId(channelId) : null;
+                this._markBlockedOnlyReadActivity(channelId, parentId, lastMessageId);
+                return true;
+            }
+        } catch (_) {}
+        return false;
+    }
     _bootstrapBlockedUnreadSuppression() {
         const helpers = this._getReadStateHelpers();
         let changed = false;
@@ -1582,12 +1611,17 @@ module.exports = class ByeBlocked {
                 const store = this.modules.ReadStateStore;
                 const lastMessageId = store?.lastMessageId?.(channelId);
                 const messages = helpers.getChannelMessages(channelId);
+                if (this._checkAndSuppressBlockedMentionForChannel(channelId, helpers)) {
+                    changed = true;
+                    return;
+                }
                 if (messages.length) {
                     const oldestUnreadId = store.getOldestUnreadMessageId ? store.getOldestUnreadMessageId(channelId) : null;
                     if (oldestUnreadId) {
                         const idx = messages.findIndex(m => m?.id === oldestUnreadId);
                         if (idx !== -1) {
-                            const anyVisible = messages.slice(idx).some(m => !helpers.isBlockedMessage(m));
+                            const unreadSlice = messages.slice(idx);
+                            const anyVisible = unreadSlice.some(m => !helpers.isBlockedMessage(m));
                             if (!anyVisible) {
                                 this._markBlockedOnlyReadActivity(channelId, channel?.parent_id, lastMessageId);
                                 changed = true;
@@ -1627,6 +1661,19 @@ module.exports = class ByeBlocked {
             this.saveBlockedReadCache();
         }
     }
+    _channelHasGenuineUnreadOtherThanBlocked(channelId) {
+        if (!channelId) return false;
+        try {
+            const store = this.modules.ReadStateStore;
+            const ackId = store?.ackMessageId ? store.ackMessageId(channelId) : null;
+            const lastId = store?.lastMessageId ? store.lastMessageId(channelId) : null;
+            if (!ackId || !lastId) return false;
+            if (!this._snowflakeGreater(lastId, ackId)) return false;
+            return !this._hasBlockedOnlyReadActivity(channelId);
+        } catch (_) {
+            return false;
+        }
+    }
     _clearBlockedOnlyReadActivity(channelId) {
         if (!channelId || !this._blockedOnlyReadChannels) return;
         const id = String(channelId);
@@ -1659,6 +1706,17 @@ module.exports = class ByeBlocked {
             if (threadOwner && this.shouldHide(threadOwner)) return false;
         } catch (_) {}
         if (this._hasBlockedOnlyReadActivity(channelId)) return false;
+        try {
+            const ackId = store.ackMessageId ? store.ackMessageId(channelId) : null;
+            const messages = helpers.getChannelMessages(channelId);
+            if (ackId && messages.length) {
+                const unread = messages.filter(m => m?.id && this._snowflakeGreater(m.id, ackId));
+                if (unread.length) {
+                    const anyVisible = unread.some(m => !helpers.isBlockedMessage(m));
+                    if (!anyVisible) return false;
+                }
+            }
+        } catch (_) {}
         return null;
     }
     _guildHasBlockedOnlyUnread(guildId) {
@@ -1858,21 +1916,22 @@ module.exports = class ByeBlocked {
         this._lastSeenGuildId = currentGuildId;
         this._isNavigating = true;
         this._navStartedAt = Date.now();
+        this._userScrolledSinceNav = false;
+        const navToken = ++this._navToken;
         this._injectGuildSwitchGuard();
         if (this.settings.places.events) {
-            try {
-                this.hideBlockedEvents();
-            } catch (_) {}
+            try { this.hideBlockedEvents(); } catch (_) {}
         }
         try {
             const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
             if (channelId) this._scanExistingPinsForChannel(channelId);
         } catch (_) {}
-        this._waitForChatReady(0);
+        this._waitForChatReady(0, navToken);
     }
-    _waitForChatReady(attempts) {
+    _waitForChatReady(attempts, navToken = this._navToken) {
         const MAX_ATTEMPTS = 60;
         const INTERVAL = 50;
+        if (navToken !== this._navToken) return;
         if (!this.isRunning) {
             this._removeGuildSwitchGuard();
             this._restartObserver();
@@ -1896,16 +1955,27 @@ module.exports = class ByeBlocked {
             }
             this._restartObserver();
             this.scanDom();
-            this._restoreChatScroll();
+            if (this.settings.places?.messages) {
+                try {
+                    const channelIdNow = this.modules.SelectedChannelStore?.getChannelId?.();
+                    if (channelIdNow && this._checkAndSuppressBlockedMentionForChannel(channelIdNow, this._getReadStateHelpers())) {
+                        this._emitReadStateChanges();
+                    }
+                } catch (_) {}
+                try { this._watchForUserScrollInteraction(); } catch (_) {}
+            }
             this.patchMessageStore();
             try {
                 const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
                 if (channelId) this._scanExistingPinsForChannel(channelId);
             } catch (_) {}
+            if (this.settings.places?.messages) {
+                this._startScrollCorrectionLoop(navToken);
+            }
             this._guildSwitchWaitTimeout = setTimeout(() => {
+                if (navToken !== this._navToken) return;
                 if (!this.isRunning) return;
                 this.scanDom();
-                this._restoreChatScroll();
                 try {
                     const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
                     if (channelId) this._scanExistingPinsForChannel(channelId);
@@ -1913,26 +1983,19 @@ module.exports = class ByeBlocked {
                 this._guildSwitchWaitTimeout = null;
                 this._waitForEventsDataThenRemoveGuard(0);
             }, 400);
+            this._finishNavigation(navToken);
         } else {
             if (this.settings.places.events) {
-                try {
-                    this.hideBlockedEvents();
-                } catch (_) {}
+                try { this.hideBlockedEvents(); } catch (_) {}
             }
             this._guildSwitchWaitTimeout = setTimeout(() => {
-                this._waitForChatReady(attempts + 1);
+                if (navToken !== this._navToken) return;
+                this._waitForChatReady(attempts + 1, navToken);
             }, INTERVAL);
         }
     }
-    _restoreChatScroll() {
-        if (!this._isNavigating) return;
-        if (this._scrollRestoreTimer) { clearTimeout(this._scrollRestoreTimer); this._scrollRestoreTimer = null; }
-        this._scrollRestoreTimer = setTimeout(() => {
-            this._finishNavigation();
-            this._scrollRestoreTimer = null;
-        }, 600);
-    }
-    _finishNavigation() {
+    _finishNavigation(navToken) {
+        if (navToken !== undefined && navToken !== this._navToken) return;
         this._isNavigating = false;
         try {
             for (const el of Array.from(this.hiddenElements)) {
@@ -1942,6 +2005,214 @@ module.exports = class ByeBlocked {
                 if (!document.contains(parent)) this.hiddenParents.delete(parent);
             }
         } catch (_) {}
+    }
+    _watchForUserScrollInteraction() {
+        try {
+            const scroller = this._findMessagesScroller();
+            if (!scroller) return;
+            const opts = { passive: true };
+            const mark = () => { this._userScrolledSinceNav = true; };
+            scroller.addEventListener("wheel", mark, opts);
+            scroller.addEventListener("touchstart", mark, opts);
+            scroller.addEventListener("pointerdown", mark, opts);
+            scroller.addEventListener("keydown", mark, opts);
+        } catch (_) {}
+    }
+    _findMessagesScroller() {
+        const isScrollable = el => {
+            if (!el) return false;
+            try {
+                const style = getComputedStyle(el);
+                const overflowY = style.overflowY;
+                return (overflowY === "auto" || overflowY === "scroll") && el.scrollHeight > el.clientHeight;
+            } catch (_) {
+                return false;
+            }
+        };
+        const climbToScrollable = start => {
+            let el = start;
+            for (let i = 0; i < 12 && el; i++, el = el.parentElement) {
+                if (isScrollable(el)) return el;
+            }
+            return null;
+        };
+        try {
+            const listRoot = document.querySelector('[data-list-id*="chat-messages"]');
+            if (listRoot) {
+                const byClass = listRoot.closest('[class*="scroller"]');
+                if (isScrollable(byClass)) return byClass;
+                const climbed = climbToScrollable(listRoot);
+                if (climbed) return climbed;
+            }
+        } catch (_) {}
+        try {
+            const chatContent = document.querySelector('[class*="chatContent"]');
+            const scroller = chatContent?.querySelector('[class*="scroller"]');
+            if (isScrollable(scroller)) return scroller;
+            const climbedFromChatContent = climbToScrollable(chatContent);
+            if (climbedFromChatContent) return climbedFromChatContent;
+        } catch (_) {}
+        return null;
+    }
+    _getCurrentChannelIdRobust() {
+        try {
+            const fromStore = this.modules.SelectedChannelStore?.getChannelId?.();
+            if (fromStore) return fromStore;
+        } catch (_) {}
+        try {
+            const match = location.pathname.match(/\/channels\/(?:@me|\d+)\/(\d{15,25})(?:\/threads\/(\d{15,25}))?/);
+            if (match) return match[2] || match[1] || null;
+        } catch (_) {}
+        return null;
+    }
+    _resolveLastMessageBlockedState(channelId) {
+        let collection = null;
+        try {
+            const raw = this._rawGetMessages;
+            const store = this.modules.MessageStore;
+            collection = raw ? raw(channelId) : store?.getMessages?.(channelId);
+        } catch (_) {}
+        if (!collection) {
+            return this._domConfirmsChannelEmpty() ? false : undefined;
+        }
+        const list = Array.isArray(collection) ? collection
+            : Array.isArray(collection._array) ? collection._array
+            : null;
+        if (!list) return undefined;
+        const isReady = typeof collection.ready === "boolean"
+            ? collection.ready
+            : Array.isArray(collection);
+        if (list.length === 0) {
+            if (isReady) return false;
+            return this._domConfirmsChannelEmpty() ? false : undefined;
+        }
+        if (!isReady) {
+        }
+        const lastMessage = list[list.length - 1];
+        return this._messageWouldBeHidden(lastMessage);
+    }
+    _messageWouldBeHidden(message) {
+        if (!message) return false;
+        const authorId = message.author?.id || null;
+        if (authorId && this.shouldHide(authorId)) return true;
+        try {
+            if (message.messageReference) {
+                const ref = this.getReferencedMessage(message);
+                const refAuthorId = ref?.author?.id || null;
+                if (refAuthorId && this.shouldHide(refAuthorId)) return true;
+            }
+        } catch (_) {}
+        try {
+            const mentions = message.mentions;
+            if (mentions) {
+                const list = Array.isArray(mentions) ? mentions : Array.from(mentions);
+                for (const u of list) {
+                    const id = typeof u === "string" ? u : u?.id;
+                    if (id && this.shouldHide(id)) return true;
+                }
+            }
+        } catch (_) {}
+        return false;
+    }
+    _domConfirmsChannelEmpty() {
+        try {
+            const listRoot = document.querySelector('[data-list-id*="chat-messages"]');
+            if (listRoot) {
+                const hasRealMessage = !!listRoot.querySelector('li[class*="messageListItem"], [class*="groupStart_"], [data-list-item-id*="chat-messages"]');
+                if (!hasRealMessage) return true;
+            }
+        } catch (_) {}
+        return false;
+    }
+    _startScrollCorrectionLoop(navToken) {
+        if (this._scrollLoopActive && this._scrollLoopNavToken === navToken) return;
+        this._scrollLoopActive = true;
+        this._scrollLoopNavToken = navToken;
+        const startedAt = Date.now();
+        const MAX_MS = 2000;
+        const STABLE_FRAMES_NEEDED = 6;
+        let stableStreak = 0;
+        let frame = 0;
+        let masked = false;
+        let maskedEl = null;
+        const applyMask = scroller => {
+            try {
+                if (!scroller) return;
+                if (maskedEl && maskedEl !== scroller && maskedEl.dataset.nmbScrollMasked) {
+                    try {
+                        maskedEl.style.visibility = maskedEl.dataset.nmbPrevVisibility || "";
+                        delete maskedEl.dataset.nmbScrollMasked;
+                        delete maskedEl.dataset.nmbPrevVisibility;
+                    } catch (_) {}
+                }
+                if (!scroller.dataset.nmbScrollMasked) {
+                    scroller.dataset.nmbScrollMasked = "true";
+                    scroller.dataset.nmbPrevVisibility = scroller.style.visibility || "";
+                    scroller.style.visibility = "hidden";
+                }
+                masked = true;
+                maskedEl = scroller;
+            } catch (_) {}
+        };
+        const removeMask = () => {
+            try {
+                const el = maskedEl;
+                if (el && el.dataset.nmbScrollMasked) {
+                    el.style.visibility = el.dataset.nmbPrevVisibility || "";
+                    delete el.dataset.nmbScrollMasked;
+                    delete el.dataset.nmbPrevVisibility;
+                }
+                masked = false;
+                maskedEl = null;
+            } catch (_) {}
+        };
+        const stop = reason => {
+            if (masked) removeMask();
+            this._scrollLoopActive = false;
+        };
+        const tick = () => {
+            if (!this.isRunning) return stop("not-running");
+            if (navToken !== this._navToken) return stop("nav-token-changed");
+            if (Date.now() - startedAt > MAX_MS) return stop("timeout");
+            if (this._userScrolledSinceNav) return stop("user-scrolled");
+            frame++;
+            const channelId = this._getCurrentChannelIdRobust();
+            if (!channelId) {
+                requestAnimationFrame(tick);
+                return;
+            }
+            const blocked = this._resolveLastMessageBlockedState(channelId);
+            if (blocked === undefined) {
+                if (frame > 1) {
+                    const maybeScroller = this._findMessagesScroller();
+                    if (maybeScroller) applyMask(maybeScroller);
+                }
+                requestAnimationFrame(tick);
+                return;
+            }
+            if (!blocked) {
+                return stop("not-blocked");
+            }
+            const scroller = this._findMessagesScroller();
+            if (!scroller) {
+                requestAnimationFrame(tick);
+                return;
+            }
+            const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+            if (distanceFromBottom > 24) {
+                applyMask(scroller);
+                scroller.scrollTop = scroller.scrollHeight;
+                stableStreak = 0;
+            } else {
+                stableStreak++;
+                if (stableStreak >= STABLE_FRAMES_NEEDED) {
+                    return stop("stable");
+                }
+            }
+            requestAnimationFrame(tick);
+        };
+        setTimeout(() => { if (masked) removeMask(); }, MAX_MS + 500);
+        requestAnimationFrame(tick);
     }
     _waitForEventsDataThenRemoveGuard(attempts) {
         const MAX_ATTEMPTS = 30;
@@ -2361,6 +2632,7 @@ module.exports = class ByeBlocked {
             clearTimeout(this._scrollRestoreTimer);
             this._scrollRestoreTimer = null;
         }
+        this._scrollLoopActive = false;
         this._isNavigating = false;
         if (this._readStateRecheckTimer) {
             clearTimeout(this._readStateRecheckTimer);
@@ -3229,56 +3501,7 @@ module.exports = class ByeBlocked {
         }
     }
     patchMessageItemComponent(attempt = 0) {
-        if (!this.settings.places.messages) return;
-        if (this._messageItemPatched) return;
-        if (!this._retryGuardEnter("patchMessageItemComponent", attempt)) return;
-        const self = this;
-        try {
-            const ChannelMessage = BdApi.Webpack.getModule(m =>
-                m?.displayName === "ChannelMessage" || m?.name === "ChannelMessage"
-            );
-            if (ChannelMessage?.prototype?.render) {
-                this.patchInstead(ChannelMessage.prototype, "render", function(ctx, args, orig) {
-                    try {
-                        const props = args?.[0] || ctx?.props;
-                        const msg = props?.message;
-                        if (msg?.author?.id && self.shouldHide(msg.author.id)) return null;
-                    } catch (_) {}
-                    return orig.apply(ctx, args);
-                });
-                this._messageItemPatched = true;
-                this._retryGuardExit("patchMessageItemComponent");
-                return;
-            }
-        } catch (err) { this._patcher?._warn("patchMessageItemComponent", err); }
-        try {
-            const result = BdApi.Webpack.getWithKey(m => {
-                if (typeof m !== "function") return false;
-                try {
-                    const src = Function.prototype.toString.call(m);
-                    return src.includes("messageListItem") && src.includes("author");
-                } catch (_) { return false; }
-            });
-            if (result) {
-                const [mod, key] = result;
-                this.patchInstead(mod, key, function(ctx, args, orig) {
-                    try {
-                        const props = args?.[0] || ctx?.props;
-                        const msg = props?.message;
-                        if (msg?.author?.id && self.shouldHide(msg.author.id)) return null;
-                    } catch (_) {}
-                    return orig.apply(ctx, args);
-                });
-                this._messageItemPatched = true;
-                this._retryGuardExit("patchMessageItemComponent");
-                return;
-            }
-        } catch (err) { this._patcher?._warn("patchMessageItemComponent", err); }
-        if (!this._messageItemPatched && attempt < 6) {
-            setTimeout(() => this.patchMessageItemComponent(attempt + 1), 5000);
-            return;
-        }
-        this._retryGuardExit("patchMessageItemComponent");
+        this._messageItemPatched = true;
     }
     patchGuildMemberStore(attempt = 0) {
         if (this._guildMemberStorePatched || !this.settings.places.memberList) return;
@@ -4142,22 +4365,64 @@ return false;
     isBlockedMessageData(message, referencedMessage = null) {
         if (!message || typeof message !== "object") return false;
         try {
+            if (message.blocked === true) return true;
             const authorId = message.author?.id || null;
             if (authorId && this.shouldHide(authorId)) return true;
             const ref = referencedMessage || this.getReferencedMessage(message);
             const refAuthorId = ref?.author?.id || null;
             if (refAuthorId && this.shouldHide(refAuthorId)) return true;
+            const mentions = message.mentions;
+            if (Array.isArray(mentions) && mentions.length) {
+                for (let i = 0; i < mentions.length; i++) {
+                    const m = mentions[i];
+                    const mid = typeof m === "string" ? m : m?.id;
+                    if (mid && this.shouldHide(mid)) return true;
+                }
+            } else if (mentions && typeof mentions.forEach === "function") {
+                let hit = false;
+                mentions.forEach(m => {
+                    if (hit) return;
+                    const mid = typeof m === "string" ? m : m?.id;
+                    if (mid && this.shouldHide(mid)) hit = true;
+                });
+                if (hit) return true;
+            }
         } catch (_) {}
         return false;
     }
     filterMessagesCollection(value) {
         if (!value) return value;
-        if (Array.isArray(value)) return value.filter(msg => !this.isBlockedMessageData(msg));
+        if (!this._messageFilterCache) this._messageFilterCache = new WeakMap();
+        const cache = this._messageFilterCache;
+        if (typeof value === "object") {
+            const cached = cache.get(value);
+            if (cached !== undefined) return cached;
+        }
+        const result = this._filterMessagesCollectionUncached(value);
+        if (typeof value === "object") {
+            try { cache.set(value, result); } catch (_) {}
+        }
+        return result;
+    }
+    _filterMessagesCollectionUncached(value) {
+        if (!value) return value;
+        if (Array.isArray(value)) {
+            const filtered = value.filter(msg => !this.isBlockedMessageData(msg));
+            return filtered.length === value.length ? value : filtered;
+        }
         if (value && typeof value.filter === "function" && typeof value.toArray === "function") {
             try {
                 const asArray = value.toArray();
                 const filtered = asArray.filter(msg => !this.isBlockedMessageData(msg));
                 if (filtered.length === asArray.length) return value;
+                try {
+                    const internalArrayKey = Array.isArray(value._array) ? "_array" : null;
+                    if (internalArrayKey) {
+                        const clone = Object.create(Object.getPrototypeOf(value));
+                        Object.assign(clone, value, { [internalArrayKey]: filtered });
+                        return clone;
+                    }
+                } catch (_) {}
                 if (typeof value.constructor === "function") {
                     try {
                         return new value.constructor(filtered);
@@ -4471,6 +4736,7 @@ return false;
             this._retryGuardExit("patchMessageStore");
             return;
         }
+        this._resolveMessagesGet();
         const self = this;
         const methods = [ "getMessages", "getMessagesForChannel", "getMessagesForChannelId" ];
         let patchedAny = false;
@@ -4478,7 +4744,12 @@ return false;
             if (typeof store[method] === "function") {
                 this.patchAfter(store, method, function(_, args, ret) {
                     self._scanForBlockedPinSystemMessages(ret);
-                    return ret;
+                    if (!self.settings.places.messages) return ret;
+                    try {
+                        return self.filterMessagesCollection(ret);
+                    } catch (_) {
+                        return ret;
+                    }
                 });
                 patchedAny = true;
             }
@@ -4591,7 +4862,7 @@ return false;
         if (authorId && this.shouldHide(authorId)) return true;
         if (Array.isArray(msg.mentions)) {
             for (const mention of msg.mentions) {
-                const mid = mention?.id || mention?.userId;
+                const mid = typeof mention === 'string' ? mention : (mention?.id || mention?.userId);
                 if (mid && this.shouldHide(mid)) return true;
             }
         }
@@ -5009,7 +5280,9 @@ return false;
                             parentId = self.modules.ChannelStore?.getChannel?.(channelId)?.parent_id || null;
                         } catch (_) {}
                         if (self.shouldHide(authorId) || self._isBlockedMessage(msg)) {
-                            self._markBlockedOnlyReadActivity(channelId, parentId, msg?.id);
+                            if (!self._channelHasGenuineUnreadOtherThanBlocked(channelId)) {
+                                self._markBlockedOnlyReadActivity(channelId, parentId, msg?.id);
+                            }
                             self._suppressMentionSoundUntil = Date.now() + 3000;
                             scheduleRefresh();
                         } else {
@@ -5035,6 +5308,7 @@ return false;
                     }
                 });
                 self._notificationDispatcherPatched = true;
+                self._registerDispatcherPatchHealthCheck();
             }
         }
         const relationshipStoreReady = !!this.modules.RelationshipStore?.isBlocked;
@@ -5173,6 +5447,28 @@ return false;
             return null;
         }
     }
+    _registerDispatcherPatchHealthCheck() {
+        if (!this._health || this._dispatcherPatchHealthRegistered) return;
+        this._dispatcherPatchHealthRegistered = true;
+        const requiredActions = ["MESSAGE_CREATE", "THREAD_CREATE", "CHANNEL_ACK", "ACK_MESSAGES", "THREAD_ACK"];
+        this._health.register(
+            "dispatcherPatch",
+            () => {
+                try {
+                    if (!this._notificationDispatcherPatched) return false;
+                    if (typeof this.modules.Dispatcher?.dispatch !== "function") return false;
+                    const actions = this.constructor.ACTIONS;
+                    return requiredActions.every(name => actions?.[name] === name);
+                } catch (_) {
+                    return false;
+                }
+            },
+            () => {
+                console.warn("[ByeBlocked] The message dispatcher patch (blocked-user badge/notification suppression) appears to be inactive — Discord may have changed something internally. Consider updating the plugin.");
+            },
+            2
+        );
+    }
     _registerVoiceStatesAltHealthCheck(store, methodName) {
         if (!this._health || this._voiceStatesAltHealthRegistered) return;
         this._voiceStatesAltHealthRegistered = true;
@@ -5219,26 +5515,6 @@ return false;
                 this._shortLivedMsgObserver = null;
             }
             clearTimeout(this._shortLivedMsgObserverTimeout);
-            const container = document.querySelector('[class*="scroller"][class*="messages"], [data-list-id*="chat-messages"]')
-                || document.querySelector('[class*="chatContent"]')
-                || document.body;
-            if (!container) return;
-            let pending = false;
-            const observer = new MutationObserver(() => {
-                if (pending || !this.isRunning) return;
-                pending = true;
-                requestAnimationFrame(() => {
-                    pending = false;
-                    if (!this.isRunning) return;
-                    try { this.hideMessages(); } catch (_) {}
-                });
-            });
-            observer.observe(container, { childList: true, subtree: true });
-            this._shortLivedMsgObserver = observer;
-            this._shortLivedMsgObserverTimeout = setTimeout(() => {
-                try { observer.disconnect(); } catch (_) {}
-                if (this._shortLivedMsgObserver === observer) this._shortLivedMsgObserver = null;
-            }, 1500);
         } catch (_) {}
     }
     _startChannelSwitchWatcher() {
@@ -5250,23 +5526,12 @@ return false;
             const channelId = store.getChannelId?.() || null;
             if (channelId === this._lastWatchedChannelId) return;
             this._lastWatchedChannelId = channelId;
-            if (this.settings.places.messages) {
-                try { this.hideMessages(); } catch (_) {}
-                requestAnimationFrame(() => {
-                    requestAnimationFrame(() => {
-                        if (!this.isRunning) return;
-                        try { this.hideMessages(); } catch (_) {}
-                    });
-                });
-                this._startShortLivedMessageObserver();
-            }
             const delays = [ 50, 250, 600 ];
             for (let d = 0; d < delays.length; d++) {
                 setTimeout(() => {
                     if (!this.isRunning) return;
                     try {
                         if (this.settings.places.messages) {
-                            this.hideMessages();
                             this.hideForumPosts();
                         }
                         if (this.settings.places.memberList) this.hideMemberRows();
@@ -5327,7 +5592,7 @@ return false;
             "messages",
             () => {
                 if (!this.settings.places?.messages) return true;
-                const els = document.querySelectorAll('li[class*="messageListItem"]:not([data-hidden-blocked="true"])');
+                const els = document.querySelectorAll('li[class*="messageListItem"]');
                 let sample = 0;
                 for (let i = 0; i < els.length && sample < 40; i++) {
                     const messageRow = els[i];
@@ -5337,7 +5602,16 @@ return false;
                 }
                 return true;
             },
-            () => { try { this.hideMessages(); } catch (_) {} }
+            () => {
+                try {
+                    this._storePatched = false;
+                    this._messagesWrapPatched = false;
+                    this._shouldHideCache = new Map();
+                    this._messageFilterCache = new WeakMap();
+                    this.patchMessageStore();
+                    this.patchMessagesWrapComponent();
+                } catch (_) {}
+            }
         );
 
         this._health.register(
@@ -5483,9 +5757,25 @@ return false;
 
         this._health.start();
     }
+    _sweepOrphanedScrollMasks() {
+        try {
+            const now = Date.now();
+            if (this._lastOrphanMaskSweep && now - this._lastOrphanMaskSweep < 3000) return;
+            this._lastOrphanMaskSweep = now;
+            const orphans = document.querySelectorAll('[data-nmb-scroll-masked="true"]');
+            orphans.forEach(el => {
+                try {
+                    el.style.visibility = el.dataset.nmbPrevVisibility || "";
+                    delete el.dataset.nmbScrollMasked;
+                    delete el.dataset.nmbPrevVisibility;
+                } catch (_) {}
+            });
+        } catch (_) {}
+    }
     queueScan(fromMutation = false) {
         if (!this.isRunning || this.scanTimeout) return;
         this._nmbWatchdogCheck();
+        this._sweepOrphanedScrollMasks();
         const now = Date.now();
         if (this._lastScanDomTime && now - this._lastScanDomTime < 80) {
             this.scanTimeout = setTimeout(() => {
@@ -7148,24 +7438,7 @@ return false;
         this.hiddenElements.delete(el);
     }
     promoteOrphanedMessages() {
-        document.querySelectorAll('[data-nmb-promoted="true"]').forEach(el => {
-            const prev = this._prevVisibleLi(el);
-            if (prev && prev.dataset?.hiddenBlocked !== "true") this._demoteMessage(el);
-        });
-        const hiddenLis = document.querySelectorAll('li[data-hidden-blocked="true"], [data-hidden-blocked="true"][class*="messageListItem"]');
-        for (let i = 0; i < hiddenLis.length; i++) {
-            const hidden = hiddenLis[i];
-            const next = this._nextVisibleLi(hidden);
-            if (!next) continue;
-            if (next.dataset?.hiddenBlocked === "true") continue;
-            if (next.dataset?.nmbPromoted === "true") continue;
-            const groupStartAttr = next.getAttribute("data-message-group-start");
-            const isCompact = next.className?.includes?.("compact") || !!next.querySelector('[class*="compact"]');
-            const hasHeader = !!next.querySelector('[class*="groupStart"], [class*="cozyHeader"], [class*="header_"], img[src*="/avatars/"]');
-            if (groupStartAttr === "false" || !hasHeader && !isCompact) {
-                this._promoteMessage(next);
-            }
-        }
+        return;
     }
     _promoteMessage(li) {
         if (!li || li.dataset?.nmbPromoted === "true") return;
@@ -7220,45 +7493,7 @@ return false;
         return null;
     }
     collapseGhostSlots() {
-        const isEmptyText = el => !(el.textContent || "").trim();
-        const lis = document.querySelectorAll('li[class*="messageListItem"]:not([data-hidden-blocked="true"]):not([data-nmb-ghost="true"])');
-        const lisToGhost = [];
-        for (let i = 0; i < lis.length; i++) {
-            const el = lis[i];
-            if (!isEmptyText(el)) continue;
-            if (el.getClientRects().length === 0) continue;
-            lisToGhost.push(el);
-        }
-        for (let i = 0; i < lisToGhost.length; i++) this._ghostHide(lisToGhost[i]);
-
-        const WRP_SEL = '[class*="groupStart"] [class*="wrapper"], [class*="groupStart"] > [class*="cozy"]';
-        const wrappers = document.querySelectorAll(WRP_SEL + ':not([data-hidden-blocked="true"]):not([data-nmb-ghost="true"])');
-        const wrappersToGhost = [];
-        for (let i = 0; i < wrappers.length; i++) {
-            const el = wrappers[i];
-            if (!isEmptyText(el)) continue;
-            if (el.getClientRects().length === 0) continue;
-            wrappersToGhost.push(el);
-        }
-        for (let i = 0; i < wrappersToGhost.length; i++) this._ghostHide(wrappersToGhost[i]);
-
-        const groups = document.querySelectorAll('[class*="groupStart"]:not([data-nmb-ghost="true"])');
-        const groupsToGhost = [];
-        for (let i = 0; i < groups.length; i++) {
-            const group = groups[i];
-            if (group.tagName?.toLowerCase() === "li") continue;
-            if (!isEmptyText(group)) continue;
-            let hasVisible = false;
-            for (const child of group.children) {
-                if (child.dataset?.hiddenBlocked === "true" || child.dataset?.nmbGhost === "true") continue;
-                if (!isEmptyText(child) || child.children.length > 0) {
-                    hasVisible = true;
-                    break;
-                }
-            }
-            if (!hasVisible) groupsToGhost.push(group);
-        }
-        for (let i = 0; i < groupsToGhost.length; i++) this._ghostHide(groupsToGhost[i]);
+        return;
     }
     _ghostHide(el) {
         el.dataset.nmbGhost = "true";
@@ -7316,48 +7551,7 @@ return false;
         }
     }
     hideMessages() {
-        const LI_SEL = 'li[class*="messageListItem"]:not([data-hidden-blocked="true"])';
-        const els = document.querySelectorAll(LI_SEL);
-        if (!els.length) return;
-        const parentSet = new Set;
-        for (let i = 0; i < els.length; i++) {
-            const messageRow = els[i];
-            const info = this.getMessageInfo(messageRow);
-            if (this.shouldHide(info.authorId, info.isSpammer)) {
-                this.hideElement(messageRow, "message", info.authorId);
-                const p = messageRow.parentElement;
-                if (p && !p.dataset?.hiddenBlocked) parentSet.add(p);
-                continue;
-            }
-            if (this.shouldHide(info.referencedAuthorId)) {
-                this.hideElement(messageRow, "reply-to-blocked", info.referencedAuthorId);
-                const p = messageRow.parentElement;
-                if (p && !p.dataset?.hiddenBlocked) parentSet.add(p);
-                continue;
-            }
-            if (this.shouldHide(info.mentionedUserId)) {
-                this.hideElement(messageRow, "mention-blocked", info.mentionedUserId);
-                const p = messageRow.parentElement;
-                if (p && !p.dataset?.hiddenBlocked) parentSet.add(p);
-                continue;
-            }
-            if (info.isBlockedGroup) {
-                this.hideElement(messageRow, "blocked-group");
-                const p = messageRow.parentElement;
-                if (p && !p.dataset?.hiddenBlocked) parentSet.add(p);
-                continue;
-            }
-        }
-        for (const parent of parentSet) {
-            let hasVisible = false;
-            for (const child of parent.children) {
-                if (child.dataset?.hiddenBlocked !== "true") {
-                    hasVisible = true;
-                    break;
-                }
-            }
-            if (!hasVisible) this.hideParent(parent, "empty-message-group");
-        }
+        return;
     }
     hideParent(el, reason = "empty-parent") {
         if (!el || el.dataset?.hiddenBlocked === "true") return;
@@ -10371,8 +10565,11 @@ return false;
             if (/SPAMMER/i.test(type)) info.isSpammer = true;
             if (props.isBlockedMessage === true) info.isBlockedGroup = true;
             if (!info.mentionedUserId && Array.isArray(message?.mentions) && message.mentions.length) {
-                const hiddenMention = message.mentions.find(u => u?.id && this.shouldHide(u.id));
-                if (hiddenMention) info.mentionedUserId = hiddenMention.id;
+                const hiddenMention = message.mentions.find(u => {
+                    const id = typeof u === "string" ? u : u?.id;
+                    return id && this.shouldHide(id);
+                });
+                if (hiddenMention) info.mentionedUserId = typeof hiddenMention === "string" ? hiddenMention : hiddenMention.id;
             }
         };
         if (!info.messageId) {
