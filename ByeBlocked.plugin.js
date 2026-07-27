@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.8
+ * @version 2.4.9
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -195,7 +195,7 @@ function _findCloseButton(dialog) {
 })();
 
 module.exports = class ByeBlocked {
-    static VERSION="2.4.8";
+    static VERSION="2.4.9";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -264,6 +264,7 @@ module.exports = class ByeBlocked {
             VOICE_STATE_UPDATES: "VOICE_STATE_UPDATES",
             MESSAGE_CREATE: "MESSAGE_CREATE",
             MESSAGE_UPDATE: "MESSAGE_UPDATE",
+            LOAD_MESSAGES_SUCCESS: "LOAD_MESSAGES_SUCCESS",
             MESSAGE_PIN_ADD: "MESSAGE_PIN_ADD",
             MESSAGE_PIN_REMOVE: "MESSAGE_PIN_REMOVE",
             CHANNEL_PINS_UPDATE: "CHANNEL_PINS_UPDATE",
@@ -2016,6 +2017,7 @@ module.exports = class ByeBlocked {
             scroller.addEventListener("touchstart", mark, opts);
             scroller.addEventListener("pointerdown", mark, opts);
             scroller.addEventListener("keydown", mark, opts);
+            scroller.addEventListener("scroll", mark, opts);
         } catch (_) {}
     }
     _findMessagesScroller() {
@@ -2315,6 +2317,8 @@ module.exports = class ByeBlocked {
         this._observerFramePending = false;
         this.observer = new MutationObserver(mutations => {
             if (!this._isRelevantMutation(mutations)) return;
+            const willFastHideMessages = this.isRunning && this.settings.places?.messages;
+            const nmbScrollState = willFastHideMessages ? this._captureMessageScrollState() : null;
             if (this.isRunning && this.settings?.places?.voiceChannels) {
                 try { this._fastHideChannelStatusFromMutations(mutations); } catch (_) {}
             }
@@ -2324,6 +2328,7 @@ module.exports = class ByeBlocked {
             if (this.isRunning && (this.settings.places?.messages || this.settings.places?.memberList)) {
                 try { this._fastHideFromMutations(mutations); } catch (_) {}
             }
+            if (nmbScrollState) this._restoreMessageScrollState(nmbScrollState);
             if (this._observerFramePending) return;
             this._observerFramePending = true;
             requestAnimationFrame(() => {
@@ -2473,6 +2478,7 @@ module.exports = class ByeBlocked {
         p.safe('patchCallGridParticipants', () => this.patchCallGridParticipants());
         p.safe('watchVoiceJoinForGridPatch', () => this._watchVoiceJoinForGridPatch());
         p.safe('patchMessageStore', () => this.patchMessageStore());
+        p.safe('patchMessageLoadDispatch', () => this.patchMessageLoadDispatch());
         p.safe('patchMessageItemComponent', () => this.patchMessageItemComponent());
     }
     start(_retryAttempt = 0) {
@@ -4765,6 +4771,42 @@ return false;
             this._patcher?._warn("patchMessageStore", new Error("no expected method found on MessageStore after several attempts"));
             this._retryGuardExit("patchMessageStore");
         }
+    }
+    _filterActionMessageArray(arr) {
+        if (!Array.isArray(arr) || !arr.length) return arr;
+        const filtered = arr.filter(msg => !this.isBlockedMessageData(msg));
+        return filtered.length === arr.length ? arr : filtered;
+    }
+    patchMessageLoadDispatch(attempt = 0) {
+        if (this._messageLoadDispatchPatched) return;
+        if (!this._retryGuardEnter("patchMessageLoadDispatch", attempt)) return;
+        if (!this.modules.Dispatcher) {
+            this._resolveDispatcher();
+        }
+        const Dispatcher = this.modules.Dispatcher;
+        if (!Dispatcher || typeof Dispatcher.dispatch !== "function") {
+            if (attempt < 15) { setTimeout(() => this.patchMessageLoadDispatch(attempt + 1), 2000); return; }
+            this._patcher?._warn("patchMessageLoadDispatch", new Error("Dispatcher unavailable after several attempts"));
+            this._retryGuardExit("patchMessageLoadDispatch");
+            return;
+        }
+        this._messageLoadDispatchPatched = true;
+        const self = this;
+        this.patchBefore(Dispatcher, "dispatch", function(_, args) {
+            try {
+                if (!self.settings.places.messages) return;
+                const action = args[0];
+                if (!action || typeof action !== "object") return;
+                if (action.type === self.constructor.ACTIONS.LOAD_MESSAGES_SUCCESS) {
+                    if (Array.isArray(action.messages)) {
+                        action.messages = self._filterActionMessageArray(action.messages);
+                    } else if (Array.isArray(action.messages?.messages)) {
+                        action.messages.messages = self._filterActionMessageArray(action.messages.messages);
+                    }
+                }
+            } catch (_) {}
+        });
+        this._retryGuardExit("patchMessageLoadDispatch");
     }
     patchChannelPinsStore(attempt = 0) {
         if (!this.settings.places.messages) return;
@@ -7223,7 +7265,7 @@ return false;
                 }
             }
         }
-        const hasBlockedClass = this.settings.places.messages && (el.matches?.('[class*="messageGroupBlocked"], [class*="blockedSystemMessage"]') || el.querySelector?.('[class*="messageGroupBlocked"]') || el.querySelector?.('[class*="blockedSystemMessage"]'));
+        const hasBlockedClass = this.settings.places.messages && this._shouldFastHideMessagesInDom() && (el.matches?.('[class*="messageGroupBlocked"], [class*="blockedSystemMessage"]') || el.querySelector?.('[class*="messageGroupBlocked"]') || el.querySelector?.('[class*="blockedSystemMessage"]'));
         if (hasBlockedClass) {
             const items = new Set;
             const collectTargets = node => {
@@ -7241,7 +7283,7 @@ return false;
             }
             return;
         }
-        if (this.settings.places.messages && (el.matches?.('li[class*="messageListItem"], [class*="messageListItem"]'))) {
+        if (this.settings.places.messages && this._shouldFastHideMessagesInDom() && (el.matches?.('li[class*="messageListItem"], [class*="messageListItem"]'))) {
             const messageRow = el;
             if (messageRow.dataset?.hiddenBlocked === "true") return;
             const userId = this.findUserId(messageRow);
@@ -7335,6 +7377,7 @@ return false;
         }
     }
     scanDom(fromMutation = false) {
+        const scrollState = fromMutation ? null : this._captureMessageScrollState();
         try {
             this._shouldHideCache = new Map;
             const navCooldown = this._navStartedAt && (Date.now() - this._navStartedAt < 1200);
@@ -7396,6 +7439,7 @@ return false;
             this.collapseGhostSlots();
             this.promoteOrphanedMessages();
         } catch (_) {}
+        finally { if (scrollState) this._restoreMessageScrollState(scrollState); }
     }
     _hideSingleMention(el) {
         if (!el || el.dataset?.nmbMentionHidden === "true") return;
@@ -10788,6 +10832,74 @@ return false;
         el.removeAttribute("data-nmb-prev-style");
         this.hiddenElements.delete(el);
     }
+    _captureMessageScrollState() {
+        try {
+            const scroller = this._findMessagesScroller();
+            if (!scroller) return null;
+            let anchorEl = null;
+            let anchorOffset = 0;
+            try {
+                const scrollerRect = scroller.getBoundingClientRect();
+                const candidates = scroller.querySelectorAll('li[class*="messageListItem"], [class*="messageListItem"]');
+                for (let i = 0; i < candidates.length; i++) {
+                    const rect = candidates[i].getBoundingClientRect();
+                    if (rect.bottom > scrollerRect.top) {
+                        anchorEl = candidates[i];
+                        anchorOffset = rect.top - scrollerRect.top;
+                        break;
+                    }
+                }
+            } catch (_) {}
+            return {
+                scroller,
+                top: scroller.scrollTop,
+                height: scroller.scrollHeight,
+                clientHeight: scroller.clientHeight,
+                anchorEl,
+                anchorOffset
+            };
+        } catch (_) {
+            return null;
+        }
+    }
+    _computeScrollCorrection(state) {
+        const scroller = state?.scroller;
+        if (!scroller || !scroller.isConnected) return null;
+        const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+        let nextTop = null;
+        if (state.anchorEl && state.anchorEl.isConnected) {
+            try {
+                const scrollerRect = scroller.getBoundingClientRect();
+                const rect = state.anchorEl.getBoundingClientRect();
+                const currentOffset = rect.top - scrollerRect.top;
+                nextTop = scroller.scrollTop + (currentOffset - (state.anchorOffset || 0));
+            } catch (_) { nextTop = null; }
+        }
+        if (nextTop === null || !Number.isFinite(nextTop)) {
+            const delta = scroller.scrollHeight - (state.height || 0);
+            nextTop = (state.top || 0) + delta;
+        }
+        if (!Number.isFinite(nextTop)) return null;
+        if (nextTop < 0) nextTop = 0;
+        if (nextTop > maxTop) nextTop = maxTop;
+        return { scroller, nextTop };
+    }
+    _restoreMessageScrollState(state) {
+        try {
+            const correction = this._computeScrollCorrection(state);
+            if (correction && Math.abs(correction.scroller.scrollTop - correction.nextTop) > 0.5) {
+                correction.scroller.scrollTop = correction.nextTop;
+            }
+        } catch (_) {}
+    }
+    _shouldFastHideMessagesInDom() {
+        try {
+            if (!this._storePatched || !this._messagesWrapPatched) return true;
+        } catch (_) {
+            return true;
+        }
+        return false;
+    }
     restoreTemporaryText(el) {
         const previous = el.getAttribute("data-nmb-prev-text");
         if (previous !== null) el.textContent = previous;
@@ -11782,7 +11894,7 @@ return false;
                 border: none !important;
                 box-shadow: none !important;
             }
-            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [data-nmb-status-overridden="true"] {\n                display: none !important;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 14px;\n                margin-top: 28px;\n                padding: 14px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: flex-start;\n                text-align: center;\n                padding-top: 32px;\n                padding-bottom: 16px;\n                flex-shrink: 0;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c,\n            .nmb-pins-empty-placeholder .nmb-pins-empty-icon {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n                display: flex;\n                align-items: center;\n                justify-content: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer,\n            .nmb-injected-tip-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n            [data-nmb-relabel-pending="true"] {\n                visibility: hidden !important;\n            }\n            li[data-list-item-id*="private-channels"]:not([data-nmb-relabeled="true"]):has([class*="avatarStack"], [class*="groupAvatar"], [class*="avatarMulti"]) {\n                visibility: hidden !important;\n            }\n\n            ${noticeButtonStyles}\n        `);
+            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [data-nmb-status-overridden="true"] {\n                display: none !important;\n            }\n            [data-list-id*="chat-messages"],\n            [data-list-id*="chat-messages"] *,\n            [class*="chatContent"] [class*="scroller"],\n            [class*="chatContent"] [class*="scroller"] * {\n                overflow-anchor: none !important;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 14px;\n                margin-top: 28px;\n                padding: 14px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: flex-start;\n                text-align: center;\n                padding-top: 32px;\n                padding-bottom: 16px;\n                flex-shrink: 0;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c,\n            .nmb-pins-empty-placeholder .nmb-pins-empty-icon {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n                display: flex;\n                align-items: center;\n                justify-content: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer,\n            .nmb-injected-tip-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n            [data-nmb-relabel-pending="true"] {\n                visibility: hidden !important;\n            }\n            li[data-list-item-id*="private-channels"]:not([data-nmb-relabeled="true"]):has([class*="avatarStack"], [class*="groupAvatar"], [class*="avatarMulti"]) {\n                visibility: hidden !important;\n            }\n\n            ${noticeButtonStyles}\n        `);
     }
     removeStyles() {
         try {
