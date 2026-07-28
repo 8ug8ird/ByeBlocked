@@ -2,15 +2,95 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.9
+ * @version 2.4.10
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
+class ProbeScannerBridge {
+    constructor(options = {}) {
+        this.sourcePluginName = options.sourcePluginName || "Probe";
+        this.consumerPluginName = options.consumerPluginName || "ByeBlocked";
+        this._cachedSnapshot = null;
+        this._cachedAt = 0;
+        this._maxAgeMs = options.maxAgeMs ?? 5 * 60 * 1000;
+    }
+
+    _getSnapshot() {
+        const now = Date.now();
+        if (this._cachedSnapshot && (now - this._cachedAt) < this._maxAgeMs) {
+            return this._cachedSnapshot;
+        }
+        try {
+            const snapshot = BdApi.Data.load(this.sourcePluginName, "lastSnapshot");
+            if (!snapshot || !Array.isArray(snapshot.entities)) return null;
+            this._cachedSnapshot = snapshot;
+            this._cachedAt = now;
+            return snapshot;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    isAvailable() {
+        return this._getSnapshot() !== null;
+    }
+
+    getStoreHint(...candidateNames) {
+        const snapshot = this._getSnapshot();
+        if (!snapshot) return null;
+        for (const name of candidateNames) {
+            const entity = snapshot.entities.find(e => e.type === "store" && e.name === name);
+            if (entity) {
+                return {
+                    found: true,
+                    matchedName: name,
+                    confidence: entity.confidence,
+                    stability: entity.stability?.level || entity.data?.stability || null,
+                    discoveredVia: entity.discoveredVia
+                };
+            }
+        }
+        return { found: false, matchedName: null, confidence: null, stability: null, discoveredVia: null };
+    }
+
+    getCompatibilityIssues() {
+        const snapshot = this._getSnapshot();
+        if (!snapshot) return [];
+        const report = snapshot.entities.find(e => e.type === "compatibility" && e.id === "compatibility:report");
+        if (!report || !Array.isArray(report.data?.checks)) return [];
+        return report.data.checks.filter(c => c.plugin === this.consumerPluginName);
+    }
+
+    getConfirmedBreaks() {
+        return this.getCompatibilityIssues().filter(c => c.status === "not_resolved");
+    }
+
+    getSnapshotAgeLabel() {
+        const snapshot = this._getSnapshot();
+        if (!snapshot || !snapshot.capturedAt) return null;
+        const ageMs = Date.now() - snapshot.capturedAt;
+        const ageMin = Math.round(ageMs / 60000);
+        if (ageMin < 60) return `${ageMin}min`;
+        const ageH = Math.round(ageMin / 60);
+        if (ageH < 24) return `${ageH}h`;
+        return `${Math.round(ageH / 24)}d`;
+    }
+}
+
 class ModuleResolver {
-    constructor() { this._cache = {}; }
+    constructor(options = {}) {
+        this._cache = {};
+        this.bridge = options.bridge || null;
+    }
     getStore(...names) {
         for (const n of names) { try { const s = BdApi.Webpack.getStore(n); if (s) return s; } catch (_) {} }
+        if (this.bridge && this.bridge.isAvailable()) {
+            const hint = this.bridge.getStoreHint(...names);
+            if (hint && hint.found && hint.matchedName && !names.includes(hint.matchedName)) {
+                try { const s = BdApi.Webpack.getStore(hint.matchedName); if (s) return s; } catch (_) {}
+            }
+        }
         return this._byHeuristic(names[0]);
     }
     _byHeuristic(hint) {
@@ -85,6 +165,10 @@ class HealthMonitor {
         this.checks = {};
         this._timer = null;
         this._degraded = {};
+        this._publishSourcePluginName = "ByeBlocked";
+        this._publishKey = "healthSnapshotForProbe";
+        this._publishDebounceMs = 2000;
+        this._publishTimer = null;
     }
     register(name, checkFn, fallbackFn, failThreshold = 2) {
         this.checks[name] = { checkFn, fallbackFn, failStreak: 0, failThreshold, totalFailures: 0, degradedCount: 0 };
@@ -96,9 +180,12 @@ class HealthMonitor {
     }
     stop() {
         if (this._timer) { clearInterval(this._timer); this._timer = null; }
+        if (this._publishTimer) { clearTimeout(this._publishTimer); this._publishTimer = null; }
+        this._publishNow();
     }
     _runAll() {
         for (const name in this.checks) this._runOne(name);
+        this._schedulePublish();
     }
     _runOne(name) {
         const entry = this.checks[name];
@@ -134,6 +221,39 @@ class HealthMonitor {
         }));
         console.table(rows);
         return rows;
+    }
+    _schedulePublish() {
+        if (this._publishTimer) return;
+        this._publishTimer = setTimeout(() => {
+            this._publishTimer = null;
+            this._publishNow();
+        }, this._publishDebounceMs);
+    }
+    _publishNow() {
+        try {
+            if (typeof BdApi === "undefined" || !BdApi.Data || typeof BdApi.Data.save !== "function") return;
+            const checks = Object.keys(this.checks).map(name => ({
+                name,
+                degraded: this.isDegraded(name),
+                failStreak: this.checks[name].failStreak,
+                totalFailures: this.checks[name].totalFailures,
+                degradedCount: this.checks[name].degradedCount,
+                failThreshold: this.checks[name].failThreshold ?? 2
+            }));
+            const buildNumber = (() => {
+                try {
+                    return (window?.GLOBAL_ENV?.RELEASE_CHANNEL && window?.GLOBAL_ENV?.BUILD_NUMBER)
+                        ? `${window.GLOBAL_ENV.RELEASE_CHANNEL}-${window.GLOBAL_ENV.BUILD_NUMBER}`
+                        : null;
+                } catch (_) { return null; }
+            })();
+            BdApi.Data.save(this._publishSourcePluginName, this._publishKey, {
+                schemaVersion: "0.3.2",
+                publishedAt: Date.now(),
+                discordBuildNumber: buildNumber,
+                checks
+            });
+        } catch (_) {}
     }
 }
 
@@ -195,7 +315,7 @@ function _findCloseButton(dialog) {
 })();
 
 module.exports = class ByeBlocked {
-    static VERSION="2.4.9";
+    static VERSION="2.4.10";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -253,8 +373,20 @@ module.exports = class ByeBlocked {
         't\u00f3pic',
         'topic'
     );
-    static get INVITE_LABELS() { return ['Convidar para canal de voz', 'Invite to voice channel']; }
-    static get INVITE_LABEL_SEL() { return ByeBlocked.INVITE_LABELS.map(l => '[aria-label^="' + l + '"]').join(', '); }
+    static get INVITE_LABELS() {
+        return [
+            'Invite to Voice',      // en
+            'Convidar para',        // pt (canal de voz / chamada de voz)
+            'Invitar a',            // es (canal de voz)
+            'Invitar al canal',     // es (alt phrasing)
+            'Inviter au',           // fr (salon vocal)
+            'Sprachkanal beitreten',// de (may appear as a variant label)
+            'In den Sprachkanal',   // de
+            'Invita al canale',     // it
+            'Uitnodigen voor'       // nl
+        ];
+    }
+    static get INVITE_LABEL_SEL() { return ByeBlocked.INVITE_LABELS.map(l => '[aria-label*="' + l + '" i]').join(', '); }
     static STAGE_LOCALE = _makeDict(
         { title: 'Sem pedidos', body: 'Os pedidos para falar ser\u00e3o mostrados aqui.' },
         { title: 'No requests', body: 'Requests to speak will show up here.' }
@@ -292,7 +424,13 @@ module.exports = class ByeBlocked {
             VOICE_STATE: ["SortedVoiceStateStore", "VoiceStateStore", "SortedVoiceStatesStore"],
             STAGE_PARTICIPANT: ["StageChannelParticipantStore", "StageParticipantStore"],
             STAGE_INSTANCE: ["StageInstanceStore", "StageInstancesStore"],
-            ACTIVITY: ["ActivityStore", "EmbeddedActivityStore", "ActivityParticipantsStore", "ActivityManagerStore"],
+            ACTIVITY: ["ChannelRTCStore", "ActivityStore", "EmbeddedActivityStore", "ActivityParticipantsStore", "ActivityManagerStore"],
+        };
+    }
+    static get RELATIONSHIP_METHOD_NAMES() {
+        return {
+            isBlocked: ["isBlocked", "isBlockedUser", "getIsBlocked"],
+            isIgnored: ["isIgnored", "isIgnoredUser", "isMuted", "getIsIgnored"],
         };
     }
     static SETTINGS_LABELS = {
@@ -315,7 +453,7 @@ module.exports = class ByeBlocked {
         this.pluginName = 'ByeBlocked';
         this.isRunning = false;
         
-        this._r = new ModuleResolver();
+        this._r = new ModuleResolver({ bridge: this.probeScannerBridge = new ProbeScannerBridge() });
         this.modules = {};
         this.hiddenElements = new Set;
         this.hiddenParents = new Set;
@@ -518,14 +656,19 @@ module.exports = class ByeBlocked {
         }
         return null;
     }
-    _wpPatchRenderBySourceHeuristic(shouldSuppress, matchingStrings, requiredMatches = 1) {
+    _wpPatchRenderBySourceHeuristic(shouldSuppress, matchingStrings, requiredMatches = 1, label = null) {
         const self = this;
+        let bestHitCount = 0;
+        let bestHitStrings = [];
         const unwrapComponent = v => {
             if (typeof v === "function") return v;
             if (v && typeof v === "object") {
                 const typeofTag = v.$$typeof?.toString?.() || "";
                 if (typeofTag.includes("react.memo") && typeof v.type === "function") return v.type;
                 if (typeofTag.includes("react.forward_ref") && typeof v.render === "function") return v.render;
+                for (const nestedKey of ["type", "render", "Component", "default"]) {
+                    if (typeof v[nestedKey] === "function") return v[nestedKey];
+                }
             }
             return null;
         };
@@ -536,7 +679,11 @@ module.exports = class ByeBlocked {
             let patchTarget = mod, patchKey = key;
             if (raw !== fn) {
                 patchTarget = raw;
-                patchKey = (typeof raw.type === "function") ? "type" : "render";
+                patchKey = (typeof raw.type === "function") ? "type"
+                    : (typeof raw.render === "function") ? "render"
+                    : (typeof raw.Component === "function") ? "Component"
+                    : (typeof raw.default === "function") ? "default"
+                    : "render";
             }
             self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
                 try {
@@ -553,14 +700,24 @@ module.exports = class ByeBlocked {
             try {
                 const src = Function.prototype.toString.call(fn);
                 const hits = matchingStrings.filter(s => src.includes(s));
+                if (hits.length > bestHitCount) { bestHitCount = hits.length; bestHitStrings = hits; }
                 return hits.length >= requiredMatches;
             } catch (_) { return false; }
         };
         try {
             const mod = this._wpGetModule(srcFilter, { searchExports: true });
             if (mod) {
-                if (doPatch(mod.prototype, "render", () => null)) return true;
-                if (doPatch(mod, "default", (ctx, args) => args?.[0])) return true;
+                if (typeof mod === "function" && !mod.prototype?.render && mod.default === undefined) {
+                    try {
+                        const found = this._wpGetModuleWithKey(srcFilter);
+                        if (found?.[0] && found[1] && typeof found[0] === "object") {
+                            if (doPatch(found[0], found[1], (ctx, args) => args?.[0])) return true;
+                        }
+                    } catch (_) {}
+                } else {
+                    if (doPatch(mod.prototype, "render", () => null)) return true;
+                    if (doPatch(mod, "default", (ctx, args) => args?.[0])) return true;
+                }
             }
         } catch (_) {}
         try {
@@ -585,6 +742,9 @@ module.exports = class ByeBlocked {
                 }
             }
         } catch (_) {}
+        if (label) {
+            console.warn(`[ByeBlocked] ${label}: source-heuristic lookup failed. Best candidate matched ${bestHitCount}/${requiredMatches} required strings (${bestHitStrings.join(", ") || "none"}) out of [${matchingStrings.join(", ")}]. Discord likely renamed something in this component — this diagnostic is meant to help pin down which term to update.`);
+        }
         return false;
     }
     _wpPatchPropsBySourceHeuristic(rewriteProps, matchingStrings, requiredMatches = 1) {
@@ -868,7 +1028,13 @@ module.exports = class ByeBlocked {
             }
             document.querySelectorAll(".bd-notice").forEach(el => {
                 if (el.textContent && el.textContent.includes("ByeBlocked")) {
-                    const closeBtn = el.querySelector('.bd-close-button, [aria-label="Close"]');
+                    let closeBtn = el.querySelector('.bd-close-button, [aria-label="Close"]');
+                    if (!closeBtn) {
+                        for (const label of _CLOSE_LABELS) {
+                            closeBtn = el.querySelector(`[aria-label="${label}"]`);
+                            if (closeBtn) break;
+                        }
+                    }
                     if (closeBtn) closeBtn.click(); else el.remove();
                 }
             });
@@ -1046,7 +1212,18 @@ module.exports = class ByeBlocked {
                         }
                         const chunks = [];
                         res.on("data", c => chunks.push(c));
-                        res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+                        res.on("end", () => {
+                            try {
+                                const parts = chunks.map(c => c instanceof Uint8Array ? c : new Uint8Array(c));
+                                const totalLen = parts.reduce((sum, p) => sum + p.length, 0);
+                                const merged = new Uint8Array(totalLen);
+                                let offset = 0;
+                                for (const p of parts) { merged.set(p, offset); offset += p.length; }
+                                resolve(new TextDecoder("utf-8").decode(merged));
+                            } catch (err) {
+                                reject(err);
+                            }
+                        });
                         res.on("error", reject);
                     });
                     req.on("error", e => {
@@ -2408,10 +2585,16 @@ module.exports = class ByeBlocked {
         const originalRemoveChild = proto.removeChild;
         const originalInsertBefore = proto.insertBefore;
         const self = this;
+        ByeBlocked._domGuardSwallowCount = 0;
+        ByeBlocked._domGuardSwallowWindowStart = Date.now();
+        const noteSwallow = () => {
+            ByeBlocked._domGuardSwallowCount = (ByeBlocked._domGuardSwallowCount || 0) + 1;
+        };
         proto.removeChild = function(child) {
             if (child && child.parentNode !== this) {
                 if (self._isNmbTrackedNode(child)) {
                     console.warn("[ByeBlocked] removeChild blocked: node tracked by ByeBlocked was no longer a child (avoiding NotFoundError).", { parent: this, child: child });
+                    noteSwallow();
                     return child;
                 }
                 return originalRemoveChild.call(this, child);
@@ -2421,6 +2604,7 @@ module.exports = class ByeBlocked {
             } catch (err) {
                 if (err instanceof DOMException && err.name === "NotFoundError" && self._isNmbTrackedNode(child)) {
                     console.warn("[ByeBlocked] removeChild threw NotFoundError on a node tracked by ByeBlocked — swallowed to avoid a crash.", { parent: this, child: child });
+                    noteSwallow();
                     return child;
                 }
                 throw err;
@@ -2430,6 +2614,7 @@ module.exports = class ByeBlocked {
             if (referenceNode && referenceNode.parentNode !== this) {
                 if (self._isNmbTrackedNode(referenceNode)) {
                     console.warn("[ByeBlocked] insertBefore blocked: reference node tracked by ByeBlocked was no longer a child (avoiding NotFoundError).", { parent: this, referenceNode: referenceNode });
+                    noteSwallow();
                     return this.appendChild(newNode);
                 }
                 return originalInsertBefore.call(this, newNode, referenceNode);
@@ -2439,6 +2624,7 @@ module.exports = class ByeBlocked {
             } catch (err) {
                 if (err instanceof DOMException && err.name === "NotFoundError" && self._isNmbTrackedNode(referenceNode)) {
                     console.warn("[ByeBlocked] insertBefore threw NotFoundError on a node tracked by ByeBlocked — swallowed to avoid a crash.", { parent: this, referenceNode: referenceNode });
+                    noteSwallow();
                     return this.appendChild(newNode);
                 }
                 throw err;
@@ -2452,6 +2638,30 @@ module.exports = class ByeBlocked {
             try { proto.insertBefore = originalInsertBefore; } catch (_) {}
             ByeBlocked._domGuardInstalled = false;
         };
+        this._registerDomGuardHealthCheck();
+    }
+    _registerDomGuardHealthCheck() {
+        if (!this._health || this._domGuardHealthRegistered) return;
+        this._domGuardHealthRegistered = true;
+        const SWALLOW_RATE_THRESHOLD = 20;
+        let lastMeasuredCount = 0;
+        this._health.register(
+            "domRemovalGuardSwallowRate",
+            () => {
+                const count = ByeBlocked._domGuardSwallowCount || 0;
+                lastMeasuredCount = count;
+                const windowStart = ByeBlocked._domGuardSwallowWindowStart || Date.now();
+                const elapsed = Date.now() - windowStart;
+                ByeBlocked._domGuardSwallowCount = 0;
+                ByeBlocked._domGuardSwallowWindowStart = Date.now();
+                if (elapsed <= 0) return true;
+                return count < SWALLOW_RATE_THRESHOLD;
+            },
+            () => {
+                console.warn(`[ByeBlocked] The DOM removal guard swallowed ${lastMeasuredCount} removeChild/insertBefore errors in the last check window (threshold: ${SWALLOW_RATE_THRESHOLD}). This can mean Discord changed how it reconciles the DOM — consider updating the plugin or reporting this.`);
+            },
+            1
+        );
     }
     _runEarlyPatches() {
         const p = this._patcher;
@@ -2499,7 +2709,7 @@ module.exports = class ByeBlocked {
         if (this.settings.places?.groupDms) {
             this._patcher.safe('hidePrivateChannelsSync', () => this.hidePrivateChannels());
         }
-        if (!this.modules.RelationshipStore?.isBlocked) {
+        if (!this._relIsBlockedFn) {
             const maxAttempts = 20;
             if (_retryAttempt < maxAttempts) {
                 this.isRunning = false;
@@ -2886,9 +3096,10 @@ module.exports = class ByeBlocked {
     resolveModules() {
         const getStore = (...names) => this._wpGetStore(...names);
         const getModule = (filter, opts) => this._wpGetModule(filter, opts);
-        const hadRelationshipStore = !!this.modules.RelationshipStore?.isBlocked;
+        const hadRelationshipStore = !!this._relIsBlockedFn;
         this.modules.RelationshipStore = getStore(...ByeBlocked.STORE_NAMES.RELATIONSHIP);
-        const relationshipStoreJustAppeared = !hadRelationshipStore && !!this.modules.RelationshipStore?.isBlocked;
+        this._resolveRelationshipMethods();
+        const relationshipStoreJustAppeared = !hadRelationshipStore && !!this._relIsBlockedFn;
         this.modules.GuildMemberStore = getStore(...ByeBlocked.STORE_NAMES.GUILD_MEMBER);
         this.modules.ReactionsStore = getStore(...ByeBlocked.STORE_NAMES.REACTIONS);
         this.modules.SortedVoiceStateStore = getStore(...ByeBlocked.STORE_NAMES.VOICE_STATE);
@@ -2933,6 +3144,47 @@ module.exports = class ByeBlocked {
         this._relationshipStoreJustAppeared = relationshipStoreJustAppeared;
         this._nmbReportMissingModules();
     }
+    _resolveRelationshipMethods() {
+        const store = this.modules.RelationshipStore;
+        this._relIsBlockedFn = null;
+        this._relIsIgnoredFn = null;
+        if (!store) return;
+        const names = ByeBlocked.RELATIONSHIP_METHOD_NAMES;
+        const bind = (methodNames) => {
+            for (const n of methodNames) {
+                if (typeof store[n] === "function") return store[n].bind(store);
+            }
+            return null;
+        };
+        this._relIsBlockedFn = bind(names.isBlocked);
+        this._relIsIgnoredFn = bind(names.isIgnored);
+        if (!this._relIsBlockedFn || !this._relIsIgnoredFn) {
+            try {
+                const candidateKeys = new Set(Object.keys(store));
+                let proto = Object.getPrototypeOf(store);
+                let depth = 0;
+                while (proto && proto !== Object.prototype && depth < 5) {
+                    for (const k of Object.getOwnPropertyNames(proto)) candidateKeys.add(k);
+                    proto = Object.getPrototypeOf(proto);
+                    depth++;
+                }
+                for (const key of candidateKeys) {
+                    if (key === "constructor" || typeof store[key] !== "function" || store[key].length !== 1) continue;
+                    const lower = key.toLowerCase();
+                    if (!this._relIsBlockedFn && lower.includes("block") && lower.startsWith("is")) {
+                        this._relIsBlockedFn = store[key].bind(store);
+                    } else if (!this._relIsIgnoredFn && (lower.includes("ignor") || lower.includes("mute")) && lower.startsWith("is")) {
+                        this._relIsIgnoredFn = store[key].bind(store);
+                    }
+                }
+            } catch (_) {}
+        }
+        if (!this._relIsBlockedFn && !this._relationshipMethodsWarned) {
+            this._relationshipMethodsWarned = true;
+            this._patcher?._warn("_resolveRelationshipMethods", new Error("Could not resolve RelationshipStore.isBlocked (or an alternate) — ByeBlocked cannot detect blocked users until this is fixed. Discord may have renamed this method; update the plugin."));
+            this.toast?.("ByeBlocked couldn't find Discord's block-list method — the plugin may not hide blocked users until it's updated.", "error");
+        }
+    }
     _resolveSoundUtils() {
         const getModuleRaw = filter => this._wpGetModule(filter, { defaultExport: false });
         this.modules.SoundUtils = getModuleRaw(m => {
@@ -2971,13 +3223,19 @@ module.exports = class ByeBlocked {
             }
         }
         if (!this.modules.SoundUtils || !this._soundPlayKey) {
-            const altMod = this._wpGetModule(m => {
-                if (typeof m !== "object" || !m) return false;
-                return Object.values(m).some(v => typeof v === "function" && v.toString().includes("playSound"));
-            });
-            if (altMod) {
-                const k = this._wpFindFnKeyFuzzy(altMod, "playSound", "play");
-                if (k) { this.modules.SoundUtils = altMod; this._soundPlayKey = k; }
+            const shapeMod = getModuleRaw(m => typeof m?.playSound === "function");
+            if (shapeMod) {
+                this.modules.SoundUtils = shapeMod;
+                this._soundPlayKey = "playSound";
+            } else {
+                const altMod = this._wpGetModule(m => {
+                    if (typeof m !== "object" || !m) return false;
+                    return Object.values(m).some(v => typeof v === "function" && v.toString().includes("playSound"));
+                });
+                if (altMod) {
+                    const k = this._wpFindFnKeyFuzzy(altMod, "playSound", "play");
+                    if (k) { this.modules.SoundUtils = altMod; this._soundPlayKey = k; }
+                }
             }
         }
     }
@@ -2999,7 +3257,7 @@ module.exports = class ByeBlocked {
             const delays = [1000, 2000, 3000, 5000, 8000, 12000, 18000, 25000];
             setTimeout(() => { if (this.isRunning) this._resolveRtcModules(attempt + 1); }, delays[attempt] || 5000);
         } else if (attempt >= 8 && stillMissing) {
-            this._patcher._logFail("resolveRtcModules", new Error("esgotou tentativas; seguindo apenas com dados do gateway"));
+            this._patcher._logFail("resolveRtcModules", new Error("ran out of attempts to locate RTCConnectionUtils/RTCParticipantsModule — proceeding with gateway data only; some call-participant filtering may be degraded until the plugin is updated"));
         }
     }
     _resolveMediaEngineActions(attempt = 0) {
@@ -3060,7 +3318,7 @@ module.exports = class ByeBlocked {
             const delays = [1000, 2000, 3000, 5000, 8000, 12000, 18000, 25000];
             setTimeout(() => this._resolveMediaEngineActions(attempt + 1), delays[attempt] || 5000);
         } else if (attempt >= 8 && (!this.modules.MediaEngineActions || (!this._localVolumeKey && !this._localMuteKey))) {
-            this._patcher._logFail("resolveMediaEngineActions", new Error("esgotou tentativas"));
+            this._patcher._logFail("resolveMediaEngineActions", new Error("ran out of attempts to locate setLocalVolume/setLocalMute/toggleLocalMute — Discord likely renamed these methods; local-mute/volume suppression for blocked users' voice audio will not work until the plugin is updated"));
         }
     }
     _resolveMessagesGet() {
@@ -3097,6 +3355,10 @@ module.exports = class ByeBlocked {
             }
         } catch (_) {}
         this.modules.Dispatcher = null;
+        if (!this._dispatcherResolveWarned) {
+            this._dispatcherResolveWarned = true;
+            console.warn("[ByeBlocked] Could not resolve Discord's Flux Dispatcher through any of the 4 known lookup strategies. Features that rely on it (pin/message-load filtering, notification suppression, call/voice tracking) will be degraded until the plugin is updated.");
+        }
     }
     _registerModuleRefresh() {
         try {
@@ -3139,8 +3401,22 @@ module.exports = class ByeBlocked {
         this._nmbMissingCoreModules = missing;
         if (missing.length) {
             console.warn(`[ByeBlocked] Essential modules not found: ${missing.join(", ")}. Discord likely changed something internally — related features may not work until the plugin is updated.`);
+            this._nmbMaybeWarnViaProbe(missing);
         }
         return missing;
+    }
+    _nmbMaybeWarnViaProbe(missingNames) {
+        try {
+            if (!this.probeScannerBridge || !this.probeScannerBridge.isAvailable()) return;
+            const confirmedBreaks = this.probeScannerBridge.getConfirmedBreaks();
+            if (!confirmedBreaks.length) return;
+            const relevant = confirmedBreaks.filter(c => missingNames.some(name => c.label.includes(name) || name.includes(c.label)));
+            if (!relevant.length) return;
+            const age = this.probeScannerBridge.getSnapshotAgeLabel();
+            const labels = relevant.map(c => c.label).join(", ");
+            this.toast(`ByeBlocked: ${labels} confirmed missing by Probe (scan ${age} ago). Some features may be broken until Discord's internals stabilize or the plugin updates.`, "warn");
+        } catch (_) {
+        }
     }
     patchPrivateChannelStore(attempt = 0) {
         if (this._privateChannelStorePatched) return;
@@ -3450,11 +3726,13 @@ module.exports = class ByeBlocked {
         if (this._autocompleteRowPatched) return;
         const self = this;
         try {
+            const AUTOCOMPLETE_TERMS = ["autocomplete", "aria-selected", "user", "userId"];
+            const AUTOCOMPLETE_REQUIRED = 3;
             const result = BdApi.Webpack.getWithKey(m => {
                 if (typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
-                    return src.includes("autocomplete") && src.includes("aria-selected") && (src.includes("user") || src.includes("userId"));
+                    return AUTOCOMPLETE_TERMS.filter(t => src.includes(t)).length >= AUTOCOMPLETE_REQUIRED;
                 } catch (_) { return false; }
             });
             if (result) {
@@ -3474,6 +3752,8 @@ module.exports = class ByeBlocked {
         } catch (err) { this._patcher?._warn("patchAutocompleteRowComponent", err); }
         if (!this._autocompleteRowPatched && attempt < 6) {
             setTimeout(() => this.patchAutocompleteRowComponent(attempt + 1), 5000);
+        } else if (!this._autocompleteRowPatched) {
+            this._patcher?._warn("patchAutocompleteRowComponent", new Error("ran out of attempts — no module matched the autocomplete-row term set; Discord likely renamed something in this component"));
         }
     }
     patchVoiceUserComponent(attempt = 0) {
@@ -3481,11 +3761,13 @@ module.exports = class ByeBlocked {
         if (this._voiceUserComponentPatched) return;
         const self = this;
         try {
+            const VOICE_USER_TERMS = ["voiceUser", "voiceStates", "user", "speaking"];
+            const VOICE_USER_REQUIRED = 3;
             const result = BdApi.Webpack.getWithKey(m => {
                 if (typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
-                    return src.includes("voiceUser") && src.includes("voiceStates") && src.includes("user");
+                    return VOICE_USER_TERMS.filter(t => src.includes(t)).length >= VOICE_USER_REQUIRED;
                 } catch (_) { return false; }
             });
             if (result) {
@@ -3504,6 +3786,8 @@ module.exports = class ByeBlocked {
         } catch (err) { this._patcher?._warn("patchVoiceUserComponent", err); }
         if (!this._voiceUserComponentPatched && attempt < 6) {
             setTimeout(() => this.patchVoiceUserComponent(attempt + 1), 5000);
+        } else if (!this._voiceUserComponentPatched) {
+            this._patcher?._warn("patchVoiceUserComponent", new Error("ran out of attempts — no module matched the voice-user term set; Discord likely renamed something in this component"));
         }
     }
     patchMessageItemComponent(attempt = 0) {
@@ -3651,7 +3935,7 @@ module.exports = class ByeBlocked {
                 if (oid && self.shouldHide(oid)) return true;
             }
 return false;
-            }, ["row__", "thread", "active"]);
+            }, ["row__", "thread", "active", "ownerId", "recipients", "activePost", "threadId", "forumPost", "postRow", "lastMessageId"], 2, "patchActivePostsPopoverComponent");
         if (patched) {
             this._activePostsPopoverPatched = true;
             this._retryGuardExit("patchActivePostsPopoverComponent");
@@ -3671,7 +3955,12 @@ return false;
             if (!self.settings.places.memberList) return false;
             const userId = self.extractUserId(props);
             return !!(userId && self.shouldHide(userId));
-        }, ["memberRow", "guildMember", "joinedAt", "userId", "roleIcon", "premiumSince", "pendingMember"], 3);
+        }, [
+            "joinedAt", "userId",
+            "memberRow", "guildMember", "roleIcon", "premiumSince", "pendingMember",
+            "member", "listItem", "memberListItem", "avatarDecoration", "nick",
+            "roleIcons", "premiumSubscriber", "colorRoleId", "colorString", "isOwner"
+        ], 3, "patchGuildMembersPageRow");
         if (patched) {
             this._guildMembersPagePatched = true;
         } else if (attempt < 20) {
@@ -3687,7 +3976,7 @@ return false;
             if (!self.settings.places.memberList) return false;
             const userId = props?.user?.id || self.extractUserId(props);
             return !!(userId && self.shouldHide(userId));
-        }, ["nameplate", "hideClanTag", "colorRoleName", "shouldAnimateStatus", "premiumType", "isOwner", "statusColor"], 3);
+        }, ["nameplate", "hideClanTag", "colorRoleName", "shouldAnimateStatus", "premiumType", "isOwner", "statusColor"], 3, "patchMemberListRow");
         if (patched) {
             this._memberListRowPatched = true;
         } else if (attempt < 20) {
@@ -4307,8 +4596,27 @@ return false;
         if (!this.settings.places.messages) return;
         if (this._blockedMsgGroupPatched) return;
         if (!this._retryGuardEnter("patchBlockedMessageGroup", attempt)) return;
+        const BLOCKED_STRINGS = [ "MESSAGE_GROUP_BLOCKED", "blockedMessageGroup", "BlockedMessages", "blockedMessages", "messageGroupSpacing", "isBlockedMessage", "BLOCKED_MESSAGE" ];
+        const BLOCKED_REQUIRED = 2;
+        let bestHitCount = 0, bestHitStrings = [];
+        const countHits = src => {
+            const hits = BLOCKED_STRINGS.filter(s => src.includes(s));
+            if (hits.length > bestHitCount) { bestHitCount = hits.length; bestHitStrings = hits; }
+            return hits.length;
+        };
         try {
-            const BlockedMessageGroup = BdApi.Webpack.getModule(m => m?.displayName === "BlockedMessageGroup" || m?.name === "BlockedMessageGroup" || m?.prototype?.render?.toString?.().includes("MESSAGE_GROUP_BLOCKED") || typeof m === "function" && m.toString && m.toString().includes("messageGroupSpacing"));
+            const BlockedMessageGroup = BdApi.Webpack.getModule(m => {
+                try {
+                    if (m?.displayName === "BlockedMessageGroup" || m?.name === "BlockedMessageGroup") return true;
+                    const renderSrc = m?.prototype?.render?.toString?.();
+                    if (renderSrc && countHits(renderSrc) >= BLOCKED_REQUIRED) return true;
+                    if (typeof m === "function") {
+                        const src = m.toString();
+                        if (countHits(src) >= BLOCKED_REQUIRED) return true;
+                    }
+                } catch (_) {}
+                return false;
+            });
             if (BlockedMessageGroup?.prototype?.render) {
                 this.patchInstead(BlockedMessageGroup.prototype, "render", () => null);
                 this._blockedMsgGroupPatched = true;
@@ -4316,13 +4624,12 @@ return false;
                 return;
             }
         } catch (_) {}
-        const BLOCKED_STRINGS = [ "MESSAGE_GROUP_BLOCKED", "blockedMessageGroup", "BlockedMessages", "blockedMessages", "messageGroupSpacing", "isBlockedMessage", "BLOCKED_MESSAGE" ];
         try {
             const result = BdApi.Webpack.getWithKey(m => {
                 if (!m || typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
-                    return BLOCKED_STRINGS.some(s => src.includes(s));
+                    return countHits(src) >= BLOCKED_REQUIRED;
                 } catch (_) {
                     return false;
                 }
@@ -4345,7 +4652,7 @@ return false;
                     if (typeof val !== "function") continue;
                     try {
                         const src = Function.prototype.toString.call(val);
-                        if (BLOCKED_STRINGS.some(s => src.includes(s))) {
+                        if (countHits(src) >= BLOCKED_REQUIRED) {
                             this.patchInstead(m, key, () => null);
                             patched = true;
                         }
@@ -4365,7 +4672,7 @@ return false;
             setTimeout(() => this.patchBlockedMessageGroup(attempt + 1), 5000);
             return;
         }
-        this._patcher?._warn("patchBlockedMessageGroup", new Error("ran out of attempts to locate the BlockedMessageGroup module"));
+        this._patcher?._warn("patchBlockedMessageGroup", new Error(`ran out of attempts to locate the BlockedMessageGroup module — best candidate matched ${bestHitCount}/${BLOCKED_REQUIRED} required strings (${bestHitStrings.join(", ") || "none"})`));
         this._retryGuardExit("patchBlockedMessageGroup");
     }
     isBlockedMessageData(message, referencedMessage = null) {
@@ -4638,18 +4945,21 @@ return false;
     _filterCallGridProps(props) {
         if (!props || typeof props !== "object") return;
         try {
-            const participants = props.participants;
-            const filteredParticipants = props.filteredParticipants;
-            if (Array.isArray(participants) || Array.isArray(filteredParticipants)) {
-                const targetArray = Array.isArray(filteredParticipants) ? filteredParticipants : participants;
-                const filtered = this._filterParticipantArray(targetArray);
-                if (filtered !== targetArray) {
-                    if (Array.isArray(participants)) props.participants = filtered;
-                    if (Array.isArray(filteredParticipants)) props.filteredParticipants = filtered;
-                    if (typeof props.totalNumberOfParticipants === "number") {
-                        props.totalNumberOfParticipants = filtered.length;
-                    }
+            const KEYS = [ "participants", "filteredParticipants", "voiceParticipants", "gridParticipants", "streams", "tiles" ];
+            let anyFiltered = false;
+            let newLength = null;
+            for (const key of KEYS) {
+                const arr = props[key];
+                if (!Array.isArray(arr)) continue;
+                const filtered = this._filterParticipantArray(arr);
+                if (filtered !== arr) {
+                    props[key] = filtered;
+                    anyFiltered = true;
+                    newLength = filtered.length;
                 }
+            }
+            if (anyFiltered && typeof props.totalNumberOfParticipants === "number" && newLength !== null) {
+                props.totalNumberOfParticipants = newLength;
             }
         } catch (_) {}
     }
@@ -4662,21 +4972,39 @@ return false;
         }
         const self = this;
 
-        const gridSelector = '[class*="gridLayout_"], [class*="callContainer_"], [role="grid"]';
+        const gridSelector = '[class*="gridLayout_"], [class*="callContainer_"], [class*="videoGrid_"], [class*="callGrid_"], [class*="videoContainer_"], [role="grid"]';
+        const PARTICIPANT_ARRAY_KEYS = [ "participants", "filteredParticipants", "voiceParticipants", "gridParticipants", "streams", "tiles" ];
+        const looksLikeParticipantArray = arr => Array.isArray(arr) && (arr.length === 0 || arr.some(p => p && typeof p === "object" && (p.userId || p.user?.id || p.id)));
+        let bestPropKeysSeen = [];
         const findLiveGridClass = () => {
             const els = document.querySelectorAll(gridSelector);
             for (const el of els) {
                 try {
                     let fiber = BdApi.ReactUtils.getInternalInstance(el);
-                    for (let hop = 0; hop < 20 && fiber; hop++, fiber = fiber.return) {
+                    for (let hop = 0; hop < 25 && fiber; hop++, fiber = fiber.return) {
                         const props = fiber.memoizedProps;
-                        if (props && Array.isArray(props.participants) && Array.isArray(props.filteredParticipants) && typeof fiber.type === "function") {
-                            return fiber.type;
-                        }
+                        if (!props || typeof fiber.type !== "function") continue;
+                        const matchedKeys = PARTICIPANT_ARRAY_KEYS.filter(k => looksLikeParticipantArray(props[k]));
+                        if (matchedKeys.length > bestPropKeysSeen.length) bestPropKeysSeen = matchedKeys;
+                        if (Array.isArray(props.participants) && Array.isArray(props.filteredParticipants)) return fiber.type;
+                        if (matchedKeys.length >= 1) return fiber.type;
                     }
                 } catch (_) {}
             }
             return null;
+        };
+
+        const tryPatchPerParticipantViaHeuristic = () => {
+            return self._wpPatchRenderBySourceHeuristic(
+                props => {
+                    const user = props?.user;
+                    const uid = self.extractUserId(user) || self.extractUserId(props);
+                    return !!(uid && self.shouldHide(uid));
+                },
+                [ "isOwner", "nick", "activities", "colorString", "isMobileOnline", "isVROnline", "premiumSince" ],
+                3,
+                "patchCallGridParticipants:perParticipant"
+            );
         };
 
         const tryPatchClass = GridClass => {
@@ -4702,12 +5030,18 @@ return false;
             return;
         }
 
+        if (tryPatchPerParticipantViaHeuristic()) {
+            this._callGridPatched = true;
+            this._callGridPatchInFlight = false;
+            try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+            return;
+        }
 
         if (attempt < 40) {
             setTimeout(() => this.patchCallGridParticipants(attempt + 1), 3000);
         } else {
             this._callGridPatchInFlight = false;
-            this._patcher._logFail("patchCallGridParticipants", new Error("ran out of attempts — grid element never found; see maintenance notes"));
+            this._patcher._logFail("patchCallGridParticipants", new Error(`ran out of attempts — no grid-like element (matching ${gridSelector}) had a participant-shaped prop, and the per-participant source-heuristic lookup also failed. Closest array-shape candidate exposed: [${bestPropKeysSeen.join(", ") || "none"}]. Discord likely restructured the call grid further.`));
         }
     }
     _watchVoiceJoinForGridPatch() {
@@ -5004,7 +5338,7 @@ return false;
         if (this._readStatePatchesRegistered) {
             this._applyBlockedReadCacheOnStartup();
             this._bootstrapBlockedUnreadSuppression();
-            const relationshipStoreReady = !!this.modules.RelationshipStore?.isBlocked;
+            const relationshipStoreReady = !!this._relIsBlockedFn;
             if (relationshipStoreReady) {
                 this._readStatePatched = true;
                 this._refreshTaskbarBadge();
@@ -5294,66 +5628,8 @@ return false;
             }
             self._taskbarBadgePatched = true;
         }
-        if (!self._notificationDispatcherPatched) {
-            if (!self.modules.Dispatcher) {
-                try {
-                    self.modules.Dispatcher = self.modules.SelectedChannelStore?._dispatcher || null;
-                } catch (_) {}
-            }
-            const Dispatcher = self.modules.Dispatcher;
-            if (Dispatcher && typeof Dispatcher.dispatch === "function") {
-                self.patchBefore(Dispatcher, "dispatch", (_, args) => {
-                    if (!self.settings.places?.messages) return;
-                    const action = args?.[0];
-                    if (!action || typeof action !== "object") return;
-                    const scheduleRefresh = () => {
-                        queueMicrotask(() => {
-                            self._forceReadStateRecheck(true);
-                            self._refreshTaskbarBadge();
-                        });
-                    };
-                    if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE) {
-                        const msg = action.message;
-                        const authorId = msg?.author?.id;
-                        const channelId = msg?.channel_id;
-                        if (!authorId || !channelId) return;
-                        let parentId = null;
-                        try {
-                            parentId = self.modules.ChannelStore?.getChannel?.(channelId)?.parent_id || null;
-                        } catch (_) {}
-                        if (self.shouldHide(authorId) || self._isBlockedMessage(msg)) {
-                            if (!self._channelHasGenuineUnreadOtherThanBlocked(channelId)) {
-                                self._markBlockedOnlyReadActivity(channelId, parentId, msg?.id);
-                            }
-                            self._suppressMentionSoundUntil = Date.now() + 3000;
-                            scheduleRefresh();
-                        } else {
-                            self._clearBlockedOnlyReadActivity(channelId);
-                            if (parentId) self._clearBlockedOnlyReadActivity(parentId);
-                        }
-                        return;
-                    }
-                    if (action.type === self.constructor.ACTIONS.THREAD_CREATE) {
-                        const thread = action.channel || action;
-                        const ownerId = thread?.ownerId || thread?.owner_id;
-                        const parentId = thread?.parent_id;
-                        if (ownerId && parentId && self.shouldHide(ownerId)) {
-                            const lastId = self.modules.ReadStateStore?.lastMessageId?.(parentId);
-                            self._markBlockedOnlyReadActivity(parentId, null, lastId || thread?.id);
-                            scheduleRefresh();
-                        }
-                        return;
-                    }
-                    const ackChannelId = action.channelId || action.channel_id;
-                    if (ackChannelId && (action.type === self.constructor.ACTIONS.CHANNEL_ACK || action.type === self.constructor.ACTIONS.ACK_MESSAGES || action.type === self.constructor.ACTIONS.THREAD_ACK)) {
-                        self._clearBlockedOnlyReadActivity(ackChannelId);
-                    }
-                });
-                self._notificationDispatcherPatched = true;
-                self._registerDispatcherPatchHealthCheck();
-            }
-        }
-        const relationshipStoreReady = !!this.modules.RelationshipStore?.isBlocked;
+        self._patchNotificationDispatcher();
+        const relationshipStoreReady = !!this._relIsBlockedFn;
         if (relationshipStoreReady) {
             this._readStatePatched = true;
         }
@@ -5489,6 +5765,67 @@ return false;
             return null;
         }
     }
+    _patchNotificationDispatcher() {
+        const self = this;
+        if (self._notificationDispatcherPatched) return true;
+        if (!self.modules.Dispatcher) {
+            try {
+                self.modules.Dispatcher = self.modules.SelectedChannelStore?._dispatcher || null;
+            } catch (_) {}
+        }
+        const Dispatcher = self.modules.Dispatcher;
+        if (!Dispatcher || typeof Dispatcher.dispatch !== "function") return false;
+        self.patchBefore(Dispatcher, "dispatch", (_, args) => {
+            if (!self.settings.places?.messages) return;
+            const action = args?.[0];
+            if (!action || typeof action !== "object") return;
+            const scheduleRefresh = () => {
+                queueMicrotask(() => {
+                    self._forceReadStateRecheck(true);
+                    self._refreshTaskbarBadge();
+                });
+            };
+            if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE) {
+                const msg = action.message;
+                const authorId = msg?.author?.id;
+                const channelId = msg?.channel_id;
+                if (!authorId || !channelId) return;
+                let parentId = null;
+                try {
+                    parentId = self.modules.ChannelStore?.getChannel?.(channelId)?.parent_id || null;
+                } catch (_) {}
+                if (self.shouldHide(authorId) || self._isBlockedMessage(msg)) {
+                    if (!self._channelHasGenuineUnreadOtherThanBlocked(channelId)) {
+                        self._markBlockedOnlyReadActivity(channelId, parentId, msg?.id);
+                    }
+                    self._suppressMentionSoundUntil = Date.now() + 3000;
+                    scheduleRefresh();
+                } else {
+                    self._clearBlockedOnlyReadActivity(channelId);
+                    if (parentId) self._clearBlockedOnlyReadActivity(parentId);
+                }
+                return;
+            }
+            if (action.type === self.constructor.ACTIONS.THREAD_CREATE) {
+                const thread = action.channel || action;
+                const ownerId = thread?.ownerId || thread?.owner_id;
+                const parentId = thread?.parent_id;
+                if (ownerId && parentId && self.shouldHide(ownerId)) {
+                    const lastId = self.modules.ReadStateStore?.lastMessageId?.(parentId);
+                    self._markBlockedOnlyReadActivity(parentId, null, lastId || thread?.id);
+                    scheduleRefresh();
+                }
+                return;
+            }
+            const ackChannelId = action.channelId || action.channel_id;
+            if (ackChannelId && (action.type === self.constructor.ACTIONS.CHANNEL_ACK || action.type === self.constructor.ACTIONS.ACK_MESSAGES || action.type === self.constructor.ACTIONS.THREAD_ACK)) {
+                self._clearBlockedOnlyReadActivity(ackChannelId);
+            }
+        });
+        self._notificationDispatcherPatched = true;
+        self._registerDispatcherPatchHealthCheck();
+        return true;
+    }
     _registerDispatcherPatchHealthCheck() {
         if (!this._health || this._dispatcherPatchHealthRegistered) return;
         this._dispatcherPatchHealthRegistered = true;
@@ -5538,12 +5875,12 @@ return false;
     shouldHide(userId, isSpammer = false) {
         if (!userId) return false;
         if (isSpammer) return true;
-        if (!this.modules.RelationshipStore?.isBlocked) return false;
+        if (!this._relIsBlockedFn) return false;
         if (this._shouldHideCache?.has(userId)) return this._shouldHideCache.get(userId);
         try {
             let result = false;
-            if (this.settings.types.blocked && this.modules.RelationshipStore?.isBlocked?.(userId)) result = true;
-            else if (this.settings.types.ignored && this.modules.RelationshipStore?.isIgnored?.(userId)) result = true;
+            if (this.settings.types.blocked && this._relIsBlockedFn(userId)) result = true;
+            else if (this.settings.types.ignored && this._relIsIgnoredFn?.(userId)) result = true;
             if (this._shouldHideCache) this._shouldHideCache.set(userId, result);
             return result;
         } catch (_) {
@@ -5797,6 +6134,51 @@ return false;
             () => { try { this.hideBlockedEvents(); } catch (_) {} }
         );
 
+        this._health.register(
+            "autocompleteRowPatch",
+            () => {
+                if (!this.settings.places?.autocomplete) return true;
+                return !!this._autocompleteRowPatched;
+            },
+            () => {
+                console.warn("[ByeBlocked] The autocomplete row patch appears inactive — Discord may have changed the component's structure. Consider updating the plugin.");
+                try { this.patchAutocompleteRowComponent(); } catch (_) {}
+            }
+        );
+
+        this._health.register(
+            "voiceUserComponentPatch",
+            () => {
+                if (!this.settings.places?.voiceChannels) return true;
+                return !!this._voiceUserComponentPatched;
+            },
+            () => {
+                console.warn("[ByeBlocked] The voice user component patch appears inactive — Discord may have changed the component's structure. Consider updating the plugin.");
+                try { this.patchVoiceUserComponent(); } catch (_) {}
+            }
+        );
+
+        this._health.register(
+            "inviteQueryModule",
+            () => {
+                if (!this.settings.places?.autocomplete) return true;
+                return !!(this._inviteSuggestionsPatched || (this.modules.InviteQueryModule && this.modules.InviteQueryComposeKey));
+            },
+            () => {
+                console.warn("[ByeBlocked] The invite suggestions patch appears inactive — Discord may have changed the invite query module. Consider updating the plugin.");
+                try { this.patchInviteSuggestions(); } catch (_) {}
+            }
+        );
+
+        this._health.register(
+            "forumPostPatch",
+            () => !!this._forumPostComponentPatched,
+            () => {
+                console.warn("[ByeBlocked] The forum post card patch appears inactive — Discord may have changed the component's structure. Consider updating the plugin.");
+                try { this.patchForumPostComponent(); } catch (_) {}
+            }
+        );
+
         this._health.start();
     }
     _sweepOrphanedScrollMasks() {
@@ -5843,13 +6225,15 @@ return false;
             const storeBroken = !relStore || typeof relStore.isBlocked !== "function";
             const observerBroken = !this.observer;
             const dispatcherBroken = !this.modules.Dispatcher || typeof this.modules.Dispatcher.dispatch !== "function";
+            const notificationPatchMissing = !this._notificationDispatcherPatched && !dispatcherBroken;
             const msgStoreBroken = !this._rawGetMessages && (!this.modules.MessageStore || typeof this.modules.MessageStore.getMessages !== "function");
             const voiceStoreBroken = !this.modules.SortedVoiceStateStore || typeof this.modules.SortedVoiceStateStore.getVoiceStatesForChannel !== "function";
             const mediaEngineBroken = !this.modules.MediaEngineActions || (!this._localVolumeKey && !this._localMuteKey);
             const rtcModulesBroken = !this.modules.RTCConnectionUtils || !this.modules.RTCParticipantsModule;
-            if (storeBroken || observerBroken || dispatcherBroken || msgStoreBroken || voiceStoreBroken || mediaEngineBroken || rtcModulesBroken) {
+            if (storeBroken || observerBroken || dispatcherBroken || msgStoreBroken || voiceStoreBroken || mediaEngineBroken || rtcModulesBroken || notificationPatchMissing) {
                 if (storeBroken) { this._patcher.safe("watchdog:resolveModules", () => this.resolveModules()); }
                 if (dispatcherBroken) { this._patcher.safe("watchdog:resolveDispatcher", () => this._resolveDispatcher()); }
+                if (notificationPatchMissing) { this._patcher.safe("watchdog:patchNotificationDispatcher", () => this._patchNotificationDispatcher()); }
                 if (msgStoreBroken) { this._patcher.safe("watchdog:resolveMessagesGet", () => this._resolveMessagesGet()); }
                 if (observerBroken || storeBroken) { this._patcher.safe("watchdog:restartObserver", () => this._restartObserver()); }
                 if (voiceStoreBroken) { this._patcher.safe("watchdog:resolveVoiceStores", () => { this.resolveModules(); this.patchStores(); }); }
@@ -6866,9 +7250,26 @@ return false;
         const t = this._findLocalizedTopicsEmptyText();
         return `<div class="nmb-injected-topic-empty container">\n                    <div class="iconContainer">\n                        <div class="icon">\n                            <svg aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="36" height="36" fill="none" viewBox="0 0 24 24">\n                                <path d="M12 2.81a1 1 0 0 1 0-1.41l.36-.36a1 1 0 0 1 1.41 0l9.2 9.2a1 1 0 0 1 0 1.4l-.7.7a1 1 0 0 1-1.3.13l-9.54-6.72a1 1 0 0 1-.08-1.58l1-1L12 2.8ZM12 21.2a1 1 0 0 1 0 1.41l-.35.35a1 1 0 0 1-1.41 0l-9.2-9.19a1 1 0 0 1 0-1.41l.7-.7a1 1 0 0 1 1.3-.12l9.54 6.72a1 1 0 0 1 .07 1.58l-1 1 .35.36ZM15.66 16.8a1 1 0 0 1-1.38.28l-8.49-5.66A1 1 0 1 1 6.9 9.76l8.49 5.65a1 1 0 0 1 .27 1.39ZM17.1 14.25a1 1 0 1 0 1.11-1.66L9.73 6.93a1 1 0 0 0-1.11 1.66l8.49 5.66Z" fill="currentColor"></path>\n                            </svg>\n                        </div>\n                        <svg class="stars" aria-hidden="true" role="img" width="104" height="80" viewBox="0 0 104 80" fill="none">\n                            <path d="M95.6718 1.80634C95.6718 0.808724 94.863 0 93.8654 0C92.8678 0 92.0591 0.808724 92.0591 1.80634V3.64278C92.0591 4.64039 92.8678 5.44911 93.8654 5.44911C94.863 5.44911 95.6718 4.64039 95.6718 3.64278V1.80634Z" fill="#ADF3FF"></path>\n                            <path d="M95.6713 16.3574C95.6713 15.3598 94.8625 14.5511 93.8649 14.5511C92.8673 14.5511 92.0586 15.3598 92.0586 16.3574V18.1939C92.0586 19.1915 92.8673 20.0002 93.8649 20.0002C94.8625 20.0002 95.6713 19.1915 95.6713 18.1939V16.3574Z" fill="#ADF3FF"></path>\n                            <path d="M102.194 11.8412C103.191 11.8412 104 11.0325 104 10.0349C104 9.03724 103.191 8.22852 102.194 8.22852H100.357C99.3596 8.22852 98.5509 9.03724 98.5509 10.0349C98.5509 11.0325 99.3596 11.8412 100.357 11.8412H102.194Z" fill="#ADF3FF"></path>\n                            <path d="M87.6434 11.7413C88.641 11.7413 89.4497 10.9325 89.4497 9.93494C89.4497 8.93733 88.641 8.1286 87.6434 8.1286H85.8069C84.8093 8.1286 84.0006 8.93733 84.0006 9.93494C84.0006 10.9325 84.8093 11.7413 85.8069 11.7413H87.6434Z" fill="#ADF3FF"></path>\n                            <path d="M11.1501 74.4573L15.3147 73.0684C15.5192 72.9747 15.6925 72.8241 15.814 72.6347C15.9354 72.4454 16 72.225 16 72C16 71.775 15.9354 71.5546 15.814 71.3653C15.6925 71.1759 15.5192 71.0253 15.3147 70.9316L11.1501 69.5427C10.8657 69.4142 10.6378 69.1862 10.5094 68.9016L9.01446 64.7348C8.94423 64.521 8.80835 64.3349 8.62619 64.203C8.44403 64.071 8.22488 64 7.99999 64C7.77511 64 7.55597 64.071 7.37381 64.203C7.19165 64.3349 7.05576 64.521 6.98554 64.7348L5.49057 68.9016C5.36216 69.1862 5.13433 69.4142 4.84986 69.5427L0.685276 70.9316C0.480802 71.0253 0.307523 71.1759 0.186045 71.3653C0.0645662 71.5546 0 71.775 0 72C0 72.225 0.0645662 72.4454 0.186045 72.6347C0.307523 72.8241 0.480802 72.9747 0.685276 73.0684L4.84986 74.4573C5.0011 74.5032 5.1387 74.5858 5.25046 74.6976C5.36222 74.8094 5.44469 74.9471 5.49057 75.0984L6.98554 79.2652C7.05576 79.479 7.19165 79.6651 7.37381 79.797C7.55597 79.929 7.77511 80 7.99999 80C8.22488 80 8.44403 79.929 8.62619 79.797C8.80835 79.6651 8.94423 79.479 9.01446 79.2652L10.5094 75.0984C10.5553 74.9471 10.6378 74.8094 10.7495 74.6976C10.8613 74.5858 10.9989 74.5032 11.1501 74.4573Z" fill="#FFD01A"></path>\n                        </svg>\n                    </div>\n                    <h2 class="defaultColor heading-xl/semibold" data-text-variant="heading-xl/semibold">${t.title}</h2>\n                    <div class="text-md/normal" data-text-variant="text-md/normal" style="color: var(--text-default);">${t.subtitle}</div>\n                    <div data-button-hoisted-classname-wrapper="true" class="cta">\n                        <button data-mana-component="button" role="button" class="button md primary hasText" type="button">\n                            <div class="buttonChildrenWrapper">\n                                <div class="buttonChildren">\n                                    <span class="lineClamp1 text-md/medium" data-text-variant="text-md/medium">${t.button}</span>\n                                </div>\n                            </div>\n                        </button>\n                    </div>\n                </div>`;
     }
+    _findDmList() {
+        try {
+            const anyRow = document.querySelector('li[data-list-item-id*="private-channels"][data-list-item-id*="___"]');
+            const ul = anyRow?.closest('ul');
+            if (ul) return ul;
+        } catch (_) {}
+        const DM_LIST_LABELS = [
+            "Direct Messages", "Mensagens diretas", "Mensajes directos", "Messages priv\u00e9s",
+            "Direktnachrichten", "Messaggi diretti", "Directe berichten", "Wiadomo\u015bci bezpo\u015brednie",
+            "\u041b\u0438\u0447\u043d\u044b\u0435 \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u044f", "Direkt Mesajlar", "\u76f4\u63a5\u8a0a\u606f", "\u79c1\u4fe1", "\u30c0\u30a4\u30ec\u30af\u30c8\u30e1\u30c3\u30bb\u30fc\u30b8", "\ub2c8\uc900 \uba54\uc2dc\uc9c0"
+        ];
+        for (const label of DM_LIST_LABELS) {
+            const el = document.querySelector(`ul[aria-label="${label}"]`);
+            if (el) return el;
+        }
+        return null;
+    }
     enforceEmptyDmSkeleton() {
         try {
-            const list = document.querySelector('ul[aria-label="Direct Messages"], ul[aria-label="Mensagens diretas"]');
+            const list = this._findDmList();
             if (!list) return;
             const existingSkeleton = list.querySelector('[data-nmb-injected-skeleton="true"]');
             const nativeSkeleton = list.querySelector('svg[class*="empty_"]:not([data-nmb-injected-skeleton])');
@@ -7448,7 +7849,7 @@ return false;
             this._walkFiberPropsShallow(el, props => {
                 if (userId) return;
                 const candidate = props?.user?.id || props?.userId || props?.message?.author?.id || props?.mentionedUser?.id;
-                if (candidate && this.modules.RelationshipStore?.isBlocked?.(candidate)) userId = candidate;
+                if (candidate && this._relIsBlockedFn?.(candidate)) userId = candidate;
             });
         }
         if (!(userId && this.shouldHide(userId))) return;
@@ -8031,7 +8432,12 @@ return false;
                 '[aria-label="Atividades"]',
                 '[aria-label="Activities"]',
                 '[aria-label*="atividade" i]',
-                '[aria-label*="activit" i]'
+                '[aria-label*="activit" i]',
+                '[aria-label*="actividad" i]',
+                '[aria-label*="activité" i]',
+                '[aria-label*="aktivität" i]',
+                '[aria-label*="attività" i]',
+                '[aria-label*="activiteit" i]'
             ];
             for (const sel of selectors) {
                 const btn = document.querySelector(sel);
@@ -8048,9 +8454,14 @@ return false;
             const selectors = [
                 '[aria-label="Convidar Pessoas"]',
                 '[aria-label="Invite People"]',
-                '[aria-label*="Convidar"]',
-                '[aria-label*="Invite"][aria-label*="voice"]',
-                '[aria-label*="Invite"][aria-label*="Voice"]'
+                '[aria-label*="convidar" i]',
+                '[aria-label*="invite" i][aria-label*="voice" i]',
+                '[aria-label*="invite" i][aria-label*="voz" i]',
+                '[aria-label*="invitar" i][aria-label*="voz" i]',
+                '[aria-label*="inviter" i][aria-label*="vocal" i]',
+                '[aria-label*="einladen" i][aria-label*="sprach" i]',
+                '[aria-label*="invita" i][aria-label*="vocale" i]',
+                '[aria-label*="uitnodigen" i][aria-label*="spraak" i]'
             ];
             for (const sel of selectors) {
                 const btn = document.querySelector(sel);
@@ -8985,9 +9396,20 @@ return false;
             try { this.hideBlockedGuildStageBadge(); } catch (_) {}
         }, 350);
     }
+    _findGuildIconMaskSvg(itemContainer) {
+        try {
+            const direct = itemContainer.querySelector('svg:has(foreignObject[mask]), svg:has(foreignObject[data-nmb-mask-fixed="true"])');
+            if (direct) return direct;
+        } catch (_) {}
+        const svgs = itemContainer.querySelectorAll('svg');
+        for (const svg of svgs) {
+            if (svg.querySelector('foreignObject[mask]') || svg.querySelector('foreignObject[data-nmb-mask-fixed="true"]')) return svg;
+        }
+        return itemContainer.querySelector('svg[class*="svg_cc5dd2"]');
+    }
     _restoreGuildIconMask(itemContainer) {
         try {
-            const svg = itemContainer.querySelector('svg[class*="svg_cc5dd2"]');
+            const svg = this._findGuildIconMaskSvg(itemContainer);
             if (!svg) return;
             const fixedForeignObjects = svg.querySelectorAll('foreignObject[data-nmb-mask-fixed="true"]');
             if (!fixedForeignObjects.length) return;
@@ -9008,7 +9430,7 @@ return false;
     }
     _fixGuildIconMaskForHiddenBadge(itemContainer) {
         try {
-            const svg = itemContainer.querySelector('svg[class*="svg_cc5dd2"]');
+            const svg = this._findGuildIconMaskSvg(itemContainer);
             if (!svg) return;
             const foreignObjects = svg.querySelectorAll("foreignObject[mask]");
             if (!foreignObjects.length) return;
@@ -10032,16 +10454,49 @@ return false;
             return orig.apply(ctx, args);
         });
     }
+    static get CALL_BUTTONS_STRINGS() {
+        return [ "renderCall", "shouldRenderCall", "maybePreloadChannelCall", "showCall", "inCall", "hasVideo", "callActive", "isRinging", "selectedParticipant", "renderVoiceCallButton", "renderVideoCallButton", "renderCallButton" ];
+    }
+    static get CALL_BUTTONS_REQUIRED() { return 2; }
+    _findCallButtonsClassByFiber() {
+        try {
+            const candidates = document.querySelectorAll('[class*="toolbar_"], [class*="titleWrapper_"], [class*="container_"], [class*="callContainer_"]');
+            for (const el of candidates) {
+                try {
+                    let fiber = BdApi.ReactUtils.getInternalInstance(el);
+                    for (let hop = 0; hop < 25 && fiber; hop++, fiber = fiber.return) {
+                        const props = fiber.memoizedProps;
+                        if (!props || !props.channel || typeof fiber.type !== "function" || !fiber.type.prototype?.render) continue;
+                        if (typeof props.callActive === "boolean") return fiber.type;
+                        if (typeof props.showCall === "boolean" || typeof props.inCall === "boolean") return fiber.type;
+                        if (typeof props.hasVideo === "boolean" && ("selectedParticipant" in props || "voiceChannel" in props)) return fiber.type;
+                    }
+                } catch (_) {}
+            }
+        } catch (_) {}
+        return null;
+    }
     patchHideBlockedCallUI(attempt = 0) {
         if (this._callUiPatched) return;
         if (!this._retryGuardEnter("patchHideBlockedCallUI", attempt)) return;
         let CallButtons = null;
+        let bestHitCount = 0, bestHitStrings = [];
+        const STRINGS = ByeBlocked.CALL_BUTTONS_STRINGS;
+        const REQUIRED = ByeBlocked.CALL_BUTTONS_REQUIRED;
+        const countHits = src => {
+            const hits = STRINGS.filter(s => src.includes(s));
+            if (hits.length > bestHitCount) { bestHitCount = hits.length; bestHitStrings = hits; }
+            return hits.length;
+        };
         try {
-            const mod = this._wpGetModuleBySourceAny("renderVoiceCallButton", "renderVideoCallButton");
+            const mod = this._wpGetModuleBySourceAny("renderCall", "shouldRenderCall", "renderVoiceCallButton", "renderVideoCallButton");
             if (mod && typeof mod === "object") {
                 for (const key of Object.keys(mod)) {
                     const val = mod[key];
-                    if (val && val.prototype && typeof val.prototype.render === "function" && typeof val.prototype.renderVoiceCallButton === "function") {
+                    if (val && val.prototype && typeof val.prototype.render === "function" &&
+                        (typeof val.prototype.renderCall === "function" ||
+                         typeof val.prototype.shouldRenderCall === "function" ||
+                         typeof val.prototype.renderVoiceCallButton === "function")) {
                         CallButtons = val;
                         break;
                     }
@@ -10051,12 +10506,35 @@ return false;
                 }
             }
         } catch (_) {}
+        if (!CallButtons) {
+            try {
+                const scored = this._wpGetModule(m => {
+                    if (!m || typeof m !== "object") return false;
+                    for (const key of Object.keys(m)) {
+                        const val = m[key];
+                        const renderSrc = val?.prototype?.render?.toString?.();
+                        if (renderSrc && countHits(renderSrc) >= REQUIRED) return true;
+                    }
+                    return false;
+                }, { searchExports: true });
+                if (scored) {
+                    for (const key of Object.keys(scored)) {
+                        const val = scored[key];
+                        const renderSrc = val?.prototype?.render?.toString?.();
+                        if (renderSrc && countHits(renderSrc) >= REQUIRED) { CallButtons = val; break; }
+                    }
+                }
+            } catch (_) {}
+        }
+        if (!CallButtons) {
+            try { CallButtons = this._findCallButtonsClassByFiber(); } catch (_) {}
+        }
         if (!CallButtons || !CallButtons.prototype || typeof CallButtons.prototype.render !== "function") {
             if (attempt < 15) {
                 setTimeout(() => this.patchHideBlockedCallUI(attempt + 1), 2000);
                 return;
             }
-            this._patcher?._warn("patchHideBlockedCallUI", new Error("ran out of attempts to locate the call buttons component"));
+            this._patcher?._warn("patchHideBlockedCallUI", new Error(`ran out of attempts to locate the call buttons component — exact-name lookup, source-heuristic (best candidate matched ${bestHitCount}/${REQUIRED} required strings: ${bestHitStrings.join(", ") || "none"}), and structural Fiber lookup all failed; Discord likely renamed or restructured this component`));
             this._retryGuardExit("patchHideBlockedCallUI");
             return;
         }
@@ -10069,9 +10547,12 @@ return false;
                 const props = ctx?.props;
                 if (!self.settings.behavior.blockRingingFromBlocked || !props || typeof props !== "object") return;
                 const channelId = props.channel?.id;
-                if (channelId && self._hasBlockedRinging(channelId) && props.callActive) {
+                const callIsActive = props.callActive || props.showCall || props.inCall;
+                if (channelId && self._hasBlockedRinging(channelId) && callIsActive) {
                     ctx.__byeblockedOrigProps = props;
-                    ctx.props = { ...props, callActive: false, inCall: false };
+                    const override = { callActive: false, inCall: false };
+                    if (typeof props.showCall === "boolean") override.showCall = false;
+                    ctx.props = { ...props, ...override };
                 }
             } catch (_) {}
         });
@@ -11489,21 +11970,56 @@ return false;
             inviteQueryMod = this._wpGetBySource(src, { defaultExport: false });
             if (inviteQueryMod) break;
         }
+        if (!inviteQueryMod) {
+            const REQUIRED_MODULE_MATCHES = 2;
+            inviteQueryMod = this._wpGetModule(m => {
+                if (!m || typeof m !== "object") return false;
+                try {
+                    return Object.values(m).some(v => {
+                        if (typeof v !== "function") return false;
+                        const src = v.toString();
+                        return PRIMARY_SOURCES.filter(s => src.includes(s)).length >= REQUIRED_MODULE_MATCHES;
+                    });
+                } catch (_) { return false; }
+            }, { defaultExport: false });
+        }
         this.modules.InviteQueryModule = inviteQueryMod || null;
         this.modules.InviteQueryComposeKey = null;
         if (inviteQueryMod) {
             const REQUIRED_MATCHES = 2;
-            for (const key of Object.keys(inviteQueryMod)) {
-                const val = inviteQueryMod[key];
-                if (typeof val !== "function") continue;
-                try {
-                    const src = val.toString();
-                    const hits = PRIMARY_SOURCES.filter(s => src.includes(s));
-                    if (hits.length >= REQUIRED_MATCHES) {
-                        this.modules.InviteQueryComposeKey = key;
-                        break;
+            for (const name of PRIMARY_SOURCES) {
+                if (typeof inviteQueryMod[name] === "function") {
+                    this.modules.InviteQueryComposeKey = name;
+                    break;
+                }
+            }
+            if (!this.modules.InviteQueryComposeKey) {
+                for (const key of Object.keys(inviteQueryMod)) {
+                    const val = inviteQueryMod[key];
+                    if (typeof val !== "function") continue;
+                    try {
+                        const src = val.toString();
+                        const hits = PRIMARY_SOURCES.filter(s => src.includes(s));
+                        if (hits.length >= REQUIRED_MATCHES) {
+                            this.modules.InviteQueryComposeKey = key;
+                            break;
+                        }
+                    } catch (_) {}
+                }
+            }
+            if (!this.modules.InviteQueryComposeKey) {
+                for (const outerKey of Object.keys(inviteQueryMod)) {
+                    const outerVal = inviteQueryMod[outerKey];
+                    if (!outerVal || typeof outerVal !== "object") continue;
+                    for (const name of PRIMARY_SOURCES) {
+                        if (typeof outerVal[name] === "function") {
+                            this.modules.InviteQueryModule = outerVal;
+                            this.modules.InviteQueryComposeKey = name;
+                            break;
+                        }
                     }
-                } catch (_) {}
+                    if (this.modules.InviteQueryComposeKey) break;
+                }
             }
         }
         if (this.modules.InviteQueryComposeKey) return true;
@@ -11588,35 +12104,35 @@ return false;
             let mod = this.modules.InviteQueryModule;
             let key = this.modules.InviteQueryComposeKey;
             if (!mod || !key || typeof mod[key] !== "function") {
-                const resolved = this.resolveInviteQueryModule();
+                this.resolveInviteQueryModule();
                 mod = this.modules.InviteQueryModule;
                 key = this.modules.InviteQueryComposeKey;
-                if (resolved && mod && key && typeof mod[key] === "function") {
-                    this.patchAfter(mod, key, function(context, args, result) {
-                        if (!self.settings.places.autocomplete) return result;
-                        if (!result || !Array.isArray(result.rows)) return result;
-                        result.rows = result.rows.filter(row => {
-                            if (!row) return true;
-                            if (row.type === "FRIEND" || row.type === "DM") {
-                                const userId = row.item?.id;
-                                return !(userId && self.shouldHide(userId));
-                            }
-                            if (row.type === "GROUP_DM") {
-                                const channel = row.item;
-                                const recipients = channel?.recipients;
-                                if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) {
-                                    return false;
-                                }
-                                return true;
+            }
+            if (!this._inviteSuggestionsPatched && mod && key && typeof mod[key] === "function") {
+                this.patchAfter(mod, key, function(context, args, result) {
+                    if (!self.settings.places.autocomplete) return result;
+                    if (!result || !Array.isArray(result.rows)) return result;
+                    result.rows = result.rows.filter(row => {
+                        if (!row) return true;
+                        if (row.type === "FRIEND" || row.type === "DM") {
+                            const userId = row.item?.id;
+                            return !(userId && self.shouldHide(userId));
+                        }
+                        if (row.type === "GROUP_DM") {
+                            const channel = row.item;
+                            const recipients = channel?.recipients;
+                            if (Array.isArray(recipients) && recipients.length && recipients.map(r => r?.id || r).some(id => self.shouldHide(id))) {
+                                return false;
                             }
                             return true;
-                        });
-                        return result;
+                        }
+                        return true;
                     });
-                    this._inviteSuggestionsPatched = true;
-                    this._retryGuardExit("patchInviteSuggestions");
-                    return;
-                }
+                    return result;
+                });
+                this._inviteSuggestionsPatched = true;
+                this._retryGuardExit("patchInviteSuggestions");
+                return;
             }
         } catch (_) {}
         if (!this._inviteSuggestionsPatched && attempt < 30) {
@@ -11631,7 +12147,7 @@ return false;
     _startInviteClickListener() {
         if (this._inviteClickHandler || this._inviteSuggestionsPatched) return;
         const self = this;
-        const INVITE_LABEL_RE = /convidar|invite/i;
+        const INVITE_LABEL_RE = /convidar|invite|invitar|inviter|invita al|sprachkanal|uitnodigen/i;
         this._inviteClickHandler = event => {
             if (self._inviteSuggestionsPatched) return;
             try {
