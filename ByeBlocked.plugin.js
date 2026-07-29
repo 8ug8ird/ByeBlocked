@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.10
+ * @version 2.4.11
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -315,7 +315,7 @@ function _findCloseButton(dialog) {
 })();
 
 module.exports = class ByeBlocked {
-    static VERSION="2.4.10";
+    static VERSION="2.4.11";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -1281,15 +1281,16 @@ module.exports = class ByeBlocked {
             this._renderUpdateBtn(panelRef);
             this._lastNotifiedVersion = remoteVersion;
             this.toast(`ByeBlocked updated to v${remoteVersion}!`, "success");
+            const epochAtWrite = this._instanceEpoch = (this._instanceEpoch || 0) + 1;
             setTimeout(() => {
+                if (this._instanceEpoch !== epochAtWrite) return;
                 try {
                     if (BdApi.Plugins.isEnabled(this.pluginName)) BdApi.Plugins.disable(this.pluginName);
                     BdApi.Plugins.enable(this.pluginName);
-                    this.toast(`Plugin successfully re-activated (v${remoteVersion})!`, "success");
                 } catch (_) {
                     this.toast("Plugin updated, but couldn't auto-reactivate. Disable and re-enable manually.", "warn");
                 }
-            }, 800);
+            }, 2500);
         } catch (err) {
             this.toast("Auto-install failed: " + err.message + " — download manually from GitHub.", "error");
             this._safeOpenExternal(htmlUrl);
@@ -2580,17 +2581,22 @@ module.exports = class ByeBlocked {
         return false;
     }
     _installDomRemovalGuard() {
-        if (ByeBlocked._domGuardInstalled) return;
         const proto = Node.prototype;
+        if (proto.removeChild && proto.removeChild.__nmbGuardInstalled) {
+            this._originalRemoveChild = proto.removeChild.__nmbOriginalRemoveChild;
+            this._originalInsertBefore = proto.insertBefore?.__nmbOriginalInsertBefore;
+            this._domGuardOwner = false;
+            return;
+        }
         const originalRemoveChild = proto.removeChild;
         const originalInsertBefore = proto.insertBefore;
         const self = this;
-        ByeBlocked._domGuardSwallowCount = 0;
-        ByeBlocked._domGuardSwallowWindowStart = Date.now();
+        this._domGuardSwallowCount = 0;
+        this._domGuardSwallowWindowStart = Date.now();
         const noteSwallow = () => {
-            ByeBlocked._domGuardSwallowCount = (ByeBlocked._domGuardSwallowCount || 0) + 1;
+            self._domGuardSwallowCount = (self._domGuardSwallowCount || 0) + 1;
         };
-        proto.removeChild = function(child) {
+        const patchedRemoveChild = function(child) {
             if (child && child.parentNode !== this) {
                 if (self._isNmbTrackedNode(child)) {
                     console.warn("[ByeBlocked] removeChild blocked: node tracked by ByeBlocked was no longer a child (avoiding NotFoundError).", { parent: this, child: child });
@@ -2610,12 +2616,12 @@ module.exports = class ByeBlocked {
                 throw err;
             }
         };
-        proto.insertBefore = function(newNode, referenceNode) {
+        const patchedInsertBefore = function(newNode, referenceNode) {
             if (referenceNode && referenceNode.parentNode !== this) {
                 if (self._isNmbTrackedNode(referenceNode)) {
                     console.warn("[ByeBlocked] insertBefore blocked: reference node tracked by ByeBlocked was no longer a child (avoiding NotFoundError).", { parent: this, referenceNode: referenceNode });
                     noteSwallow();
-                    return this.appendChild(newNode);
+                    return originalInsertBefore.call(this, newNode, null);
                 }
                 return originalInsertBefore.call(this, newNode, referenceNode);
             }
@@ -2625,18 +2631,23 @@ module.exports = class ByeBlocked {
                 if (err instanceof DOMException && err.name === "NotFoundError" && self._isNmbTrackedNode(referenceNode)) {
                     console.warn("[ByeBlocked] insertBefore threw NotFoundError on a node tracked by ByeBlocked — swallowed to avoid a crash.", { parent: this, referenceNode: referenceNode });
                     noteSwallow();
-                    return this.appendChild(newNode);
+                    return originalInsertBefore.call(this, newNode, null);
                 }
                 throw err;
             }
         };
+        patchedRemoveChild.__nmbGuardInstalled = true;
+        patchedRemoveChild.__nmbOriginalRemoveChild = originalRemoveChild;
+        patchedInsertBefore.__nmbGuardInstalled = true;
+        patchedInsertBefore.__nmbOriginalInsertBefore = originalInsertBefore;
+        proto.removeChild = patchedRemoveChild;
+        proto.insertBefore = patchedInsertBefore;
         this._originalRemoveChild = originalRemoveChild;
         this._originalInsertBefore = originalInsertBefore;
-        ByeBlocked._domGuardInstalled = true;
-        ByeBlocked._domGuardRestore = () => {
-            try { proto.removeChild = originalRemoveChild; } catch (_) {}
-            try { proto.insertBefore = originalInsertBefore; } catch (_) {}
-            ByeBlocked._domGuardInstalled = false;
+        this._domGuardOwner = true;
+        this._domGuardRestore = () => {
+            try { if (proto.removeChild === patchedRemoveChild) proto.removeChild = originalRemoveChild; } catch (_) {}
+            try { if (proto.insertBefore === patchedInsertBefore) proto.insertBefore = originalInsertBefore; } catch (_) {}
         };
         this._registerDomGuardHealthCheck();
     }
@@ -2648,12 +2659,12 @@ module.exports = class ByeBlocked {
         this._health.register(
             "domRemovalGuardSwallowRate",
             () => {
-                const count = ByeBlocked._domGuardSwallowCount || 0;
+                const count = this._domGuardSwallowCount || 0;
                 lastMeasuredCount = count;
-                const windowStart = ByeBlocked._domGuardSwallowWindowStart || Date.now();
+                const windowStart = this._domGuardSwallowWindowStart || Date.now();
                 const elapsed = Date.now() - windowStart;
-                ByeBlocked._domGuardSwallowCount = 0;
-                ByeBlocked._domGuardSwallowWindowStart = Date.now();
+                this._domGuardSwallowCount = 0;
+                this._domGuardSwallowWindowStart = Date.now();
                 if (elapsed <= 0) return true;
                 return count < SWALLOW_RATE_THRESHOLD;
             },
@@ -2694,6 +2705,7 @@ module.exports = class ByeBlocked {
     start(_retryAttempt = 0) {
         if (this.isRunning) return;
         this.isRunning = true;
+        this._instanceEpoch = (this._instanceEpoch || 0) + 1;
         window.__byeBlocked = this;
         this._patcher.safe('installDomRemovalGuard', () => this._installDomRemovalGuard());
         this.restoreAllElements();
@@ -2732,13 +2744,24 @@ module.exports = class ByeBlocked {
         p.safe('registerHealthChecks', () => this._registerHealthChecks());
         this.scanInterval = setInterval(() => this.queueScan(), 4e3);
         this.queueRefresh();
+        this._startupTimers = this._startupTimers || [];
+        const trackedTimeout = (fn, delay) => {
+            const id = setTimeout(() => {
+                const idx = this._startupTimers.indexOf(id);
+                if (idx !== -1) this._startupTimers.splice(idx, 1);
+                if (!this.isRunning) return;
+                fn();
+            }, delay);
+            this._startupTimers.push(id);
+            return id;
+        };
         if (this.settings.places?.groupDms) {
             for (const delay of [300, 800, 1500, 2500, 4000, 6000, 8000]) {
-                setTimeout(() => { if (this.isRunning) { try { this.hidePrivateChannels(); } catch (_) {} } }, delay);
+                trackedTimeout(() => { try { this.hidePrivateChannels(); } catch (_) {} }, delay);
             }
         }
         this._waitForChatReady(0);
-        setTimeout(() => {
+        trackedTimeout(() => {
             try {
                 const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
                 if (channelId) this._scanExistingPinsForChannel(channelId);
@@ -2746,10 +2769,10 @@ module.exports = class ByeBlocked {
         }, 1500);
         this._registerModuleRefresh();
         if (this.settings.behavior.autoCheckUpdates) {
-            setTimeout(() => this.checkForUpdatesAuto(), 5e3);
+            trackedTimeout(() => this.checkForUpdatesAuto(), 5e3);
             this._periodicCheckInterval = setInterval(() => this.checkForUpdatesAuto(), 72e5);
         }
-        setTimeout(() => {
+        trackedTimeout(() => {
             p.safe('patchInviteSuggestions', () => this.patchInviteSuggestions());
             p.safe('patchMentionAutocomplete', () => this.patchMentionAutocomplete());
             p.safe('patchGuildMembersPageRow', () => this.patchGuildMembersPageRow());
@@ -2766,7 +2789,7 @@ module.exports = class ByeBlocked {
                 p.safe('watchCallCreateForHideBlockedCallUI', () => this._watchCallCreateForHideBlockedCallUI());
             }
         }, 2e3);
-        setTimeout(() => {
+        trackedTimeout(() => {
             p.safe('patchStageRenderComponent', () => this.patchStageRenderComponent());
             p.safe('patchActivityPanelComponent', () => this.patchActivityPanelComponent());
             p.safe('patchVoiceUserComponent', () => this.patchVoiceUserComponent());
@@ -2807,11 +2830,18 @@ module.exports = class ByeBlocked {
     stop() {
         this.isRunning = false;
         this._didForceInitialRerender = false;
-        document.getElementById('ByeBlocked-bootguard')?.remove();
-        if (typeof ByeBlocked._domGuardRestore === "function") {
-            ByeBlocked._domGuardRestore();
-            ByeBlocked._domGuardRestore = null;
+        if (this._startupTimers && this._startupTimers.length) {
+            for (const id of this._startupTimers) clearTimeout(id);
         }
+        this._startupTimers = [];
+        this._filteredChannelCache?.clear();
+        this._filteredGroupDmChannelCache = null;
+        document.getElementById('ByeBlocked-bootguard')?.remove();
+        if (this._domGuardOwner && typeof this._domGuardRestore === "function") {
+            this._domGuardRestore();
+        }
+        this._domGuardRestore = null;
+        this._domGuardOwner = false;
         clearTimeout(this._moduleRetryTimeout);
         this._moduleRetryTimeout = null;
         if (window.__byeBlocked === this) delete window.__byeBlocked;
@@ -2995,16 +3025,6 @@ module.exports = class ByeBlocked {
                 for (const [key, sym] of [["recipients", RAW_RECIPIENT_IDS], ["rawRecipients", RAW_RECIPIENTS]]) {
                     const desc = Object.getOwnPropertyDescriptor(proto, key);
                     if (desc && desc.get && desc.get.__nmbPatched) {
-                        try {
-                            const list = collectAllChannels();
-                            for (const ch of list) {
-                                const hadSym = Object.prototype.hasOwnProperty.call(ch, sym);
-                                if (ch && hadSym) {
-                                    ch[key] = ch[sym];
-                                    delete ch[sym];
-                                }
-                            }
-                        } catch (e) { console.error(`[ByeBlocked] key=${key} falha ao migrar instâncias de volta durante stop()`, e); }
                         Object.defineProperty(proto, key, {
                             configurable: true,
                             enumerable: true,
@@ -3028,6 +3048,17 @@ module.exports = class ByeBlocked {
                         const passthroughDesc = Object.getOwnPropertyDescriptor(proto, key);
                         passthroughDesc.get.__nmbPatched = true;
                         passthroughDesc.get.__nmbPassthrough = true;
+                        try {
+                            const list = collectAllChannels();
+                            for (const ch of list) {
+                                const hadSym = Object.prototype.hasOwnProperty.call(ch, sym);
+                                if (ch && hadSym) {
+                                    const value = ch[sym];
+                                    delete ch[sym];
+                                    ch[key] = value;
+                                }
+                            }
+                        } catch (e) { console.error(`[ByeBlocked] key=${key} falha ao migrar instâncias de volta durante stop()`, e); }
                     }
                 }
             }
@@ -4258,12 +4289,17 @@ return false;
         }
         const channelStore = this.modules.ChannelStore;
         if (channelStore?.getChannel) {
+            if (!this._filteredGroupDmChannelCache) this._filteredGroupDmChannelCache = new WeakMap();
+            const groupDmCache = this._filteredGroupDmChannelCache;
             this._patchStoreMethodOnce(channelStore, "getChannel", (_, __, channel) => {
                 if (!channel) return channel;
                 if (this.settings.places.groupDms && channel.isGroupDM?.()) {
+                    const cached = groupDmCache.get(channel);
+                    if (cached) return cached;
                     const clone = Object.assign(Object.create(Object.getPrototypeOf(channel)), channel);
                     if (Array.isArray(clone.rawRecipients)) clone.rawRecipients = clone.rawRecipients.filter(user => !this.shouldHide(user?.id));
                     if (Array.isArray(clone.recipients)) clone.recipients = clone.recipients.filter(id => !this.shouldHide(id));
+                    try { groupDmCache.set(channel, clone); } catch (_) {}
                     return clone;
                 }
                 return channel;
@@ -4809,6 +4845,8 @@ return false;
             this._rowPatchInFlight = true;
         }
         const self = this;
+        this._filteredChannelCache = this._filteredChannelCache || new Map();
+        const idOf = x => (x && (x.id ?? x)) + '';
         const buildFilteredChannel = channel => {
             try {
                 if (!self.settings.places.groupDms) return channel;
@@ -4819,8 +4857,14 @@ return false;
                 const filteredRecipients = Array.isArray(recipients) ? recipients.filter(id => !id || !self.shouldHide(id?.id || id)) : recipients;
                 const filteredRaw = Array.isArray(rawRecipients) ? rawRecipients.filter(u => !u || !self.shouldHide(u?.id || u)) : rawRecipients;
                 if (filteredRecipients?.length === recipients?.length && filteredRaw?.length === rawRecipients?.length) return channel;
+                const sig = channel.id + '|' + filteredRecipients.map(idOf).join(',') + '|' + filteredRaw.map(idOf).join(',');
+                const cached = self._filteredChannelCache.get(channel.id);
+                if (cached && cached.sig === sig) {
+                    return cached.clone;
+                }
                 const clone = Object.create(Object.getPrototypeOf(channel));
                 Object.assign(clone, channel, { recipients: filteredRecipients, rawRecipients: filteredRaw });
+                self._filteredChannelCache.set(channel.id, { sig, clone });
                 return clone;
             } catch (_) {
                 return channel;
@@ -7031,12 +7075,20 @@ return false;
                 }
                 if (!row.dataset.nmbRelabelRetryScheduled) {
                     row.dataset.nmbRelabelRetryScheduled = "true";
-                    setTimeout(() => {
+                    const epochAtSchedule = this._instanceEpoch;
+                    const timerId = setTimeout(() => {
+                        const idx = this._startupTimers?.indexOf(timerId);
+                        if (idx !== undefined && idx !== -1) this._startupTimers.splice(idx, 1);
                         delete row.dataset.nmbRelabelRetryScheduled;
+                        if (!this.isRunning || this._instanceEpoch !== epochAtSchedule) {
+                            row.removeAttribute?.("data-nmb-relabel-pending");
+                            return;
+                        }
                         row.dataset.nmbRelabelRetryCount = String(retryCount + 1);
                         if (row.isConnected) this.relabelGroupDmRow(row);
                         else row.removeAttribute?.("data-nmb-relabel-pending");
                     }, 400);
+                    (this._startupTimers = this._startupTimers || []).push(timerId);
                 }
                 return;
             }
@@ -8099,6 +8151,12 @@ return false;
         });
     }
     restoreAllElements() {
+        document.querySelectorAll('[data-nmb-relabeled], [data-nmb-relabel-pending], [data-nmb-relabel-retry-scheduled], [data-nmb-relabel-retry-count]').forEach(el => {
+            delete el.dataset.nmbRelabeled;
+            delete el.dataset.nmbRelabelPending;
+            delete el.dataset.nmbRelabelRetryScheduled;
+            delete el.dataset.nmbRelabelRetryCount;
+        });
         document.querySelectorAll('[data-nmb-promoted="true"]').forEach(el => {
             try {
                 this._demoteMessage(el);
