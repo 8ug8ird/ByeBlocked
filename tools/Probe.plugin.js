@@ -2,7 +2,7 @@
  * @name Probe
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 0.3.2
+ * @version 0.4.0
  * @description Compatibility watchdog for ByeBlocked
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -20,6 +20,16 @@ function makeEntity(fields) {
         data: fields.data || {},
         timestamp: Date.now()
     };
+}
+
+function _hashSource(str) {
+    if (!str) return null;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16).padStart(8, "0");
 }
 
 async function yieldToUI(iteration, interval) {
@@ -67,7 +77,7 @@ class ModuleRunner {
         try {
             if (typeof moduleInstance.isImplemented === "function" && !moduleInstance.isImplemented()) {
                 stats.status = "not_implemented";
-                this.logger.log(name, "reserved module, not implemented yet — skipped.", "info");
+                this.logger.log(name, "reserved module, not implemented yet - skipped.", "info");
                 stats.finishedAt = Date.now();
                 stats.durationMs = stats.finishedAt - startedAt;
                 return { entities: [], stats };
@@ -101,7 +111,7 @@ class WebpackBootstrap {
 
         const chunkName = "webpackChunkdiscord_app";
         if (!Array.isArray(window[chunkName])) {
-            this.logger.log("WebpackBootstrap", `${chunkName} not found on window — Discord may not have loaded yet, or the chunk name changed in this build.`, "warn");
+            this.logger.log("WebpackBootstrap", `${chunkName} not found on window - Discord may not have loaded yet, or the chunk name changed in this build.`, "warn");
             return this._wpRequire;
         }
 
@@ -118,7 +128,7 @@ class WebpackBootstrap {
         }
 
         if (!captured || typeof captured.c !== "object") {
-            this.logger.log("WebpackBootstrap", "probe chunk did not return a usable wpRequire with a cache (.c) — webpack layout may have changed in this build.", "warn");
+            this.logger.log("WebpackBootstrap", "probe chunk did not return a usable wpRequire with a cache (.c) - webpack layout may have changed in this build.", "warn");
             return this._wpRequire;
         }
 
@@ -128,7 +138,7 @@ class WebpackBootstrap {
         if (cacheSize < WebpackBootstrap.MIN_HEALTHY_CACHE_SIZE) {
             this.logger.log(
                 "WebpackBootstrap",
-                `capture looks premature (only ${cacheSize} resolved modules, ${factorySize} factories) — Discord probably hasn't finished loading chunks yet. ${this._wpRequire ? "Keeping previous capture." : "No previous capture to fall back on; returning this anyway."}`,
+                `capture looks premature (only ${cacheSize} resolved modules, ${factorySize} factories) - Discord probably hasn't finished loading chunks yet. ${this._wpRequire ? "Keeping previous capture." : "No previous capture to fall back on; returning this anyway."}`,
                 "warn"
             );
             if (this._wpRequire) {
@@ -378,6 +388,7 @@ class WebpackScanner {
                 const MAX_SNIPPET = 400;
                 data.sourceSnippet = src.length > MAX_SNIPPET ? src.slice(0, MAX_SNIPPET) : src;
                 data.sourceTruncated = src.length > MAX_SNIPPET;
+                data.sourceHash = _hashSource(src);
             } catch (_) {}
         }
 
@@ -421,7 +432,7 @@ class WebpackScanner {
     async scan() {
         const wpRequire = this.bootstrap.getRequire();
         if (!wpRequire) {
-            this.logger.log(this.moduleName, "wpRequire unavailable — no modules could be scanned.", "warn");
+            this.logger.log(this.moduleName, "wpRequire unavailable - no modules could be scanned.", "warn");
             return [];
         }
 
@@ -435,7 +446,7 @@ class WebpackScanner {
             const mk = Object.keys(this._moduleFactories).slice(0, 10);
             this.logger.log(this.moduleName, `moduleFactories sample keys: [${mk.join(", ")}]`, "info");
         } else {
-            this.logger.log(this.moduleName, "module factories not found — factory source unavailable (require() extraction for this module will be skipped).", "warn");
+            this.logger.log(this.moduleName, "module factories not found - factory source unavailable (require() extraction for this module will be skipped).", "warn");
         }
         const entities = [];
         const liveValues = [];
@@ -666,7 +677,7 @@ class StoreScanner {
     async _scanKnownNames() {
         const entities = [];
         if (typeof BdApi === "undefined" || !BdApi.Webpack || typeof BdApi.Webpack.getStore !== "function") {
-            this.logger.log(this.moduleName, "BdApi.Webpack.getStore unavailable — skipping known-name lookup phase.", "warn");
+            this.logger.log(this.moduleName, "BdApi.Webpack.getStore unavailable - skipping known-name lookup phase.", "warn");
             return entities;
         }
 
@@ -713,7 +724,7 @@ class StoreScanner {
     async _scanStructural() {
         const entities = [];
         if (typeof this.webpackEntitiesProvider !== "function") {
-            this.logger.log(this.moduleName, "no webpackEntitiesProvider configured — skipping structural discovery phase.", "warn");
+            this.logger.log(this.moduleName, "no webpackEntitiesProvider configured - skipping structural discovery phase.", "warn");
             return entities;
         }
 
@@ -838,7 +849,9 @@ class StoreScanner {
     }
 }
 const COMPATIBILITY_CHECKS = [
-    { plugin: "ByeBlocked", label: "RelationshipStore", kind: "storeName", candidates: ["RelationshipStore", "RelationshipManagerStore", "RelationshipStoreManager"] },
+    { plugin: "ByeBlocked", label: "RelationshipStore", kind: "storeName", candidates: ["RelationshipStore", "RelationshipManagerStore", "RelationshipStoreManager"],
+      expectedMethods: ["isBlocked", "isIgnored"],
+      note: "expectedMethods reflects ByeBlocked's RELATIONSHIP_METHOD_NAMES groups (isBlocked/isIgnored each have their own name-fallback list ByeBlocked already tries - these two are the anchor names most builds have used historically, used here only to score broad-scan replacement candidates by behavior, not as the only accepted names)." },
     { plugin: "ByeBlocked", label: "GuildMemberStore", kind: "storeName", candidates: ["GuildMemberStore", "MemberStore", "GuildMembersStore"] },
     { plugin: "ByeBlocked", label: "ReactionsStore", kind: "storeName", candidates: ["ReactionsStore", "MessageReactionsStore", "ReactionStore"] },
     { plugin: "ByeBlocked", label: "SortedVoiceStateStore", kind: "storeName", candidates: ["SortedVoiceStateStore", "VoiceStateStore", "SortedVoiceStatesStore"], requiresContext: "voiceCall" },
@@ -846,7 +859,8 @@ const COMPATIBILITY_CHECKS = [
     { plugin: "ByeBlocked", label: "StageInstanceStore", kind: "storeName", candidates: ["StageInstanceStore", "StageInstancesStore"], requiresContext: "stageChannel" },
     { plugin: "ByeBlocked", label: "ActivityStore", kind: "storeName", candidates: ["ChannelRTCStore", "ActivityStore", "EmbeddedActivityStore", "ActivityParticipantsStore", "ActivityManagerStore"],
       requiresContext: "voiceCallWithActivity",
-      note: "CORRECTED after reading ByeBlocked's actual source: this.modules.ActivityStore is used to filter PARTICIPANTS of an Activity/Watch-Together inside a voice channel (calls getParticipants()/getActivityParticipants(), guarded by typeof checks — tolerant of missing methods). It is NOT rich-presence/status (that's PresenceStore, unrelated). Confirmed live: none of the original 4 candidates exist in current builds; the real Store is ChannelRTCStore (has getParticipants + getActivityParticipants; getEmbeddedActivityParticipants is gone). Not a hard dependency — ByeBlocked already checks each method with typeof before patching, so once STORE_NAMES.ACTIVITY includes \"ChannelRTCStore\" as a candidate, no other code change is needed."
+      expectedMethods: ["getParticipants", "getActivityParticipants"],
+      note: "CORRECTED after reading ByeBlocked's actual source: this.modules.ActivityStore is used to filter PARTICIPANTS of an Activity/Watch-Together inside a voice channel (calls getParticipants()/getActivityParticipants(), guarded by typeof checks - tolerant of missing methods). It is NOT rich-presence/status (that's PresenceStore, unrelated). Confirmed live: none of the original 4 candidates exist in current builds; the real Store is ChannelRTCStore (has getParticipants + getActivityParticipants; getEmbeddedActivityParticipants is gone). Not a hard dependency - ByeBlocked already checks each method with typeof before patching, so once STORE_NAMES.ACTIVITY includes \"ChannelRTCStore\" as a candidate, no other code change is needed."
     },
     { plugin: "ByeBlocked", label: "ChannelStore", kind: "storeName", candidates: ["ChannelStore", "ChannelsStore"] },
     { plugin: "ByeBlocked", label: "MessageStore", kind: "storeName", candidates: ["MessageStore", "MessagesStore", "ChannelMessagesStore"] },
@@ -861,7 +875,7 @@ const COMPATIBILITY_CHECKS = [
     { plugin: "ByeBlocked", label: "GuildChannelStore", kind: "storeName", candidates: ["GuildChannelStore", "GuildChannelsStore"] },
     { plugin: "ByeBlocked", label: "GuildStore", kind: "storeName", candidates: ["GuildStore", "GuildsStore"] },
     { plugin: "ByeBlocked", label: "PrivateChannelStore", kind: "storeName", candidates: ["PrivateChannelStore", "PrivateChannelsStore"],
-      note: "CORRECTED after reading ByeBlocked's actual source (resolveModules(), ~line 3083): its real fallback checks ChannelStore for ANY of getPrivateChannels/getPrivateChannelIds/getMutablePrivateChannels — not just the first two as previously assumed here.",
+      note: "CORRECTED after reading ByeBlocked's actual source (resolveModules(), ~line 3083): its real fallback checks ChannelStore for ANY of getPrivateChannels/getPrivateChannelIds/getMutablePrivateChannels - not just the first two as previously assumed here.",
       methodFallback: {
         storeCandidates: ["ChannelStore", "ChannelsStore"],
         methodNames: ["getMutablePrivateChannels", "getPrivateChannelIds", "getPrivateChannels", "getSortedPrivateChannels"],
@@ -899,7 +913,7 @@ const COMPATIBILITY_CHECKS = [
       expectedPropAny: ["userId", "user", "participantUserId"],
       maxHops: 15,
       requiresContext: "voiceCallWithVideo",
-      note: "Covers the case where the participant card component turned into a bare function component (no prototype methods left to fingerprint via protoShape) — this walks Fiber return pointers looking for the user-identifying prop instead of relying on any class shape." },
+      note: "Covers the case where the participant card component turned into a bare function component (no prototype methods left to fingerprint via protoShape) - this walks Fiber return pointers looking for the user-identifying prop instead of relying on any class shape." },
     { plugin: "ByeBlocked", label: "Member list row (member userId prop)", kind: "domProp",
       selector: "[class*='member'][role='listitem'], [class*='memberInner']",
       expectedPropAny: ["user", "userId"],
@@ -951,7 +965,7 @@ const COMPATIBILITY_CHECKS = [
 
     { plugin: "ByeBlocked", label: "InviteQueryModule (queryFriends/queryDMUsers)", kind: "sourceString",
       needles: ["queryFriends", "queryDMUsers", "friendSuggestions"], minHits: 2,
-      note: "Fingerprint for the invite-suggestions module ByeBlocked resolves via _wpGetBySource / source-fingerprint fallback (see resolveInviteQueryModule). Was previously untracked by Probe — ByeBlocked's own 'inviteQueryModule' health check had no relatedChecks to cross-reference against, so a degradation there always diagnosed as 'unknown'." },
+      note: "Fingerprint for the invite-suggestions module ByeBlocked resolves via _wpGetBySource / source-fingerprint fallback (see resolveInviteQueryModule). Was previously untracked by Probe - ByeBlocked's own 'inviteQueryModule' health check had no relatedChecks to cross-reference against, so a degradation there always diagnosed as 'unknown'." },
     { plugin: "ByeBlocked", label: "Runtime: invite suggestions filtering", kind: "pluginHealthCheck",
       sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "inviteQueryModule",
       relatedChecks: ["InviteQueryModule (queryFriends/queryDMUsers)"],
@@ -959,26 +973,70 @@ const COMPATIBILITY_CHECKS = [
 
     { plugin: "ByeBlocked", label: "Autocomplete row component (patchAutocompleteRowComponent target)", kind: "sourceString",
       needles: ["autocomplete", "aria-selected", "user", "userId"], minHits: 3,
-      note: "Fingerprint for the function ByeBlocked patches via BdApi.Webpack.getWithKey(m => ... AUTOCOMPLETE_TERMS, 3-of-4 match) in patchAutocompleteRowComponent(). Was previously untracked — ByeBlocked's own 'autocompleteRowPatch' health check had no relatedChecks to cross-reference against." },
+      note: "Fingerprint for the function ByeBlocked patches via BdApi.Webpack.getWithKey(m => ... AUTOCOMPLETE_TERMS, 3-of-4 match) in patchAutocompleteRowComponent(). Was previously untracked - ByeBlocked's own 'autocompleteRowPatch' health check had no relatedChecks to cross-reference against." },
     { plugin: "ByeBlocked", label: "Runtime: autocomplete row patch", kind: "pluginHealthCheck",
       sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "autocompleteRowPatch",
       relatedChecks: ["Autocomplete row component (patchAutocompleteRowComponent target)"],
-      note: "Cross-references ByeBlocked's own HealthMonitor entry for whether the autocomplete-row patch is still attached against the structural health of that component's source fingerprint. Verifies the patch itself is installed, not that filtering is visibly working — pair with a live autocomplete check (type @ in a message box) to confirm end-to-end." },
+      note: "Cross-references ByeBlocked's own HealthMonitor entry for whether the autocomplete-row patch is still attached against the structural health of that component's source fingerprint. Verifies the patch itself is installed, not that filtering is visibly working - pair with a live autocomplete check (type @ in a message box) to confirm end-to-end." },
 
     { plugin: "ByeBlocked", label: "Forum post card component (patchForumPostComponent target)", kind: "sourceString",
       needles: ["mainCard_", "forumPostItem", "ForumPostCard", "forum-channel-list-"], minHits: 2,
-      note: "Fingerprint for the module ByeBlocked patches via looksLikeForumCardFn (2-of-4 match on FORUM_CARD_STRINGS) in patchForumPostComponent(). Was previously untracked — ByeBlocked's own 'forumPostPatch' health check had no relatedChecks to cross-reference against." },
+      note: "Fingerprint for the module ByeBlocked patches via looksLikeForumCardFn (2-of-4 match on FORUM_CARD_STRINGS) in patchForumPostComponent(). Was previously untracked - ByeBlocked's own 'forumPostPatch' health check had no relatedChecks to cross-reference against." },
     { plugin: "ByeBlocked", label: "Runtime: forum post card patch", kind: "pluginHealthCheck",
       sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "forumPostPatch",
       relatedChecks: ["Forum post card component (patchForumPostComponent target)"],
-      note: "Cross-references ByeBlocked's own HealthMonitor entry for whether the forum-post-card patch is still attached against the structural health of that component's source fingerprint. Only meaningful in servers using Forum channels." },
+      requiresContext: "forumChannelOpen",
+      note: "Cross-references ByeBlocked's own HealthMonitor entry for whether the forum-post-card patch is still attached against the structural health of that component's source fingerprint. Only meaningful in servers using Forum channels - the underlying module can resolve successfully in Webpack (see relatedChecks) well before the patch itself gets a chance to attach, since patchForumPostComponent() only runs meaningfully once a Forum channel's card component actually renders. ByeBlocked's own health check (v2.5.0+) already guards against this by checking for forum DOM markers before considering itself degraded, but requiresContext is declared here too so Probe's own UI groups it correctly." },
 
     { plugin: "ByeBlocked", label: "Runtime: voice states alt-method filter", kind: "pluginHealthCheck",
       sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "voiceStatesAltFilter",
       relatedChecks: ["SortedVoiceStateStore"],
       requiresContext: "voiceCall",
-      note: "Cross-references ByeBlocked's own HealthMonitor entry for the profile-popout voice-states alt method (patchStores() resolves this dynamically as getVoiceStatesForChannelAlt or an equivalent name via _findVoiceStatesAltMethodName) against the structural health of SortedVoiceStateStore, the store this alt method lives on regardless of its exact name. The method name itself isn't independently fingerprinted since it's resolved dynamically at runtime, not via a fixed candidate list — the store it hangs off of is the meaningful structural anchor here." }
+      note: "Cross-references ByeBlocked's own HealthMonitor entry for the profile-popout voice-states alt method (patchStores() resolves this dynamically as getVoiceStatesForChannelAlt or an equivalent name via _findVoiceStatesAltMethodName) against the structural health of SortedVoiceStateStore, the store this alt method lives on regardless of its exact name. The method name itself isn't independently fingerprinted since it's resolved dynamically at runtime, not via a fixed candidate list - the store it hangs off of is the meaningful structural anchor here." }
 ];
+
+function _loadDependencyManifest() {
+    try {
+        if (typeof BdApi === "undefined" || !BdApi.Data || typeof BdApi.Data.load !== "function") return null;
+        const manifest = BdApi.Data.load("ByeBlocked", "dependencyManifest");
+        if (!manifest || !Array.isArray(manifest.dependencies)) return null;
+        return manifest;
+    } catch (_) {
+        return null;
+    }
+}
+
+function buildCompatibilityChecks(logger) {
+    const manifest = _loadDependencyManifest();
+    if (!manifest) return COMPATIBILITY_CHECKS;
+
+    const manifestByLabel = new Map(manifest.dependencies.map(d => [d.label, d]));
+    const mergedLabels = new Set();
+    const MERGEABLE_FIELDS = ["kind", "candidates", "filter", "needles", "minHits", "methodFallback", "fuzzyFallback", "requiresContext"];
+
+    const merged = COMPATIBILITY_CHECKS.map(check => {
+        const dep = manifestByLabel.get(check.label);
+        if (!dep) return check;
+        mergedLabels.add(check.label);
+        const next = { ...check };
+        for (const field of MERGEABLE_FIELDS) {
+            if (dep[field] !== undefined) next[field] = dep[field];
+        }
+        return next;
+    });
+
+    const added = [];
+    for (const dep of manifest.dependencies) {
+        if (mergedLabels.has(dep.label)) continue;
+        added.push({ plugin: "ByeBlocked", ...dep, note: dep.note || "Declared in ByeBlocked's DEPENDENCY_MANIFEST, no matching entry in Probe's COMPATIBILITY_CHECKS yet - add relatedChecks/note here once triaged." });
+    }
+
+    if (logger && added.length > 0) {
+        logger.log("core", `dependency manifest: ${added.length} new check(s) from ByeBlocked not previously tracked: [${added.map(d => d.label).join(", ")}]`, "info");
+    }
+
+    return [...merged, ...added];
+}
 
 class ModuleFinder {
     constructor(options = {}) {
@@ -988,42 +1046,53 @@ class ModuleFinder {
         this.checks = options.checks || COMPATIBILITY_CHECKS;
     }
 
-    _collectSearchTerms(currentCheckResults) {
+    _collectPendingNeedleGroups(currentCheckResults) {
         const resultByLabel = new Map();
         for (const r of currentCheckResults || []) resultByLabel.set(`${r.plugin}::${r.label}`, r.status);
 
-        const terms = new Set();
+        const groups = [];
         for (const check of this.checks) {
             const key = `${check.plugin}::${check.label}`;
             const status = resultByLabel.get(key);
             if (status === "resolved") continue;
             if (check.kind === "sourceString" && Array.isArray(check.needles)) {
-                for (const n of check.needles) terms.add(n);
+                groups.push({
+                    plugin: check.plugin,
+                    label: check.label,
+                    needles: check.needles,
+                    minHits: typeof check.minHits === "number" ? check.minHits : check.needles.length
+                });
             } else if (check.kind === "protoShape" && Array.isArray(check.methods)) {
-                for (const m of check.methods) terms.add(m);
+                groups.push({
+                    plugin: check.plugin,
+                    label: check.label,
+                    needles: check.methods,
+                    minHits: check.methods.length
+                });
             }
         }
-        return [...terms];
+        return groups;
     }
 
     async find(currentCheckResults, onProgress) {
         const wpRequire = this.bootstrap.getRequire();
         const factories = this.bootstrap.getModuleFactories();
         if (!wpRequire || !factories) {
-            this.logger.log(this.moduleName, "no wpRequire cache or factory map available — cannot search.", "warn");
+            this.logger.log(this.moduleName, "no wpRequire cache or factory map available - cannot search.", "warn");
             return { searched: 0, candidatesFound: 0, candidates: [] };
         }
 
-        const searchTerms = this._collectSearchTerms(currentCheckResults);
-        if (searchTerms.length === 0) {
-            this.logger.log(this.moduleName, "nothing to search for — all checks already resolved.");
+        const needleGroups = this._collectPendingNeedleGroups(currentCheckResults);
+        if (needleGroups.length === 0) {
+            this.logger.log(this.moduleName, "nothing to search for - all checks already resolved.");
             return { searched: 0, candidatesFound: 0, candidates: [] };
         }
-        const searchTermsLower = searchTerms.map(t => t.toLowerCase());
+        const groupsLower = needleGroups.map(g => ({ ...g, needlesLower: g.needles.map(n => n.toLowerCase()) }));
+        const allTermsForLog = [...new Set(groupsLower.flatMap(g => g.needles))];
 
         const resolvedIds = new Set(Object.keys(wpRequire.c || {}));
         const unresolvedIds = Object.keys(factories).filter(id => !resolvedIds.has(id));
-        this.logger.log(this.moduleName, `searching ${unresolvedIds.length} unresolved factory(ies) for terms: [${searchTerms.join(", ")}]`);
+        this.logger.log(this.moduleName, `searching ${unresolvedIds.length} unresolved factory(ies) against ${needleGroups.length} pending check(s), terms: [${allTermsForLog.join(", ")}].`);
 
         const candidates = [];
         let scanned = 0;
@@ -1033,10 +1102,20 @@ class ModuleFinder {
             try {
                 const src = factories[id].toString();
                 const srcLower = src.toLowerCase();
-                const matchedTerms = searchTermsLower.filter(t => srcLower.includes(t));
-                if (matchedTerms.length > 0) {
+                const matchedChecks = [];
+                const matchedTermsSet = new Set();
+                for (const group of groupsLower) {
+                    const hits = group.needlesLower.filter(n => srcLower.includes(n));
+                    if (hits.length >= group.minHits) {
+                        matchedChecks.push({ plugin: group.plugin, label: group.label, hitCount: hits.length, needed: group.minHits });
+                        for (const h of hits) matchedTermsSet.add(h);
+                    }
+                }
+                if (matchedChecks.length > 0) {
+                    const matchedTerms = [...matchedTermsSet];
                     candidates.push({
                         id,
+                        matchedChecks,
                         matchedTerms,
                         matchedTermCount: matchedTerms.length,
                         sourcePreview: src.length > 200 ? src.slice(0, 200) : src
@@ -1044,8 +1123,8 @@ class ModuleFinder {
                 }
             } catch (_) {}
         }
-        candidates.sort((a, b) => b.matchedTermCount - a.matchedTermCount);
-        this.logger.log(this.moduleName, `found ${candidates.length} candidate(s) out of ${unresolvedIds.length} unresolved factory(ies) — not executed, source-text match only.`);
+        candidates.sort((a, b) => (b.matchedChecks.length - a.matchedChecks.length) || (b.matchedTermCount - a.matchedTermCount));
+        this.logger.log(this.moduleName, `found ${candidates.length} candidate(s) out of ${unresolvedIds.length} unresolved factory(ies) - not executed, per-check minHits match only.`);
 
         return {
             searched: unresolvedIds.length,
@@ -1061,6 +1140,7 @@ class CompatibilityModule {
         this.logger = options.logger;
         this.allEntities = options.allEntities || [];
         this.checks = options.checks || COMPATIBILITY_CHECKS;
+        this.activeContexts = options.activeContexts instanceof Set ? options.activeContexts : new Set();
     }
 
     isImplemented() { return true; }
@@ -1123,7 +1203,7 @@ class CompatibilityModule {
         if (suspects.length > 0) {
             return {
                 verdict: "likely_discord_change",
-                summary: `${suspects.length}/${related.length} related structural check(s) also show a problem in this same scan: [${suspects.map(s => `${s.label} (${s.status})`).join(", ")}]. This is consistent with Discord having changed or renamed something ByeBlocked depends on — the runtime failure is likely a downstream symptom, not a standalone bug. Start investigating with the structural check(s) above.`,
+                summary: `${suspects.length}/${related.length} related structural check(s) also show a problem in this same scan: [${suspects.map(s => `${s.label} (${s.status})`).join(", ")}]. This is consistent with Discord having changed or renamed something ByeBlocked depends on - the runtime failure is likely a downstream symptom, not a standalone bug. Start investigating with the structural check(s) above.`,
                 relatedChecksExamined: related
             };
         }
@@ -1161,7 +1241,7 @@ class CompatibilityModule {
 
         const ageMs = Date.now() - (snapshot.publishedAt || 0);
         const staleWarning = ageMs > 10 * 60 * 1000
-            ? ` (snapshot is ${Math.round(ageMs / 60000)}min old — may not reflect current state; ask the user to reopen ${pluginName}'s settings or wait for its next health cycle.)`
+            ? ` (snapshot is ${Math.round(ageMs / 60000)}min old - may not reflect current state; ask the user to reopen ${pluginName}'s settings or wait for its next health cycle.)`
             : "";
 
         if (!entry.degraded) {
@@ -1194,6 +1274,81 @@ class CompatibilityModule {
         };
     }
 
+    _investigateStoreNameBroad(check) {
+        if (typeof BdApi === "undefined" || !BdApi.Webpack || typeof BdApi.Webpack.getModules !== "function") {
+            return { technique: "storeName:broad-shape-scan", skipped: true, reason: "BdApi.Webpack.getModules unavailable in this BD version." };
+        }
+
+        let liveStores = [];
+        try {
+            liveStores = BdApi.Webpack.getModules(m => m && typeof m.getName === "function" && m._dispatchToken !== undefined) || [];
+        } catch (err) {
+            return { technique: "storeName:broad-shape-scan", skipped: true, reason: `getModules threw: ${err && err.message || err}` };
+        }
+
+        const expectedMethods = Array.isArray(check.expectedMethods) ? check.expectedMethods : [];
+
+        const scored = [];
+        for (const store of liveStores) {
+            let name = null;
+            try { name = store.getName(); } catch (_) {}
+            if (!name || typeof name !== "string" || name.length <= 1) continue;
+            if (check.candidates.includes(name)) continue;
+
+            let methodNames = [];
+            try {
+                for (const k of Object.keys(store)) {
+                    try { if (typeof store[k] === "function") methodNames.push(k); } catch (_) {}
+                }
+                const proto = Object.getPrototypeOf(store);
+                if (proto && proto !== Object.prototype) {
+                    for (const k of Object.getOwnPropertyNames(proto)) {
+                        if (k === "constructor") continue;
+                        try { if (typeof proto[k] === "function" && !methodNames.includes(k)) methodNames.push(k); } catch (_) {}
+                    }
+                }
+            } catch (_) {}
+
+            const methodHits = expectedMethods.filter(m => methodNames.includes(m));
+            const methodScore = expectedMethods.length > 0 ? methodHits.length / expectedMethods.length : 0;
+
+            const bestNameDistance = Math.min(...check.candidates.map(c => this._levenshtein(c.toLowerCase(), name.toLowerCase())));
+            const maxLen = Math.max(...check.candidates.map(c => c.length), name.length, 1);
+            const nameScore = 1 - Math.min(bestNameDistance / maxLen, 1);
+
+            const combinedScore = expectedMethods.length > 0
+                ? (methodScore * 0.75) + (nameScore * 0.25)
+                : nameScore * 0.5;
+
+            scored.push({
+                storeName: name,
+                methodHits,
+                methodHitCount: methodHits.length,
+                methodsExpectedCount: expectedMethods.length,
+                nameDistanceToClosestCandidate: bestNameDistance,
+                combinedScore: Math.round(combinedScore * 1000) / 1000,
+                methodNamesSample: methodNames.sort().slice(0, 30),
+                replacementSnippet: JSON.stringify(name)
+            });
+        }
+
+        scored.sort((a, b) => b.combinedScore - a.combinedScore);
+        const top = scored.slice(0, 5);
+
+        return {
+            technique: "storeName:broad-shape-scan",
+            skipped: false,
+            totalLiveStoresScanned: liveStores.length,
+            usedExpectedMethods: expectedMethods,
+            candidates: top,
+            summary: top.length > 0
+                ? (expectedMethods.length > 0
+                    ? `Best broad-scan match is "${top[0].storeName}" (${top[0].methodHitCount}/${top[0].methodsExpectedCount} expected methods present, name distance ${top[0].nameDistanceToClosestCandidate}). If this looks right, add "${top[0].storeName}" to this check's candidates array in ByeBlocked's STORE_NAMES.`
+                    : `Best broad-scan match by name alone is "${top[0].storeName}" (no expectedMethods declared for this check, so this is name-similarity only - verify manually before using). Consider adding expectedMethods to this check for a stronger signal next time.`)
+                : `No live Store (out of ${liveStores.length} scanned) stood out as a plausible replacement.`
+        };
+    }
+
     _investigateStoreName(check, stores) {
         const scored = stores.map(s => {
             const distances = check.candidates.map(c => this._levenshtein(c.toLowerCase(), (s.name || "").toLowerCase()));
@@ -1216,7 +1371,7 @@ class CompatibilityModule {
             closestCandidates,
             summary: closestCandidates.length > 0
                 ? `Closest known store by name is "${closestCandidates[0].storeName}" (edit distance ${closestCandidates[0].nameDistanceToClosestCandidate} from the nearest expected candidate). Check methodNamesSample to see if it exposes the shape ByeBlocked needs under a new name.`
-                : `No store entities at all were present in this snapshot to compare against — StoreScanner likely found nothing this session (re-scan after more navigation).`
+                : `No store entities at all were present in this snapshot to compare against - StoreScanner likely found nothing this session (re-scan after more navigation).`
         };
     }
 
@@ -1231,7 +1386,7 @@ class CompatibilityModule {
                     matchedVia: candidate,
                     note: candidate === check.candidates[0]
                         ? "Primary candidate name resolved directly."
-                        : `Primary candidate name(s) [${check.candidates.slice(0, check.candidates.indexOf(candidate)).join(", ")}] did NOT resolve — only fell back to "${candidate}". Update ByeBlocked's candidate order if this persists.`
+                        : `Primary candidate name(s) [${check.candidates.slice(0, check.candidates.indexOf(candidate)).join(", ")}] did NOT resolve - only fell back to "${candidate}". Update ByeBlocked's candidate order if this persists.`
                 };
             }
         }
@@ -1257,12 +1412,20 @@ class CompatibilityModule {
         }
 
         const extraNote = check.note ? ` ${check.note}` : "";
+        const narrowInvestigation = this._investigateStoreName(check, stores);
+        const NEAR_MATCH_DISTANCE_THRESHOLD = 3;
+        const narrowFoundNothingUseful = narrowInvestigation.closestCandidates.length === 0
+            || narrowInvestigation.closestCandidates[0].nameDistanceToClosestCandidate > NEAR_MATCH_DISTANCE_THRESHOLD;
+        const broadInvestigation = narrowFoundNothingUseful ? this._investigateStoreNameBroad(check) : null;
+
         return {
             status: "not_resolved",
             confidence: "high",
             matchedVia: null,
             note: `None of [${check.candidates.join(", ")}] found as a Store entity (name or alias) in this scan. Either the Store was renamed, or it hasn't been loaded yet this session (re-scan after navigating more of the app before treating this as a real break).${extraNote}`,
-            investigation: this._investigateStoreName(check, stores)
+            investigation: broadInvestigation
+                ? { ...narrowInvestigation, broadScan: broadInvestigation }
+                : narrowInvestigation
         };
     }
 
@@ -1300,7 +1463,7 @@ class CompatibilityModule {
                 status: "fallback_renamed",
                 confidence: "high",
                 matchedVia: `${matchedStoreName}.${renamedEquivalent[0]}`,
-                note: `Dedicated Store not found. The plugin's fallback Store (${matchedStoreName}) still exists, but its original fallback method(s) [${(fb.originalMethodNames || []).join(", ")}] are gone — Discord renamed them. Found equivalent method(s) instead: [${renamedEquivalent.join(", ")}]. The dependent plugin's fallback code needs to be updated to call these new method names, or it will silently misbehave (not crash, just stop working).`
+                note: `Dedicated Store not found. The plugin's fallback Store (${matchedStoreName}) still exists, but its original fallback method(s) [${(fb.originalMethodNames || []).join(", ")}] are gone - Discord renamed them. Found equivalent method(s) instead: [${renamedEquivalent.join(", ")}]. The dependent plugin's fallback code needs to be updated to call these new method names, or it will silently misbehave (not crash, just stop working).`
             };
         }
 
@@ -1308,7 +1471,7 @@ class CompatibilityModule {
             status: "fallback_broken",
             confidence: "high",
             matchedVia: null,
-            note: `Dedicated Store not found. The plugin's documented fallback Store (${matchedStoreName}) exists, but NONE of its expected method names — original [${(fb.originalMethodNames || []).join(", ")}] or known alternatives [${(fb.methodNames || []).join(", ")}] — are present. The fallback itself is broken; this needs a real code fix in the dependent plugin, not just a name update.`
+            note: `Dedicated Store not found. The plugin's documented fallback Store (${matchedStoreName}) exists, but NONE of its expected method names - original [${(fb.originalMethodNames || []).join(", ")}] or known alternatives [${(fb.methodNames || []).join(", ")}] - are present. The fallback itself is broken; this needs a real code fix in the dependent plugin, not just a name update.`
         };
     }
 
@@ -1343,15 +1506,11 @@ class CompatibilityModule {
             closestCandidates,
             summary: closestCandidates.length > 0
                 ? `Closest candidate "${closestCandidates[0].moduleName}" (${closestCandidates[0].moduleKey}) matched ${closestCandidates[0].hitCount}/${check.needles.length} needle(s): [${closestCandidates[0].matchedStrings.join(", ")}]. Missing: [${closestCandidates[0].missingStrings.join(", ") || "none"}].`
-                : `No module in this snapshot has any needle term in its captured snippet or name — the target module likely wasn't resolved this session at all (lazy-loaded), rather than the fingerprint being wrong.`
+                : `No module in this snapshot has any needle term in its captured snippet or name - the target module likely wasn't resolved this session at all (lazy-loaded), rather than the fingerprint being wrong.`
         };
     }
 
-    _checkSourceString(check) {
-        const modules = this.allEntities.filter(e => e.type === "webpackModule");
-        const needleLower = check.needles.map(n => n.toLowerCase());
-        const minHits = check.minHits || 1;
-
+    _scanNeedlesAgainstModules(modules, needleLower) {
         const sourceHits = [];
         for (const m of modules) {
             const snippet = m.data?.sourceSnippet;
@@ -1363,21 +1522,54 @@ class CompatibilityModule {
             }
         }
         const distinctNeedlesFound = new Set(sourceHits.flatMap(h => h.matchedNeedles));
+        return { sourceHits, distinctNeedlesFound };
+    }
+
+    _checkSourceString(check) {
+        const modules = this.allEntities.filter(e => e.type === "webpackModule");
+        const needleLower = check.needles.map(n => n.toLowerCase());
+        const minHits = check.minHits || 1;
+
+        const { sourceHits, distinctNeedlesFound } = this._scanNeedlesAgainstModules(modules, needleLower);
         if (distinctNeedlesFound.size >= minHits) {
             return {
                 status: "resolved",
                 confidence: "medium",
                 matchedVia: sourceHits.map(h => h.id).slice(0, 3),
-                note: `Found ${distinctNeedlesFound.size}/${check.needles.length} needle term(s) [${[...distinctNeedlesFound].join(", ")}] present in captured source of ${sourceHits.length} webpackModule entity(ies) (meets minHits: ${minHits}). This confirms the fingerprint's target text still exists in this build — it does not confirm the surrounding code structure ByeBlocked patches is unchanged.`
+                note: `Found ${distinctNeedlesFound.size}/${check.needles.length} needle term(s) [${[...distinctNeedlesFound].join(", ")}] present in captured source of ${sourceHits.length} webpackModule entity(ies) (meets minHits: ${minHits}). This confirms the fingerprint's target text still exists in this build - it does not confirm the surrounding code structure ByeBlocked patches is unchanged.`
             };
         }
+
+        if (check.fuzzyFallback && Array.isArray(check.fuzzyFallback.needles) && check.fuzzyFallback.needles.length > 0) {
+            const fuzzyNeedleLower = check.fuzzyFallback.needles.map(n => n.toLowerCase());
+            const fuzzyMinHits = check.fuzzyFallback.minHits || fuzzyNeedleLower.length;
+            const fuzzy = this._scanNeedlesAgainstModules(modules, fuzzyNeedleLower);
+            if (fuzzy.distinctNeedlesFound.size >= fuzzyMinHits) {
+                return {
+                    status: "resolved",
+                    confidence: "medium",
+                    matchedVia: fuzzy.sourceHits.map(h => h.id).slice(0, 3),
+                    note: `Primary needle term(s) [${check.needles.join(", ")}] didn't meet minHits (${minHits}), but fuzzyFallback needle term(s) [${[...fuzzy.distinctNeedlesFound].join(", ")}] were found instead (meets fallback minHits: ${fuzzyMinHits}). This matches a known alternative build layout for this fingerprint, declared by the dependent plugin - still confirms the target text exists, not the surrounding code structure.`
+                };
+            }
+        }
+
         if (sourceHits.length > 0) {
+            const hitModulesById = new Map(modules.map(m => [m.id, m]));
+            const hitModules = sourceHits.map(h => hitModulesById.get(h.id)).filter(Boolean);
+            const allHitsTruncated = hitModules.length > 0 && hitModules.every(m => !!m.data?.sourceTruncated);
+            const verdict = allHitsTruncated ? "likely_truncation" : "likely_real_partial_match";
+
+            const note = allHitsTruncated
+                ? `Found ${distinctNeedlesFound.size}/${check.needles.length} needle term(s) in captured source - below this fingerprint's minHits threshold (${minHits}). Every matching module's snippet was truncated, so the missing term(s) may simply sit past the 200-char capture window rather than being absent from the build. Lower-priority than a partial match against a complete snippet.`
+                : `Found ${distinctNeedlesFound.size}/${check.needles.length} needle term(s) in captured source - below this fingerprint's minHits threshold (${minHits}). At least one matching module's snippet was captured in full and still lacks the missing term(s), so truncation doesn't explain the gap - this is a stronger signal the fingerprint may be degrading.`;
+
             return {
                 status: "plausible",
                 confidence: "low",
                 matchedVia: sourceHits.map(h => h.id).slice(0, 3),
-                note: `Found ${distinctNeedlesFound.size}/${check.needles.length} needle term(s) in captured source — below this fingerprint's minHits threshold (${minHits}). Partial match: could mean the fingerprint is degrading, or just that the visible source snippet (truncated) cut off the rest.`,
-                investigation: this._investigateSourceString(check, modules, needleLower)
+                note,
+                investigation: { ...this._investigateSourceString(check, modules, needleLower), verdict }
             };
         }
 
@@ -1391,7 +1583,7 @@ class CompatibilityModule {
                 status: "plausible",
                 confidence: "low",
                 matchedVia: nameHits.map(h => h.id).slice(0, 3),
-                note: `No source-snippet match, but ${nameHits.length} webpackModule entity(ies) have a name/alias echoing this fingerprint's needle terms. Weaker signal than a direct source match — confirm by testing the plugin directly.`,
+                note: `No source-snippet match, but ${nameHits.length} webpackModule entity(ies) have a name/alias echoing this fingerprint's needle terms. Weaker signal than a direct source match - confirm by testing the plugin directly.`,
                 investigation: this._investigateSourceString(check, modules, needleLower)
             };
         }
@@ -1399,7 +1591,7 @@ class CompatibilityModule {
             status: "cannot_verify",
             confidence: "low",
             matchedVia: null,
-            note: "No webpackModule entity in this scan has a captured source snippet or name/alias matching any needle term. This does NOT mean the fingerprint is broken — the target module may not have been resolved (lazy-loaded) this session, or its match sits past the truncated snippet window. Treat as inconclusive, not as a failure.",
+            note: "No webpackModule entity in this scan has a captured source snippet or name/alias matching any needle term. This does NOT mean the fingerprint is broken - the target module may not have been resolved (lazy-loaded) this session, or its match sits past the truncated snippet window. Treat as inconclusive, not as a failure.",
             investigation: this._investigateSourceString(check, modules, needleLower)
         };
     }
@@ -1430,8 +1622,8 @@ class CompatibilityModule {
             modulesWithAnyOverlap: scored.length,
             closestCandidates,
             summary: closestCandidates.length > 0
-                ? `Closest candidate "${closestCandidates[0].moduleName}" (${closestCandidates[0].moduleKey}) has ${closestCandidates[0].matchedMethods.length}/${required.length} required method(s): [${closestCandidates[0].matchedMethods.join(", ")}]. Missing: [${closestCandidates[0].missingMethods.join(", ")}] — check fullPrototypeMethodList for a plausible rename (e.g. a same-arity method with a similar name).`
-                : `No module in this snapshot's captured prototype data shares even one required method — the target module likely wasn't resolved this session at all, rather than the shape being gone.`
+                ? `Closest candidate "${closestCandidates[0].moduleName}" (${closestCandidates[0].moduleKey}) has ${closestCandidates[0].matchedMethods.length}/${required.length} required method(s): [${closestCandidates[0].matchedMethods.join(", ")}]. Missing: [${closestCandidates[0].missingMethods.join(", ")}] - check fullPrototypeMethodList for a plausible rename (e.g. a same-arity method with a similar name).`
+                : `No module in this snapshot's captured prototype data shares even one required method - the target module likely wasn't resolved this session at all, rather than the shape being gone.`
         };
     }
 
@@ -1444,7 +1636,7 @@ class CompatibilityModule {
                 status: "resolved",
                 confidence: "medium",
                 matchedVia: matches.map(m => m.id).slice(0, 3),
-                note: `Found ${matches.length} webpackModule entity(ies) exposing all required method(s) [${required.join(", ")}] via own properties or one prototype level. This confirms the shape exists in this build — it does not confirm this is the exact same object ByeBlocked's own lookup resolves to.`
+                note: `Found ${matches.length} webpackModule entity(ies) exposing all required method(s) [${required.join(", ")}] via own properties or one prototype level. This confirms the shape exists in this build - it does not confirm this is the exact same object ByeBlocked's own lookup resolves to.`
             };
         }
         const partial = modules.filter(m => required.some(name => m.data.protoMethods.includes(name)));
@@ -1461,7 +1653,7 @@ class CompatibilityModule {
             status: "cannot_verify",
             confidence: "low",
             matchedVia: null,
-            note: `No webpackModule entity in this scan's captured method-name data exposes any of [${required.join(", ")}]. This does NOT mean the shape is gone — the target module may not have been resolved (lazy-loaded) this session. Treat as inconclusive, not as a failure.`,
+            note: `No webpackModule entity in this scan's captured method-name data exposes any of [${required.join(", ")}]. This does NOT mean the shape is gone - the target module may not have been resolved (lazy-loaded) this session. Treat as inconclusive, not as a failure.`,
             investigation: this._investigateProtoShape(check, modules)
         };
     }
@@ -1473,7 +1665,7 @@ class CompatibilityModule {
                 investigatedAt: Date.now(),
                 technique: "structuralModule:relaxed-filter",
                 unavailable: true,
-                summary: "Live module lookup (BdApi.Webpack.getModule) unavailable in this environment — cannot relax the filter to find a closest candidate."
+                summary: "Live module lookup (BdApi.Webpack.getModule) unavailable in this environment - cannot relax the filter to find a closest candidate."
             };
         }
         const opts = filter.searchExports ? { searchExports: true } : undefined;
@@ -1484,22 +1676,40 @@ class CompatibilityModule {
 
         const perKeyFindings = [];
         for (const key of [...requiredAllKeys, ...requiredAnyKeys]) {
+            const isAnyKey = !requiredAllKeys.includes(key);
             try {
+                const otherAllKeys = isAnyKey ? requiredAllKeys : requiredAllKeys.filter(k => k !== key);
+                const otherAnyKeys = isAnyKey ? [] : requiredAnyKeys;
                 const relaxedFilter = (m) => {
                     if (!m || typeof m !== "object") return false;
-                    const otherAllKeys = requiredAllKeys.filter(k => k !== key);
                     if (!otherAllKeys.every(k => checkFn(m, k))) return false;
+                    if (otherAnyKeys.length > 0 && !otherAnyKeys.some(k => checkFn(m, k))) return false;
                     if (excludeKeys.some(k => checkFn(m, k))) return false;
                     return true;
                 };
                 const found = BdApi.Webpack.getModule(relaxedFilter, opts);
                 if (found) {
                     const actualKeys = Object.keys(found).filter(k => typeof found[k] === "function").slice(0, 40);
+
+                    const alreadyKnownKeys = new Set([...otherAllKeys, ...otherAnyKeys, ...excludeKeys]);
+                    const renameCandidates = actualKeys
+                        .filter(k => !alreadyKnownKeys.has(k))
+                        .map(k => ({ key: k, distance: this._levenshtein(key.toLowerCase(), k.toLowerCase()) }))
+                        .sort((a, b) => a.distance - b.distance)
+                        .slice(0, 3);
+
                     perKeyFindings.push({
                         missingKey: key,
+                        missingKeyField: isAnyKey ? "keysAny" : "keys",
                         foundModuleSatisfiesOthers: true,
                         actualFunctionKeysSample: actualKeys,
-                        hasMissingKeyAnyway: !!found[key]
+                        hasMissingKeyAnyway: !!found[key],
+                        renameCandidates,
+                        replacementSnippet: (renameCandidates.length > 0 && renameCandidates[0].distance <= 6)
+                            ? JSON.stringify(isAnyKey
+                                ? [...requiredAnyKeys.filter(k => k !== key), renameCandidates[0].key]
+                                : [...otherAllKeys, renameCandidates[0].key])
+                            : null
                     });
                 }
             } catch (_) {}
@@ -1513,14 +1723,16 @@ class CompatibilityModule {
             excludeKeys,
             perKeyFindings,
             summary: perKeyFindings.length > 0
-                ? `Relaxing the filter one key at a time found a module satisfying all OTHER conditions when ignoring "${perKeyFindings[0].missingKey}". Its actual function keys are listed in actualFunctionKeysSample — look there for a renamed equivalent.`
+                ? (perKeyFindings[0].replacementSnippet
+                    ? `Relaxing the filter one key at a time found a module satisfying all OTHER conditions when ignoring "${perKeyFindings[0].missingKey}" (from ${perKeyFindings[0].missingKeyField}). Best rename guess: "${perKeyFindings[0].renameCandidates[0].key}" (name distance ${perKeyFindings[0].renameCandidates[0].distance}) - see replacementSnippet for a ready-to-paste updated ${perKeyFindings[0].missingKeyField} array. Verify this key actually behaves the same before using it.`
+                    : `Relaxing the filter one key at a time found a module satisfying all OTHER conditions when ignoring "${perKeyFindings[0].missingKey}" (from ${perKeyFindings[0].missingKeyField}). Its actual function keys are listed in actualFunctionKeysSample - look there for a renamed equivalent (no close-enough name match to auto-suggest one).`)
                 : `Even relaxing one required key at a time found no candidate module. This suggests either the whole structural pattern moved to a very different module shape, or the module simply hasn't loaded this session (lazy-loaded).`
         };
     }
 
     _checkStructuralModule(check) {
         if (!check.filter || typeof BdApi === "undefined" || !BdApi.Webpack || typeof BdApi.Webpack.getModule !== "function") {
-            return { status: "cannot_verify", confidence: "low", matchedVia: null, note: "Live module lookup unavailable — skip structural module check." };
+            return { status: "cannot_verify", confidence: "low", matchedVia: null, note: "Live module lookup unavailable - skip structural module check." };
         }
         const filter = check.filter;
         const buildFilter = () => {
@@ -1610,7 +1822,7 @@ class CompatibilityModule {
 
     _checkDomProp(check) {
         if (typeof document === "undefined") {
-            return { status: "cannot_verify", confidence: "low", matchedVia: null, note: "No DOM available in this environment — skip domProp check." };
+            return { status: "cannot_verify", confidence: "low", matchedVia: null, note: "No DOM available in this environment - skip domProp check." };
         }
         let node = null;
         try {
@@ -1623,7 +1835,7 @@ class CompatibilityModule {
                 status: "cannot_verify",
                 confidence: "low",
                 matchedVia: null,
-                note: `No DOM element matched selector "${check.selector}" in this scan. This almost always means the required UI context wasn't open (see requiresContext) rather than the selector being wrong — open the relevant screen and re-scan.`
+                note: `No DOM element matched selector "${check.selector}" in this scan. This almost always means the required UI context wasn't open (see requiresContext) rather than the selector being wrong - open the relevant screen and re-scan.`
             };
         }
 
@@ -1660,7 +1872,7 @@ class CompatibilityModule {
                 status: "resolved",
                 confidence: "medium",
                 matchedVia: `dom-fiber:hop-${resolvedHop.hop}:${resolvedHop.componentName || "anonymous"}`,
-                note: `Found expected prop(s) at Fiber hop ${resolvedHop.hop} (component: ${resolvedHop.componentName || "anonymous"}, ${resolvedHop.isClassComponent ? "class" : "function"} component) walking up from "${check.selector}". This confirms the prop still flows through this part of the tree — it does not confirm the exact same patch point ByeBlocked targets.`
+                note: `Found expected prop(s) at Fiber hop ${resolvedHop.hop} (component: ${resolvedHop.componentName || "anonymous"}, ${resolvedHop.isClassComponent ? "class" : "function"} component) walking up from "${check.selector}". This confirms the prop still flows through this part of the tree - it does not confirm the exact same patch point ByeBlocked targets.`
             };
         }
 
@@ -1668,15 +1880,15 @@ class CompatibilityModule {
             status: "cannot_verify",
             confidence: "low",
             matchedVia: null,
-            note: `Walked ${hops.length} Fiber hop(s) up from "${check.selector}" without finding the expected prop(s) [${expectedProp || (expectedPropAny || []).join(", ")}]. This does not confirm the prop is gone — Discord's component tree shape (how many hops, class vs function component) may have shifted; see investigation.domHops for what was actually found at each level.`,
+            note: `Walked ${hops.length} Fiber hop(s) up from "${check.selector}" without finding the expected prop(s) [${expectedProp || (expectedPropAny || []).join(", ")}]. This does not confirm the prop is gone - Discord's component tree shape (how many hops, class vs function component) may have shifted; see investigation.domHops for what was actually found at each level.`,
             investigation: {
                 investigatedAt: Date.now(),
                 technique: "domProp:fiber-walk",
                 selector: check.selector,
                 domHops: hops,
                 summary: hops.length > 0
-                    ? `Walked ${hops.length} hop(s). Last hop reached: ${hops[hops.length - 1].componentName || "anonymous"} (${hops[hops.length - 1].isClassComponent ? "class" : "function"} component, hasRender: ${hops[hops.length - 1].hasRender}). None exposed the expected prop(s) — inspect propsFound per hop for a renamed equivalent.`
-                    : "No hops were walkable at all — the Fiber tree may be unusually shallow here, or the element matched is not inside a React root."
+                    ? `Walked ${hops.length} hop(s). Last hop reached: ${hops[hops.length - 1].componentName || "anonymous"} (${hops[hops.length - 1].isClassComponent ? "class" : "function"} component, hasRender: ${hops[hops.length - 1].hasRender}). None exposed the expected prop(s) - inspect propsFound per hop for a renamed equivalent.`
+                    : "No hops were walkable at all - the Fiber tree may be unusually shallow here, or the element matched is not inside a React root."
             }
         };
     }
@@ -1698,12 +1910,14 @@ class CompatibilityModule {
             else {
                 result = { status: "cannot_verify", confidence: "low", matchedVia: null, note: `Unknown check kind "${check.kind}".` };
             }
-            results.push({ plugin: check.plugin, label: check.label, kind: check.kind, requiresContext: check.requiresContext || null, ...result });
+            const contextActive = !check.requiresContext || this.activeContexts.has(check.requiresContext);
+            results.push({ plugin: check.plugin, label: check.label, kind: check.kind, requiresContext: check.requiresContext || null, contextActive, ...result });
         }
 
         for (const check of deferred) {
             const result = this._checkPluginHealthCheck(check, results);
-            results.push({ plugin: check.plugin, label: check.label, kind: check.kind, requiresContext: check.requiresContext || null, ...result });
+            const contextActive = !check.requiresContext || this.activeContexts.has(check.requiresContext);
+            results.push({ plugin: check.plugin, label: check.label, kind: check.kind, requiresContext: check.requiresContext || null, contextActive, ...result });
         }
 
         const byPlugin = {};
@@ -1719,17 +1933,37 @@ class CompatibilityModule {
             byPlugin[r.plugin].total++;
         }
 
+        const byPluginContextAware = {};
+        for (const r of results) {
+            if (!byPluginContextAware[r.plugin]) {
+                byPluginContextAware[r.plugin] = {
+                    resolved: 0, not_resolved: 0, plausible: 0, cannot_verify: 0,
+                    fallback_renamed: 0, fallback_broken: 0, context_not_active: 0,
+                    total: 0
+                };
+            }
+            const bucket = byPluginContextAware[r.plugin];
+            const statusIsNonFinal = new Set(["not_resolved", "cannot_verify", "plausible", "fallback_broken"]).has(r.status);
+            if (!r.contextActive && statusIsNonFinal) {
+                bucket.context_not_active++;
+            } else {
+                bucket[r.status] = (bucket[r.status] || 0) + 1;
+            }
+            bucket.total++;
+        }
+
         const unresolvedStatuses = new Set(["cannot_verify", "not_resolved", "plausible", "fallback_broken"]);
         const pendingByContext = {};
         for (const r of results) {
             if (!r.requiresContext) continue;
             if (!unresolvedStatuses.has(r.status)) continue;
             if (!pendingByContext[r.requiresContext]) pendingByContext[r.requiresContext] = [];
-            pendingByContext[r.requiresContext].push({ plugin: r.plugin, label: r.label, status: r.status });
+            pendingByContext[r.requiresContext].push({ plugin: r.plugin, label: r.label, status: r.status, contextActive: r.contextActive });
         }
         const pendingContexts = Object.entries(pendingByContext).map(([context, checks]) => ({
             context,
             affectedCheckCount: checks.length,
+            genuinelySuspicious: checks.filter(c => c.contextActive).length,
             checks
         }));
 
@@ -1740,30 +1974,37 @@ class CompatibilityModule {
             aliases: [],
             discoveredVia: "entity-cross-reference:declared-checks",
             confidence: "high",
-            confidenceReason: "Each check's status is derived directly from entities already present in this snapshot — no speculation beyond what's stated in each result's own note.",
+            confidenceReason: "Each check's status is derived directly from entities already present in this snapshot - no speculation beyond what's stated in each result's own note.",
             data: {
                 summaryByPlugin: byPlugin,
+                summaryByPluginContextAware: byPluginContextAware,
                 checks: results,
                 pendingContexts
             }
         }));
 
         const brokenStatuses = new Set(["not_resolved", "fallback_broken"]);
-        const brokenResults = results.filter(r => brokenStatuses.has(r.status));
+        const brokenResults = results.filter(r => brokenStatuses.has(r.status) && r.contextActive);
         const brokenCount = brokenResults.length;
         const brokenLabels = brokenResults.map(r => r.label);
+
+        const contextSkippedResults = results.filter(r => brokenStatuses.has(r.status) && !r.contextActive);
+        const contextSkippedCount = contextSkippedResults.length;
 
         const renamedResults = results.filter(r => r.status === "fallback_renamed");
         const renamedCount = renamedResults.length;
         const renamedLabels = renamedResults.map(r => r.label);
 
         const logLevel = brokenCount > 0 ? "warn" : (renamedCount > 0 ? "warn" : "info");
-        let message = `ran ${results.length} compatibility check(s) across ${Object.keys(byPlugin).length} plugin(s) — ${brokenCount} not resolved: [${brokenLabels.join(", ")}]`;
+        let message = `ran ${results.length} compatibility check(s) across ${Object.keys(byPlugin).length} plugin(s) - ${brokenCount} genuinely not resolved (context active or n/a): [${brokenLabels.join(", ")}]`;
+        if (contextSkippedCount > 0) {
+            message += ` - ${contextSkippedCount} more not resolved but their required context wasn't active this scan (not a real signal): [${contextSkippedResults.map(r => `${r.label} (needs ${r.requiresContext})`).join(", ")}]`;
+        }
         if (renamedCount > 0) {
-            message += ` — ${renamedCount} resolved via fallback but method(s) renamed (update needed, not urgent): [${renamedLabels.join(", ")}]`;
+            message += ` - ${renamedCount} resolved via fallback but method(s) renamed (update needed, not urgent): [${renamedLabels.join(", ")}]`;
         }
         if (pendingContexts.length > 0) {
-            message += ` — ${pendingContexts.length} context(s) needed for deeper investigation: [${pendingContexts.map(p => `${p.context} (${p.affectedCheckCount})`).join(", ")}]`;
+            message += ` - ${pendingContexts.length} context(s) needed for deeper investigation: [${pendingContexts.map(p => `${p.context} (${p.affectedCheckCount})`).join(", ")}]`;
         }
         this.logger.log(this.moduleName, message, logLevel);
         return entities;
@@ -1786,6 +2027,19 @@ class class_Probe {
         this._autoCheckIntervalMs = 5 * 60 * 1000;
         this._autoCheckTimer = null;
         this._autoScanInFlight = false;
+
+        this._watchModeActive = false;
+        this._dispatcher = null;
+        this._watchDispatcherSubscriptions = [];
+        this._watchMutationObserver = null;
+        this._watchSeenContexts = new Set();
+        this._watchScanInFlight = false;
+        this._watchStartedAt = null;
+        this._watchOnUpdate = null;
+
+        this._watchSessionChanges = [];
+        this._watchSessionEndedAt = null;
+        this._watchNextScanTrigger = null;
     }
 
     _provideWebpackEntities() {
@@ -1795,10 +2049,12 @@ class class_Probe {
     start() {
         this.logger.log("core", "plugin started.");
         this._startAutoCheck();
+        this.startWatchMode();
     }
 
     stop() {
         this._stopAutoCheck();
+        this.stopWatchMode();
         this.logger.log("core", "plugin stopped.");
     }
 
@@ -1812,6 +2068,277 @@ class class_Probe {
         }
     }
 
+    _resolveDispatcher() {
+        if (this._dispatcher) return this._dispatcher;
+        try {
+            if (typeof BdApi === "undefined" || !BdApi.Webpack || typeof BdApi.Webpack.getModule !== "function") return null;
+            const found = BdApi.Webpack.getModule(
+                (m) => m && typeof m.subscribe === "function" && typeof m.dispatch === "function" && m._actionHandlers,
+                { first: true }
+            );
+            if (found) {
+                this._dispatcher = found;
+                this.logger.log("core", "Flux Dispatcher resolved for watch mode's event-driven context detection.", "info");
+            }
+            return found || null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    _detectActiveContexts() {
+        const active = new Set();
+        try {
+            const getStore = (typeof BdApi !== "undefined" && BdApi.Webpack && typeof BdApi.Webpack.getStore === "function")
+                ? BdApi.Webpack.getStore.bind(BdApi.Webpack)
+                : null;
+            if (getStore) {
+                let callStore = null;
+                for (const name of StoreScanner.KNOWN_STORE_NAME_GROUPS.CALL) {
+                    callStore = getStore(name);
+                    if (callStore) break;
+                }
+                let selectedChannelStore = null;
+                for (const name of StoreScanner.KNOWN_STORE_NAME_GROUPS.SELECTED_CHANNEL) {
+                    selectedChannelStore = getStore(name);
+                    if (selectedChannelStore) break;
+                }
+                let inVoiceCall = false;
+                try {
+                    if (callStore && selectedChannelStore && typeof selectedChannelStore.getChannelId === "function") {
+                        const channelId = selectedChannelStore.getChannelId();
+                        if (channelId && typeof callStore.getCall === "function" && callStore.getCall(channelId)) {
+                            inVoiceCall = true;
+                        } else if (typeof callStore.getAllCalls === "function") {
+                            const calls = callStore.getAllCalls();
+                            inVoiceCall = calls && Object.keys(calls).length > 0;
+                        }
+                    }
+                } catch (_) {}
+                if (inVoiceCall) {
+                    active.add("voiceCall");
+                    try {
+                        let mediaEngineStore = null;
+                        for (const name of StoreScanner.KNOWN_STORE_NAME_GROUPS.MEDIA_ENGINE) {
+                            mediaEngineStore = getStore(name);
+                            if (mediaEngineStore) break;
+                        }
+                        const hasVideo = mediaEngineStore && (
+                            (typeof mediaEngineStore.isLocalVideoEnabled === "function" && mediaEngineStore.isLocalVideoEnabled()) ||
+                            (typeof mediaEngineStore.isLocalVideoAutoDisabled === "function" && !mediaEngineStore.isLocalVideoAutoDisabled())
+                        );
+                        if (hasVideo) active.add("voiceCallWithVideo");
+                    } catch (_) {}
+                    try {
+                        let activityStore = null;
+                        for (const name of StoreScanner.KNOWN_STORE_NAME_GROUPS.ACTIVITY) {
+                            activityStore = getStore(name);
+                            if (activityStore) break;
+                        }
+                        let hasActivity = false;
+                        if (activityStore && selectedChannelStore && typeof selectedChannelStore.getChannelId === "function") {
+                            const channelId = selectedChannelStore.getChannelId();
+                            if (channelId) {
+                                if (typeof activityStore.getParticipants === "function") {
+                                    const participants = activityStore.getParticipants(channelId);
+                                    hasActivity = Array.isArray(participants) ? participants.length > 0 : !!participants;
+                                } else if (typeof activityStore.getActivityParticipants === "function") {
+                                    const participants = activityStore.getActivityParticipants(channelId);
+                                    hasActivity = Array.isArray(participants) ? participants.length > 0 : !!participants;
+                                }
+                            }
+                        }
+                        if (hasActivity) active.add("voiceCallWithActivity");
+                    } catch (_) {}
+                }
+                try {
+                    let stageInstanceStore = null;
+                    for (const name of StoreScanner.KNOWN_STORE_NAME_GROUPS.STAGE_INSTANCE) {
+                        stageInstanceStore = getStore(name);
+                        if (stageInstanceStore) break;
+                    }
+                    if (stageInstanceStore && selectedChannelStore && typeof selectedChannelStore.getChannelId === "function") {
+                        const channelId = selectedChannelStore.getChannelId();
+                        if (channelId && typeof stageInstanceStore.getStageInstance === "function" && stageInstanceStore.getStageInstance(channelId)) {
+                            active.add("stageChannel");
+                        }
+                    }
+                } catch (_) {}
+            }
+        } catch (_) {}
+
+        try {
+            if (document.querySelector('[class*="memberRow"], [class*="membersHeader"]')) {
+                active.add("memberListOpen");
+            }
+        } catch (_) {}
+        try {
+            if (document.querySelector('[data-list-id^="forum-channel-list-"], [class*="mainCard_"]')) {
+                active.add("forumChannelOpen");
+            }
+        } catch (_) {}
+
+        return active;
+    }
+
+    async _onWatchModeSignal(reason) {
+        if (!this._watchModeActive || this._watchScanInFlight) return;
+        let activeNow;
+        try {
+            activeNow = this._detectActiveContexts();
+        } catch (err) {
+            this.logger.log("core", `watch mode: context detection failed: ${err && err.message || err}`, "warn");
+            return;
+        }
+        try {
+            console.debug(
+                `[Probe:core] watch signal (${reason}) - active contexts now: [${[...activeNow].join(", ") || "none"}] - ` +
+                `already seen this session: [${[...this._watchSeenContexts].join(", ") || "none"}]`
+            );
+        } catch (_) {}
+        const newContexts = [...activeNow].filter(ctx => !this._watchSeenContexts.has(ctx));
+        if (newContexts.length === 0) return;
+
+        this._watchScanInFlight = true;
+        try {
+            for (const ctx of newContexts) this._watchSeenContexts.add(ctx);
+            this.logger.log("core", `watch mode: new context(s) detected [${newContexts.join(", ")}] (via ${reason}) - running compatibility check.`, "info");
+            this._watchNextScanTrigger = newContexts;
+            const snapshot = await this.runFullScan();
+            try {
+                this._lastFindResult = await this.findMissingModules();
+            } catch (err) {
+                this.logger.log("core", `watch mode: automatic findMissingModules failed: ${err && err.message || err}`, "warn");
+            }
+            if (this._watchOnUpdate) {
+                try { this._watchOnUpdate(snapshot); } catch (_) {}
+            }
+        } catch (err) {
+            this.logger.log("core", `watch mode: scan failed: ${err && err.message || err}`, "error");
+        } finally {
+            this._watchScanInFlight = false;
+        }
+    }
+
+    static get WATCH_DISPATCHER_ACTION_TYPES() {
+        return [
+            "VOICE_STATE_UPDATES", "CALL_UPDATE", "VOICE_CHANNEL_SELECT",
+            "STREAM_START", "STREAM_STOP", "MEDIA_ENGINE_SET_VIDEO_ENABLED",
+            "STAGE_INSTANCE_CREATE", "STAGE_INSTANCE_DELETE", "STAGE_INSTANCE_UPDATE",
+            "EMBEDDED_ACTIVITY_UPDATE", "CHANNEL_SELECT"
+        ];
+    }
+
+    _subscribeWatchDispatcher(dispatcher) {
+        for (const actionType of class_Probe.WATCH_DISPATCHER_ACTION_TYPES) {
+            const handler = () => { this._onWatchModeSignal(`dispatcher:${actionType}`); };
+            try {
+                dispatcher.subscribe(actionType, handler);
+                this._watchDispatcherSubscriptions.push({ actionType, handler });
+            } catch (err) {
+                this.logger.log("core", `watch mode: failed to subscribe to ${actionType}: ${err && err.message || err}`, "warn");
+            }
+        }
+        this.logger.log("core", `watch mode: subscribed to ${this._watchDispatcherSubscriptions.length}/${class_Probe.WATCH_DISPATCHER_ACTION_TYPES.length} Dispatcher action(s) for voice/stage/activity, plus DOM observation for member list/forum.`, "info");
+    }
+
+    startWatchMode(onUpdate) {
+        if (this._watchModeActive) return;
+        this._watchModeActive = true;
+        this._watchSeenContexts = new Set();
+        this._watchStartedAt = Date.now();
+        this._watchOnUpdate = typeof onUpdate === "function" ? onUpdate : null;
+        this._watchSessionChanges = [];
+        this._watchSessionEndedAt = null;
+
+        const dispatcher = this._resolveDispatcher();
+        this._watchDispatcherSubscriptions = [];
+        if (dispatcher) {
+            this._subscribeWatchDispatcher(dispatcher);
+        } else {
+            this.logger.log("core", "watch mode started - Flux Dispatcher not resolved yet, will retry once in 5s; member list/forum are covered via DOM observation in the meantime.", "warn");
+            setTimeout(() => {
+                if (!this._watchModeActive || this._watchDispatcherSubscriptions.length > 0) return;
+                const retried = this._resolveDispatcher();
+                if (retried) {
+                    this._subscribeWatchDispatcher(retried);
+                    this.logger.log("core", "watch mode: Flux Dispatcher resolved on retry - voice/stage/activity now covered live.", "info");
+                } else {
+                    this.logger.log("core", "watch mode: Flux Dispatcher still not resolved after retry - voice/stage/activity won't update live this session.", "warn");
+                }
+            }, 5000);
+        }
+
+        try {
+            let debounceTimer = null;
+            this._watchMutationObserver = new MutationObserver(() => {
+                if (debounceTimer) clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(() => { this._onWatchModeSignal("dom-mutation"); }, 250);
+            });
+            this._watchMutationObserver.observe(document.body, { childList: true, subtree: true });
+        } catch (err) {
+            this.logger.log("core", `watch mode: failed to start DOM observation: ${err && err.message || err}`, "warn");
+            this._watchMutationObserver = null;
+        }
+
+        this._onWatchModeSignal("initial-check");
+
+        this.findMissingModules()
+            .then((result) => {
+                this._lastFindResult = result;
+                if (this._watchOnUpdate) { try { this._watchOnUpdate(); } catch (_) {} }
+            })
+            .catch((err) => { this.logger.log("core", `watch mode: initial findMissingModules failed: ${err && err.message || err}`, "warn"); });
+    }
+
+    _recordWatchSessionChanges(triggeredByContexts, snapshot) {
+        const diff = snapshot?.compatibilityDiff;
+        if (!diff || !diff.hasPreviousScan) return;
+        const hasAnything = diff.changedChecks.length > 0
+            || (diff.matchedViaDrifts || []).length > 0
+            || diff.missingStores.length > 0
+            || diff.newStores.length > 0;
+        if (!hasAnything) return;
+        this._watchSessionChanges.push({
+            at: snapshot.capturedAt,
+            triggeredByContexts: [...triggeredByContexts],
+            changedChecks: diff.changedChecks,
+            matchedViaDrifts: diff.matchedViaDrifts || [],
+            missingStores: diff.missingStores,
+            newStores: diff.newStores
+        });
+    }
+
+    stopWatchMode() {
+        if (this._watchDispatcherSubscriptions.length > 0) {
+            const dispatcher = this._dispatcher;
+            for (const { actionType, handler } of this._watchDispatcherSubscriptions) {
+                try {
+                    if (dispatcher && typeof dispatcher.unsubscribe === "function") dispatcher.unsubscribe(actionType, handler);
+                } catch (_) {}
+            }
+            this._watchDispatcherSubscriptions = [];
+        }
+        if (this._watchMutationObserver) {
+            try { this._watchMutationObserver.disconnect(); } catch (_) {}
+            this._watchMutationObserver = null;
+        }
+        if (this._watchModeActive) {
+            const seenList = [...this._watchSeenContexts];
+            this.logger.log("core", `watch mode stopped - contexts seen this session: [${seenList.join(", ") || "none"}] - ${this._watchSessionChanges.length} scan(s) found changes.`, "info");
+        }
+        this._watchModeActive = false;
+        this._watchScanInFlight = false;
+        this._watchOnUpdate = null;
+        this._watchNextScanTrigger = null;
+        this._watchSessionEndedAt = Date.now();
+    }
+
+    isWatchModeActive() {
+        return this._watchModeActive;
+    }
+
+
     _startAutoCheck() {
         this._stopAutoCheck();
         const poll = async () => {
@@ -1822,7 +2349,7 @@ class class_Probe {
             if (lastKnown === liveBuild) return;
             this._autoScanInFlight = true;
             try {
-                this.logger.log("core", `build change detected (${lastKnown || "none"} → ${liveBuild}) — running compatibility check automatically.`, "info");
+                this.logger.log("core", `build change detected (${lastKnown || "none"} → ${liveBuild}) - running compatibility check automatically.`, "info");
                 const snapshot = await this.runFullScan();
                 this._notifyIfBroken(snapshot);
             } catch (err) {
@@ -1850,11 +2377,11 @@ class class_Probe {
             const brokenNow = (compat.data.checks || []).filter(c => c.status === "not_resolved" || c.status === "fallback_broken");
             if (brokenNow.length > 0) {
                 BdApi.UI.showToast(
-                    `Probe: Discord update broke ${brokenNow.length} ByeBlocked check(s) — ${brokenNow.map(c => c.label).slice(0, 3).join(", ")}${brokenNow.length > 3 ? "…" : ""}`,
+                    `Probe: Discord update broke ${brokenNow.length} ByeBlocked check(s) - ${brokenNow.map(c => c.label).slice(0, 3).join(", ")}${brokenNow.length > 3 ? "…" : ""}`,
                     { type: "error", timeout: 10000 }
                 );
             } else if (diff && diff.hasPreviousScan && diff.changedChecks.length > 0) {
-                BdApi.UI.showToast(`Probe: Discord updated — compatibility re-checked, all still resolved.`, { type: "success" });
+                BdApi.UI.showToast(`Probe: Discord updated - compatibility re-checked, all still resolved.`, { type: "success" });
             }
         } catch (_) {}
     }
@@ -1878,7 +2405,9 @@ class class_Probe {
 
         const compatibility = new CompatibilityModule({
             logger: this.logger,
-            allEntities: this._allEntities
+            allEntities: this._allEntities,
+            checks: buildCompatibilityChecks(this.logger),
+            activeContexts: this._detectActiveContexts()
         });
 
         return [webpackScanner, storeScanner, compatibility];
@@ -1895,11 +2424,11 @@ class class_Probe {
         const finder = new ModuleFinder({
             logger: this.logger,
             bootstrap: this.webpackBootstrap,
-            checks: COMPATIBILITY_CHECKS
+            checks: buildCompatibilityChecks(this.logger)
         });
 
         const result = await finder.find(currentChecks, onProgress);
-        this.logger.log("core", `findMissingModules: found ${result.candidatesFound} candidate(s) in ${Date.now() - startedAt}ms (read-only — nothing executed).`);
+        this.logger.log("core", `findMissingModules: found ${result.candidatesFound} candidate(s) in ${Date.now() - startedAt}ms (read-only - nothing executed).`);
         return result;
     }
 
@@ -1909,7 +2438,7 @@ class class_Probe {
         const freshRequire = this.webpackBootstrap.getRequire(true);
         const resolvedCount = freshRequire && freshRequire.c ? Object.keys(freshRequire.c).length : 0;
         const factoryCount = freshRequire && freshRequire.m ? Object.keys(freshRequire.m).length : 0;
-        this.logger.log("core", `scan start — wpRequire: ${resolvedCount} resolved modules, ${factoryCount} factories.`, "info");
+        this.logger.log("core", `scan start - wpRequire: ${resolvedCount} resolved modules, ${factoryCount} factories.`, "info");
 
         const previousSnapshot = this.loadLastSnapshot();
 
@@ -1945,17 +2474,40 @@ class class_Probe {
         this.lastSnapshot = snapshot;
         this._persistSnapshot(snapshot);
 
+        if (this._watchModeActive) {
+            const trigger = this._watchNextScanTrigger || ["manual/auto-check (not a new screen)"];
+            this._watchNextScanTrigger = null;
+            this._recordWatchSessionChanges(trigger, snapshot);
+        }
+
         const overallStats = this._computeOverallStats(snapshot);
         if (compatibilityDiff.hasPreviousScan && compatibilityDiff.changedChecks.length > 0) {
             this.logger.log("core",
-                `scan complete: ${allEntities.length} entity(ies) in ${Date.now() - startedAt}ms — Compatibility: ${overallStats.overall} — ` +
+                `scan complete: ${allEntities.length} entity(ies) in ${Date.now() - startedAt}ms - Compatibility: ${overallStats.overall} - ` +
                 `${compatibilityDiff.changedChecks.length} check(s) changed status since last scan: ` +
                 `${compatibilityDiff.changedChecks.map(c => `${c.label} (${c.before}→${c.after})`).join(", ")}`,
                 "warn");
         } else {
-            this.logger.log("core", `scan complete: ${allEntities.length} entity(ies) in ${Date.now() - startedAt}ms — Compatibility: ${overallStats.overall} — status unchanged since last scan.`);
+            this.logger.log("core", `scan complete: ${allEntities.length} entity(ies) in ${Date.now() - startedAt}ms - Compatibility: ${overallStats.overall} - status unchanged since last scan.`);
         }
         return snapshot;
+    }
+
+    _sourceHashForMatchedVia(matchedVia, snapshotEntities) {
+        if (!matchedVia) return null;
+        const id = Array.isArray(matchedVia) ? matchedVia[0] : matchedVia;
+        if (typeof id !== "string" && typeof id !== "number") return null;
+        const entity = snapshotEntities.find(e => e.type === "webpackModule" && e.data?.moduleId === id);
+        return entity?.data?.sourceHash || null;
+    }
+
+    _matchedViaEqual(a, b) {
+        if (a === b) return true;
+        if (Array.isArray(a) && Array.isArray(b)) {
+            if (a.length !== b.length) return false;
+            return a.every((v, i) => v === b[i]);
+        }
+        return false;
     }
 
     _diffAgainstPrevious(currentEntities, previousSnapshot, currentBuildNumber) {
@@ -1977,9 +2529,19 @@ class class_Probe {
                     changedChecks.push({ plugin: c.plugin, label: c.label, before: prev.status, after: c.status });
                 } else if (
                     prev && prev.status === "resolved" && c.status === "resolved" &&
-                    prev.matchedVia && c.matchedVia && prev.matchedVia !== c.matchedVia
+                    prev.matchedVia && c.matchedVia && !this._matchedViaEqual(prev.matchedVia, c.matchedVia)
                 ) {
-                    matchedViaDrifts.push({ plugin: c.plugin, label: c.label, before: prev.matchedVia, after: c.matchedVia });
+                    const prevHash = this._sourceHashForMatchedVia(prev.matchedVia, previousSnapshot.entities);
+                    const currHash = this._sourceHashForMatchedVia(c.matchedVia, currentEntities);
+                    const hashComparable = !!prevHash && !!currHash;
+                    matchedViaDrifts.push({
+                        plugin: c.plugin,
+                        label: c.label,
+                        before: prev.matchedVia,
+                        after: c.matchedVia,
+                        sourceHashComparable: hashComparable,
+                        likelyRenumberedOnly: hashComparable ? prevHash === currHash : null
+                    });
                 }
             }
         }
@@ -2069,7 +2631,7 @@ class class_Probe {
                 errors: s.errors.length > 0 ? s.errors : undefined
             })),
             compatibilitySummary: compatEntity ? compatEntity.data.summaryByPlugin : null,
-            scanCoverageNote: "Partial scan: only webpack modules already resolved in this session are captured. CompatibilityModule falls back to a live BdApi.Webpack lookup for anything missing from the snapshot, so this gap matters less here than it would for a full structural map — but navigating through more of the app before re-scanning still helps."
+            scanCoverageNote: "Partial scan: only webpack modules already resolved in this session are captured. CompatibilityModule falls back to a live BdApi.Webpack lookup for anything missing from the snapshot, so this gap matters less here than it would for a full structural map - but navigating through more of the app before re-scanning still helps."
         };
     }
 
@@ -2147,7 +2709,7 @@ class class_Probe {
         try {
             const data = snapshot || this.lastSnapshot;
             if (!data) {
-                BdApi.UI.showToast("No snapshot available — run a scan first.", { type: "warn" });
+                BdApi.UI.showToast("No snapshot available - run a scan first.", { type: "warn" });
                 return;
             }
             const json = JSON.stringify(data, null, 2);
@@ -2164,10 +2726,9 @@ class class_Probe {
             BdApi.UI.showToast("Snapshot exported.", { type: "success" });
         } catch (err) {
             this.logger.log("core", `failed to export: ${err && err.message || err}`, "error");
-            BdApi.UI.showToast("Failed to export snapshot — check the console.", { type: "error" });
+            BdApi.UI.showToast("Failed to export snapshot - check the console.", { type: "error" });
         }
     }
-
 
     _styleButton(btn, variant = "secondary") {
         btn.style.padding = "6px 12px";
@@ -2176,9 +2737,13 @@ class class_Probe {
         btn.style.cursor = "pointer";
         btn.style.fontSize = "13px";
         btn.style.fontWeight = "500";
+        btn.style.whiteSpace = "nowrap";
         if (variant === "primary") {
             btn.style.background = "var(--brand-experiment, #5865f2)";
             btn.style.color = "#fff";
+        } else if (variant === "danger") {
+            btn.style.background = "var(--background-modifier-selected, #3a3c43)";
+            btn.style.color = this._statusColor("not_resolved");
         } else {
             btn.style.background = "var(--background-modifier-selected, #3a3c43)";
             btn.style.color = "var(--text-normal)";
@@ -2197,16 +2762,35 @@ class class_Probe {
         }
     }
 
+    _statusGroupMeta(groupKey) {
+        switch (groupKey) {
+            case "broken": return { label: "Broken", color: this._statusColor("not_resolved"), icon: "\u26D4" };
+            case "warning": return { label: "Needs attention", color: this._statusColor("plausible"), icon: "\u26A0\uFE0F" };
+            case "cannot_verify": return { label: "Cannot verify (inconclusive)", color: this._statusColor("cannot_verify"), icon: "\u2753" };
+            case "resolved": return { label: "Resolved", color: this._statusColor("resolved"), icon: "\u2705" };
+            default: return { label: groupKey, color: "var(--text-normal)", icon: "" };
+        }
+    }
+
+    _groupKeyForStatus(status) {
+        if (status === "not_resolved" || status === "fallback_broken") return "broken";
+        if (status === "fallback_renamed" || status === "plausible") return "warning";
+        if (status === "cannot_verify") return "cannot_verify";
+        return "resolved";
+    }
+
     _computeOverallStats(snapshot) {
         const compatEntities = (snapshot?.entities || []).filter(e => e.type === "compatibility");
-        const totals = { total: 0, resolved: 0, failed: 0, warnings: 0, contextsMissing: 0 };
+        const totals = { total: 0, resolved: 0, failed: 0, warnings: 0, contextsMissing: 0, contextSkipped: 0 };
         for (const ce of compatEntities) {
-            for (const counts of Object.values(ce.data.summaryByPlugin || {})) {
+            const summaries = ce.data.summaryByPluginContextAware || ce.data.summaryByPlugin || {};
+            for (const counts of Object.values(summaries)) {
                 totals.total += counts.total || 0;
                 totals.resolved += counts.resolved || 0;
                 totals.failed += (counts.not_resolved || 0) + (counts.fallback_broken || 0);
                 totals.warnings += (counts.fallback_renamed || 0) + (counts.plausible || 0);
                 totals.contextsMissing += counts.cannot_verify || 0;
+                totals.contextSkipped += counts.context_not_active || 0;
             }
         }
         const totalScanTimeMs = (snapshot?.moduleStats || []).reduce((sum, s) => sum + (s.durationMs || 0), 0);
@@ -2214,509 +2798,708 @@ class class_Probe {
         return { ...totals, totalScanTimeMs, overall };
     }
 
-    _buildFindResultBlock(result) {
-        const box = document.createElement("div");
-        box.style.padding = "8px 10px";
-        box.style.marginBottom = "10px";
-        box.style.borderRadius = "4px";
-        box.style.background = "var(--background-modifier-accent)";
-        box.style.fontSize = "12px";
-
-        const title = document.createElement("div");
-        title.style.fontWeight = "600";
-        title.style.marginBottom = "4px";
-        title.textContent = `${result.candidatesFound} unresolved module(s) mention pending-check terms (read-only — none executed):`;
-        box.appendChild(title);
-
-        const hint = document.createElement("div");
-        hint.style.opacity = "0.7";
-        hint.style.marginBottom = "6px";
-        hint.textContent = "Open the Discord screen where the matching feature lives, then re-run the compatibility check — that lets the module load normally instead of being forced.";
-        box.appendChild(hint);
-
-        for (const c of result.candidates.slice(0, 20)) {
-            const line = document.createElement("div");
-            line.style.marginBottom = "2px";
-            line.style.fontFamily = "monospace";
-            line.textContent = `#${c.id} — matches: [${c.matchedTerms.join(", ")}]`;
-            box.appendChild(line);
+    _copyToClipboard(text, btn, restoreLabel) {
+        const restore = () => { btn.textContent = restoreLabel; };
+        const onOk = () => { btn.textContent = "\u2705 Copied!"; setTimeout(restore, 1500); };
+        const onFail = () => { btn.textContent = "\u26A0 Copy failed"; setTimeout(restore, 1500); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(onOk).catch(onFail);
+        } else {
+            try {
+                const ta = document.createElement("textarea");
+                ta.value = text;
+                ta.style.position = "fixed";
+                ta.style.opacity = "0";
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand("copy");
+                document.body.removeChild(ta);
+                onOk();
+            } catch (_) {
+                onFail();
+            }
         }
-        if (result.candidates.length > 20) {
-            const more = document.createElement("div");
-            more.style.opacity = "0.6";
-            more.style.marginTop = "4px";
-            more.textContent = `...and ${result.candidates.length - 20} more (export the full snapshot to see all).`;
-            box.appendChild(more);
-        }
-        return box;
     }
 
-    _buildOverallSummaryBlock(snapshot) {
-        const stats = this._computeOverallStats(snapshot);
-        const box = document.createElement("div");
-        box.style.padding = "10px 12px";
-        box.style.marginBottom = "10px";
-        box.style.borderRadius = "4px";
-        box.style.background = "var(--background-secondary)";
-        box.style.fontSize = "12px";
-
-        const topRow = document.createElement("div");
-        topRow.style.display = "flex";
-        topRow.style.justifyContent = "space-between";
-        topRow.style.alignItems = "center";
-        topRow.style.marginBottom = "6px";
-
-        const overallLabel = document.createElement("div");
-        overallLabel.style.fontWeight = "700";
-        overallLabel.style.fontSize = "14px";
-        overallLabel.style.color = stats.overall === "FAIL" ? this._statusColor("not_resolved")
-            : stats.overall === "WARN" ? this._statusColor("plausible")
-            : this._statusColor("resolved");
-        overallLabel.textContent = `Compatibility: ${stats.overall}`;
-        topRow.appendChild(overallLabel);
-
-        const timeLabel = document.createElement("div");
-        timeLabel.style.opacity = "0.7";
-        timeLabel.textContent = `Scan time: ${stats.totalScanTimeMs}ms`;
-        topRow.appendChild(timeLabel);
-
-        box.appendChild(topRow);
-
-        const grid = document.createElement("div");
-        grid.style.display = "grid";
-        grid.style.gridTemplateColumns = "repeat(auto-fit, minmax(90px, 1fr))";
-        grid.style.gap = "4px";
-        const cells = [
-            ["Checks", `${stats.resolved} / ${stats.total}`, null],
-            ["Resolved", String(stats.resolved), this._statusColor("resolved")],
-            ["Failed", String(stats.failed), stats.failed > 0 ? this._statusColor("not_resolved") : null],
-            ["Warnings", String(stats.warnings), stats.warnings > 0 ? this._statusColor("plausible") : null],
-            ["Contexts missing", String(stats.contextsMissing), null]
-        ];
-        for (const [label, value, color] of cells) {
-            const cell = document.createElement("div");
-            const valEl = document.createElement("div");
-            valEl.style.fontWeight = "600";
-            valEl.style.fontSize = "13px";
-            if (color) valEl.style.color = color;
-            valEl.textContent = value;
-            const labelEl = document.createElement("div");
-            labelEl.style.opacity = "0.6";
-            labelEl.style.fontSize = "10px";
-            labelEl.textContent = label;
-            cell.appendChild(valEl);
-            cell.appendChild(labelEl);
-            grid.appendChild(cell);
-        }
-        box.appendChild(grid);
-        return box;
+    _el(tag, styles, text) {
+        const e = document.createElement(tag);
+        if (styles) Object.assign(e.style, styles);
+        if (text !== undefined) e.textContent = text;
+        return e;
     }
 
-    _buildChecksList(snapshot) {
-        const wrap = document.createElement("div");
+    _badge(text, color) {
+        const b = this._el("span", {
+            display: "inline-block",
+            padding: "2px 7px",
+            borderRadius: "3px",
+            fontSize: "11px",
+            fontWeight: "600",
+            marginLeft: "6px",
+            background: "rgba(255,255,255,0.06)",
+            color: color || "var(--text-normal)"
+        }, text);
+        return b;
+    }
+
+    _buildOverviewTab(snapshot) {
+        const wrap = this._el("div");
         const compatEntity = snapshot?.entities?.find(e => e.type === "compatibility");
         if (!compatEntity) {
-            wrap.textContent = "No compatibility data in this snapshot. Run a scan.";
-            wrap.style.opacity = "0.7";
+            wrap.appendChild(this._el("div", { opacity: "0.7", padding: "20px 0", textAlign: "center" },
+                "No scan yet. Run a compatibility check to see results here."));
             return wrap;
         }
 
         wrap.appendChild(this._buildOverallSummaryBlock(snapshot));
 
         const diff = snapshot.compatibilityDiff;
-        if (diff && diff.hasPreviousScan && (diff.changedChecks.length > 0 || (diff.matchedViaDrifts || []).length > 0 || diff.newStores.length > 0 || diff.missingStores.length > 0)) {
-            const diffBox = document.createElement("div");
-            diffBox.style.padding = "8px 10px";
-            diffBox.style.marginBottom = "10px";
-            diffBox.style.borderRadius = "4px";
-            diffBox.style.background = "var(--background-modifier-accent)";
-            diffBox.style.fontSize = "12px";
-            const diffTitle = document.createElement("div");
-            diffTitle.style.fontWeight = "600";
-            diffTitle.style.marginBottom = "4px";
-            diffTitle.textContent = `Changed since last scan (${new Date(diff.previousScanCapturedAt).toLocaleString("en-US")}):`;
-            diffBox.appendChild(diffTitle);
-            for (const c of diff.changedChecks) {
-                const line = document.createElement("div");
-                line.style.color = this._statusColor(c.after);
-                line.textContent = `${c.plugin}: ${c.label} — ${c.before} → ${c.after}`;
-                diffBox.appendChild(line);
-            }
-            for (const d of (diff.matchedViaDrifts || [])) {
-                const line = document.createElement("div");
-                line.style.color = this._statusColor("plausible");
-                line.textContent = `${d.plugin}: ${d.label} — still resolved, but via a different match than last scan (${d.before} → ${d.after}). Possible early sign of an in-progress rename.`;
-                diffBox.appendChild(line);
-            }
-            if (diff.missingStores.length > 0) {
-                const line = document.createElement("div");
-                line.style.color = this._statusColor("not_resolved");
-                line.textContent = `Store(s) no longer found: ${diff.missingStores.join(", ")}`;
-                diffBox.appendChild(line);
-            }
-            if (diff.newStores.length > 0) {
-                const line = document.createElement("div");
-                line.style.opacity = "0.8";
-                line.textContent = `New store(s) resolved this scan: ${diff.newStores.join(", ")}`;
-                diffBox.appendChild(line);
-            }
-            wrap.appendChild(diffBox);
-        }
+        const hasDiff = diff && diff.hasPreviousScan && (diff.changedChecks.length > 0 || (diff.matchedViaDrifts || []).length > 0 || diff.newStores.length > 0 || diff.missingStores.length > 0);
+        if (hasDiff) wrap.appendChild(this._buildDiffBlock(diff));
 
         if (diff && diff.buildChanged && Array.isArray(diff.structuralChanges) && diff.structuralChanges.length > 0) {
-            const buildBox = document.createElement("div");
-            buildBox.style.padding = "8px 10px";
-            buildBox.style.marginBottom = "10px";
-            buildBox.style.borderRadius = "4px";
-            buildBox.style.background = "var(--background-modifier-accent)";
-            buildBox.style.fontSize = "12px";
-            const buildTitle = document.createElement("div");
-            buildTitle.style.fontWeight = "600";
-            buildTitle.style.marginBottom = "4px";
-            buildTitle.textContent = `Build changed (${diff.previousBuildNumber || "unknown"} → ${snapshot.discordBuildNumber || "unknown"}) — per-store structural comparison:`;
-            buildBox.appendChild(buildTitle);
-            const order = { changed: 0, unchanged: 1, not_observed: 2 };
-            const sortedChanges = [...diff.structuralChanges].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
-            for (const sc of sortedChanges) {
-                const line = document.createElement("div");
-                line.style.marginBottom = "2px";
-                if (sc.status === "changed") {
-                    line.style.color = this._statusColor("not_resolved");
-                    const addedTxt = sc.added.length > 0 ? ` +[${sc.added.join(", ")}]` : "";
-                    const removedTxt = sc.removed.length > 0 ? ` -[${sc.removed.join(", ")}]` : "";
-                    line.textContent = `${sc.name}: changed${addedTxt}${removedTxt}`;
-                } else if (sc.status === "unchanged") {
-                    line.style.opacity = "0.6";
-                    line.textContent = `${sc.name}: unchanged`;
-                } else {
-                    line.style.opacity = "0.5";
-                    line.style.fontStyle = "italic";
-                    line.textContent = `${sc.name}: not observed in one of the two scans (lazy-loaded — not a finding)`;
-                }
-                buildBox.appendChild(line);
-            }
-            wrap.appendChild(buildBox);
+            wrap.appendChild(this._buildStructuralChangesBlock(diff, snapshot));
         }
 
-        const { summaryByPlugin, checks, pendingContexts } = compatEntity.data;
-
+        const { pendingContexts } = compatEntity.data;
         if (Array.isArray(pendingContexts) && pendingContexts.length > 0) {
-            const ctxBox = document.createElement("div");
-            ctxBox.style.padding = "8px 10px";
-            ctxBox.style.marginBottom = "10px";
-            ctxBox.style.borderRadius = "4px";
-            ctxBox.style.background = "var(--background-modifier-accent)";
-            ctxBox.style.fontSize = "12px";
-            const ctxTitle = document.createElement("div");
-            ctxTitle.style.fontWeight = "600";
-            ctxTitle.style.marginBottom = "4px";
-            ctxTitle.textContent = `${pendingContexts.length} scenario(s) needed for deeper investigation — open these, then re-scan:`;
-            ctxBox.appendChild(ctxTitle);
-            for (const p of pendingContexts) {
-                const line = document.createElement("div");
-                line.style.marginBottom = "2px";
-                line.textContent = `${p.context} — affects ${p.affectedCheckCount} check(s): ${p.checks.map(c => c.label).join(", ")}`;
-                ctxBox.appendChild(line);
-            }
-            wrap.appendChild(ctxBox);
+            wrap.appendChild(this._buildPendingContextsBlock(pendingContexts));
         }
 
-        for (const [plugin, counts] of Object.entries(summaryByPlugin || {})) {
-            const header = document.createElement("div");
-            header.style.fontWeight = "600";
-            header.style.marginBottom = "6px";
-            header.style.marginTop = "10px";
-            const brokenTotal = (counts.not_resolved || 0) + (counts.fallback_broken || 0);
-            const warnTotal = (counts.fallback_renamed || 0) + (counts.plausible || 0);
-            const unverifiedTotal = counts.cannot_verify || 0;
-            header.textContent = brokenTotal > 0
-                ? `${plugin} — ${brokenTotal} check(s) BROKEN`
-                : warnTotal > 0
-                    ? `${plugin} — ${warnTotal} check(s) need attention`
-                    : unverifiedTotal > 0
-                        ? `${plugin} — ${counts.resolved} of ${counts.total} checks resolved (${unverifiedTotal} inconclusive — see cannot_verify below)`
-                        : `${plugin} — all ${counts.total} checks resolved`;
-            header.style.color = brokenTotal > 0 ? this._statusColor("not_resolved")
-                : warnTotal > 0 ? this._statusColor("plausible")
-                : unverifiedTotal > 0 ? this._statusColor("cannot_verify")
-                : this._statusColor("resolved");
-            wrap.appendChild(header);
+        if (this._lastFindResult && this._lastFindResult.candidatesFound > 0) {
+            wrap.appendChild(this._buildFindResultBlock(this._lastFindResult));
         }
 
-        const priority = { not_resolved: 0, fallback_broken: 1, fallback_renamed: 2, plausible: 3, cannot_verify: 4, resolved: 5 };
-        const sorted = [...(checks || [])].sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9));
-
-        const list = document.createElement("div");
-        list.style.marginTop = "8px";
-        for (const check of sorted) {
-            const row = document.createElement("div");
-            row.style.padding = "6px 8px";
-            row.style.borderLeft = `3px solid ${this._statusColor(check.status)}`;
-            row.style.marginBottom = "4px";
-            row.style.background = "var(--background-secondary)";
-            row.style.fontSize = "12px";
-
-            const title = document.createElement("div");
-            title.style.fontWeight = "600";
-            title.textContent = `[${check.status}] ${check.plugin}: ${check.label}`;
-            row.appendChild(title);
-
-            const hist = this._summarizeCheckHistory(check.label, check.plugin);
-            if (hist.scansObserved >= 2) {
-                const histLine = document.createElement("div");
-                histLine.style.fontSize = "11px";
-                histLine.style.marginTop = "2px";
-                histLine.style.opacity = "0.75";
-                const parts = [];
-                if (hist.unhealthyCount > 0) {
-                    histLine.style.opacity = "1";
-                    histLine.style.color = this._statusColor("plausible");
-                    parts.push(`unhealthy in ${hist.unhealthyCount} of the last ${hist.scansObserved} observed scan(s)`);
-                } else {
-                    parts.push(`healthy in all ${hist.scansObserved} of the last observed scans`);
-                }
-                if (hist.matchedViaDrift) {
-                    histLine.style.opacity = "1";
-                    histLine.style.color = this._statusColor("plausible");
-                    parts.push(`resolved via ${hist.distinctMatchedVia.length} different matches recently (possible drift)`);
-                }
-                histLine.textContent = `History: ${parts.join(" — ")}.`;
-                row.appendChild(histLine);
-            }
-
-            if (check.investigation?.verdict && check.investigation.verdict !== "unknown") {
-                const verdictTag = document.createElement("div");
-                verdictTag.style.marginTop = "3px";
-                verdictTag.style.display = "inline-block";
-                verdictTag.style.padding = "2px 6px";
-                verdictTag.style.borderRadius = "3px";
-                verdictTag.style.fontSize = "11px";
-                verdictTag.style.fontWeight = "600";
-                if (check.investigation.verdict === "likely_discord_change") {
-                    verdictTag.style.background = "rgba(237, 66, 69, 0.15)";
-                    verdictTag.style.color = this._statusColor("not_resolved");
-                    verdictTag.textContent = "⚠ Likely Discord update broke this";
-                } else {
-                    verdictTag.style.background = "rgba(250, 166, 26, 0.15)";
-                    verdictTag.style.color = this._statusColor("plausible");
-                    verdictTag.textContent = "🔧 Likely a ByeBlocked-side bug";
-                }
-                row.appendChild(verdictTag);
-            }
-
-            if (check.note) {
-                const note = document.createElement("div");
-                note.style.opacity = "0.75";
-                note.style.marginTop = "2px";
-                note.textContent = check.note;
-                row.appendChild(note);
-            }
-
-            if (check.requiresContext) {
-                const ctxTag = document.createElement("div");
-                ctxTag.style.opacity = "0.6";
-                ctxTag.style.marginTop = "2px";
-                ctxTag.style.fontStyle = "italic";
-                ctxTag.textContent = `requires context: ${check.requiresContext}`;
-                row.appendChild(ctxTag);
-            }
-
-            if (check.investigation) {
-                const details = document.createElement("details");
-                details.style.marginTop = "4px";
-
-                const summaryRow = document.createElement("summary");
-                summaryRow.style.cursor = "pointer";
-                summaryRow.style.display = "flex";
-                summaryRow.style.alignItems = "center";
-                summaryRow.style.justifyContent = "space-between";
-                summaryRow.style.gap = "8px";
-
-                const summaryLabel = document.createElement("span");
-                summaryLabel.style.color = "var(--text-link, #949cf7)";
-                summaryLabel.textContent = "Investigation details";
-                summaryRow.appendChild(summaryLabel);
-
-                const copyBtn = document.createElement("button");
-                copyBtn.type = "button";
-                copyBtn.textContent = "📋 Copy";
-                copyBtn.style.fontSize = "11px";
-                copyBtn.style.padding = "2px 8px";
-                copyBtn.style.borderRadius = "3px";
-                copyBtn.style.border = "1px solid var(--background-modifier-accent, #4a4a4a)";
-                copyBtn.style.background = "var(--background-secondary, #2b2d31)";
-                copyBtn.style.color = "var(--text-normal)";
-                copyBtn.style.cursor = "pointer";
-                copyBtn.onclick = (ev) => {
-                    ev.preventDefault();
-                    ev.stopPropagation();
-                    const payload = {
-                        plugin: check.plugin,
-                        label: check.label,
-                        status: check.status,
-                        verdict: check.investigation?.verdict,
-                        note: check.note,
-                        investigation: check.investigation
-                    };
-                    let text;
-                    try {
-                        text = JSON.stringify(payload, null, 2);
-                    } catch (_) {
-                        text = "(could not serialize investigation data)";
-                    }
-                    const restoreLabel = () => { copyBtn.textContent = "📋 Copy"; };
-                    const onCopyOk = () => { copyBtn.textContent = "✅ Copied!"; setTimeout(restoreLabel, 1500); };
-                    const onCopyFail = () => { copyBtn.textContent = "⚠ Copy failed"; setTimeout(restoreLabel, 1500); };
-                    if (navigator.clipboard && navigator.clipboard.writeText) {
-                        navigator.clipboard.writeText(text).then(onCopyOk).catch(onCopyFail);
-                    } else {
-                        try {
-                            const ta = document.createElement("textarea");
-                            ta.value = text;
-                            ta.style.position = "fixed";
-                            ta.style.opacity = "0";
-                            document.body.appendChild(ta);
-                            ta.select();
-                            document.execCommand("copy");
-                            document.body.removeChild(ta);
-                            onCopyOk();
-                        } catch (_) {
-                            onCopyFail();
-                        }
-                    }
-                };
-                summaryRow.appendChild(copyBtn);
-                details.appendChild(summaryRow);
-
-                const invSummary = document.createElement("div");
-                invSummary.style.marginTop = "4px";
-                invSummary.style.opacity = "0.85";
-                invSummary.textContent = check.investigation.summary || "";
-                details.appendChild(invSummary);
-
-                const pre = document.createElement("pre");
-                pre.style.whiteSpace = "pre-wrap";
-                pre.style.wordBreak = "break-word";
-                pre.style.fontSize = "11px";
-                pre.style.marginTop = "4px";
-                pre.style.padding = "6px";
-                pre.style.background = "var(--background-tertiary, rgba(0,0,0,0.15))";
-                pre.style.borderRadius = "3px";
-                pre.style.maxHeight = "260px";
-                pre.style.overflow = "auto";
-                try {
-                    pre.textContent = JSON.stringify(check.investigation, null, 2);
-                } catch (_) {
-                    pre.textContent = "(could not serialize investigation data)";
-                }
-                details.appendChild(pre);
-
-                row.appendChild(details);
-            }
-            list.appendChild(row);
+        if (!hasDiff && (!Array.isArray(pendingContexts) || pendingContexts.length === 0) && (!this._lastFindResult || this._lastFindResult.candidatesFound === 0)) {
+            wrap.appendChild(this._el("div", { opacity: "0.55", fontSize: "12px", padding: "6px 2px" },
+                "Nothing else to flag right now - check the Checks tab for the full breakdown."));
         }
-        wrap.appendChild(list);
+
         return wrap;
     }
 
-    getSettingsPanel() {
-        const panel = document.createElement("div");
-        panel.style.padding = "12px";
-        panel.style.color = "var(--text-normal)";
+    _buildOverallSummaryBlock(snapshot) {
+        const stats = this._computeOverallStats(snapshot);
+        const box = this._el("div", {
+            padding: "12px 14px",
+            marginBottom: "12px",
+            borderRadius: "6px",
+            background: "var(--background-secondary)",
+            fontSize: "12px"
+        });
 
-        const title = document.createElement("h3");
+        const topRow = this._el("div", { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" });
+        const overallColor = stats.overall === "FAIL" ? this._statusColor("not_resolved")
+            : stats.overall === "WARN" ? this._statusColor("plausible")
+            : this._statusColor("resolved");
+        topRow.appendChild(this._el("div", { fontWeight: "700", fontSize: "15px", color: overallColor }, `Compatibility: ${stats.overall}`));
+        topRow.appendChild(this._el("div", { opacity: "0.7" }, `Scan time: ${stats.totalScanTimeMs}ms`));
+        box.appendChild(topRow);
+
+        const grid = this._el("div", { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: "6px" });
+        const cells = [
+            ["Checks", `${stats.resolved} / ${stats.total}`, null],
+            ["Resolved", String(stats.resolved), this._statusColor("resolved")],
+            ["Failed", String(stats.failed), stats.failed > 0 ? this._statusColor("not_resolved") : null],
+            ["Warnings", String(stats.warnings), stats.warnings > 0 ? this._statusColor("plausible") : null],
+            ["Contexts missing", String(stats.contextsMissing), null],
+            ["Skipped (context inactive)", String(stats.contextSkipped), null]
+        ];
+        for (const [label, value, color] of cells) {
+            const cell = this._el("div");
+            const valEl = this._el("div", { fontWeight: "600", fontSize: "14px" }, value);
+            if (color) valEl.style.color = color;
+            cell.appendChild(valEl);
+            cell.appendChild(this._el("div", { opacity: "0.6", fontSize: "10px" }, label));
+            grid.appendChild(cell);
+        }
+        box.appendChild(grid);
+        return box;
+    }
+
+    _buildDiffBlock(diff) {
+        const diffBox = this._el("div", {
+            padding: "10px 12px", marginBottom: "10px", borderRadius: "6px",
+            background: "var(--background-modifier-accent)", fontSize: "12px"
+        });
+        diffBox.appendChild(this._el("div", { fontWeight: "600", marginBottom: "6px" },
+            `Changed since last scan (${new Date(diff.previousScanCapturedAt).toLocaleString("en-US")}):`));
+        for (const c of diff.changedChecks) {
+            diffBox.appendChild(this._el("div", { color: this._statusColor(c.after), marginBottom: "2px" },
+                `${c.plugin}: ${c.label} - ${c.before} \u2192 ${c.after}`));
+        }
+        const fmtMatchedVia = (v) => Array.isArray(v) ? `[${v.join(", ")}]` : String(v);
+        for (const d of (diff.matchedViaDrifts || [])) {
+            const beforeTxt = fmtMatchedVia(d.before);
+            const afterTxt = fmtMatchedVia(d.after);
+            let line;
+            if (d.sourceHashComparable && d.likelyRenumberedOnly) {
+                line = this._el("div", { color: "var(--text-muted)", marginBottom: "2px" },
+                    `${d.plugin}: ${d.label} - matched a different module id than last scan (${beforeTxt} \u2192 ${afterTxt}), but source content is identical (likely just renumbered by webpack).`);
+            } else if (d.sourceHashComparable) {
+                line = this._el("div", { color: this._statusColor("not_resolved"), marginBottom: "2px" },
+                    `${d.plugin}: ${d.label} - still resolved, but via a different match AND different source content (${beforeTxt} \u2192 ${afterTxt}). Worth reviewing.`);
+            } else {
+                line = this._el("div", { color: this._statusColor("plausible"), marginBottom: "2px" },
+                    `${d.plugin}: ${d.label} - still resolved, but via a different match than last scan (${beforeTxt} \u2192 ${afterTxt}). Possible early sign of an in-progress rename.`);
+            }
+            diffBox.appendChild(line);
+        }
+        if (diff.missingStores.length > 0) {
+            diffBox.appendChild(this._el("div", { color: this._statusColor("not_resolved"), marginBottom: "2px" },
+                `Store(s) no longer found: ${diff.missingStores.join(", ")}`));
+        }
+        if (diff.newStores.length > 0) {
+            diffBox.appendChild(this._el("div", { opacity: "0.8", marginBottom: "2px" },
+                `New store(s) resolved this scan: ${diff.newStores.join(", ")}`));
+        }
+        return diffBox;
+    }
+
+    _buildStructuralChangesBlock(diff, snapshot) {
+        const buildBox = this._el("div", {
+            padding: "10px 12px", marginBottom: "10px", borderRadius: "6px",
+            background: "var(--background-modifier-accent)", fontSize: "12px"
+        });
+        buildBox.appendChild(this._el("div", { fontWeight: "600", marginBottom: "6px" },
+            `Build changed (${diff.previousBuildNumber || "unknown"} \u2192 ${snapshot.discordBuildNumber || "unknown"}) - per-store structural comparison:`));
+        const order = { changed: 0, unchanged: 1, not_observed: 2 };
+        const sortedChanges = [...diff.structuralChanges].sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
+        for (const sc of sortedChanges) {
+            let line;
+            if (sc.status === "changed") {
+                const addedTxt = sc.added.length > 0 ? ` +[${sc.added.join(", ")}]` : "";
+                const removedTxt = sc.removed.length > 0 ? ` -[${sc.removed.join(", ")}]` : "";
+                line = this._el("div", { color: this._statusColor("not_resolved"), marginBottom: "2px" },
+                    `${sc.name}: changed${addedTxt}${removedTxt}`);
+            } else if (sc.status === "unchanged") {
+                line = this._el("div", { opacity: "0.6", marginBottom: "2px" }, `${sc.name}: unchanged`);
+            } else {
+                line = this._el("div", { opacity: "0.5", fontStyle: "italic", marginBottom: "2px" },
+                    `${sc.name}: not observed in one of the two scans (lazy-loaded - not a finding)`);
+            }
+            buildBox.appendChild(line);
+        }
+        return buildBox;
+    }
+
+    _buildPendingContextsBlock(pendingContexts) {
+        const ctxBox = this._el("div", {
+            padding: "10px 12px", marginBottom: "10px", borderRadius: "6px",
+            background: "var(--background-modifier-accent)", fontSize: "12px"
+        });
+        ctxBox.appendChild(this._el("div", { fontWeight: "600", marginBottom: "6px" },
+            `${pendingContexts.length} scenario(s) needed for deeper investigation - open these, then re-scan:`));
+        for (const p of pendingContexts) {
+            const suspiciousNote = p.genuinelySuspicious > 0
+                ? ` (${p.genuinelySuspicious} of these failed WITH the context already active - may be a real break, not just missing navigation)`
+                : "";
+            const line = this._el("div", { marginBottom: "2px" },
+                `${p.context} - affects ${p.affectedCheckCount} check(s): ${p.checks.map(c => c.label).join(", ")}${suspiciousNote}`);
+            if (p.genuinelySuspicious > 0) line.style.color = this._statusColor("not_resolved");
+            ctxBox.appendChild(line);
+        }
+        return ctxBox;
+    }
+
+    _buildFindResultBlock(result) {
+        const box = this._el("div", {
+            padding: "10px 12px", marginBottom: "10px", borderRadius: "6px",
+            background: "var(--background-modifier-accent)", fontSize: "12px"
+        });
+        box.appendChild(this._el("div", { fontWeight: "600", marginBottom: "4px" },
+            `${result.candidatesFound} unresolved module(s) likely match a pending check (read-only - none executed):`));
+        box.appendChild(this._el("div", { opacity: "0.7", marginBottom: "6px" },
+            "Open the Discord screen where the matching feature lives, then re-run the compatibility check - that lets the module load normally instead of being forced."));
+
+        for (const c of result.candidates.slice(0, 20)) {
+            const checksTxt = Array.isArray(c.matchedChecks) && c.matchedChecks.length > 0
+                ? c.matchedChecks.map(mc => `${mc.label} (${mc.hitCount}/${mc.needed})`).join("; ")
+                : (c.matchedTerms || []).join(", ");
+            box.appendChild(this._el("div", { marginBottom: "2px", fontFamily: "monospace" }, `#${c.id} - matches: ${checksTxt}`));
+        }
+        if (result.candidates.length > 20) {
+            box.appendChild(this._el("div", { opacity: "0.6", marginTop: "4px" },
+                `...and ${result.candidates.length - 20} more (export the full snapshot to see all).`));
+        }
+        return box;
+    }
+
+    _buildChecksTab(snapshot) {
+        const wrap = this._el("div");
+        const compatEntity = snapshot?.entities?.find(e => e.type === "compatibility");
+        if (!compatEntity) {
+            wrap.appendChild(this._el("div", { opacity: "0.7", padding: "20px 0", textAlign: "center" }, "No compatibility data in this snapshot. Run a scan."));
+            return wrap;
+        }
+
+        const { summaryByPlugin, summaryByPluginContextAware, checks } = compatEntity.data;
+        const effectiveSummaryByPlugin = summaryByPluginContextAware || summaryByPlugin;
+
+        for (const [plugin, counts] of Object.entries(effectiveSummaryByPlugin || {})) {
+            wrap.appendChild(this._buildPluginChecksSection(plugin, counts, checks));
+        }
+        return wrap;
+    }
+
+    _buildPluginChecksSection(plugin, counts, checks) {
+        const section = this._el("div", { marginBottom: "14px" });
+
+        const brokenTotal = (counts.not_resolved || 0) + (counts.fallback_broken || 0);
+        const warnTotal = (counts.fallback_renamed || 0) + (counts.plausible || 0);
+        const unverifiedTotal = counts.cannot_verify || 0;
+        const contextSkippedTotal = counts.context_not_active || 0;
+
+        const pluginChecks = (checks || []).filter(c => c.plugin === plugin);
+        const plausibleChecks = pluginChecks.filter(c => c.status === "plausible");
+        const likelyTruncationCount = plausibleChecks.filter(c => c.investigation?.verdict === "likely_truncation").length;
+        const allWarningsAreLikelyTruncation = warnTotal > 0
+            && (counts.fallback_renamed || 0) === 0
+            && plausibleChecks.length === (counts.plausible || 0)
+            && likelyTruncationCount === plausibleChecks.length;
+
+        const contextSkippedSuffix = contextSkippedTotal > 0 ? ` (+${contextSkippedTotal} skipped, context not active)` : "";
+        const headerText = brokenTotal > 0
+            ? `${plugin} - ${brokenTotal} check(s) BROKEN${contextSkippedSuffix}`
+            : warnTotal > 0
+                ? allWarningsAreLikelyTruncation
+                    ? `${plugin} - ${warnTotal} check(s) show a partial match, likely just truncated snippets (low priority)${contextSkippedSuffix}`
+                    : `${plugin} - ${warnTotal} check(s) need attention${contextSkippedSuffix}`
+                : unverifiedTotal > 0
+                    ? `${plugin} - ${counts.resolved} of ${counts.total} checks resolved (${unverifiedTotal} inconclusive - see cannot_verify below)${contextSkippedSuffix}`
+                    : `${plugin} - all ${counts.total} checks resolved${contextSkippedSuffix}`;
+        const headerColor = brokenTotal > 0 ? this._statusColor("not_resolved")
+            : warnTotal > 0 ? (allWarningsAreLikelyTruncation ? "var(--text-muted, #949ba4)" : this._statusColor("plausible"))
+            : unverifiedTotal > 0 ? this._statusColor("cannot_verify")
+            : this._statusColor("resolved");
+        section.appendChild(this._el("div", { fontWeight: "700", fontSize: "13px", marginBottom: "8px", color: headerColor }, headerText));
+
+        const groups = { broken: [], warning: [], cannot_verify: [], resolved: [] };
+        for (const check of pluginChecks) {
+            groups[this._groupKeyForStatus(check.status)].push(check);
+        }
+
+        const groupOrder = ["broken", "warning", "cannot_verify", "resolved"];
+        for (const groupKey of groupOrder) {
+            const items = groups[groupKey];
+            if (items.length === 0) continue;
+            section.appendChild(this._buildStatusGroup(groupKey, items));
+        }
+
+        return section;
+    }
+
+    _buildStatusGroup(groupKey, items) {
+        const meta = this._statusGroupMeta(groupKey);
+        const openByDefault = groupKey !== "resolved";
+
+        const details = this._el("details", { marginBottom: "6px" });
+        if (openByDefault) details.open = true;
+
+        const summary = this._el("summary", {
+            cursor: "pointer", fontWeight: "600", fontSize: "12px",
+            padding: "6px 8px", borderRadius: "4px",
+            background: "var(--background-secondary)",
+            color: meta.color, listStyle: "none", display: "flex", alignItems: "center", gap: "6px"
+        });
+        summary.appendChild(document.createTextNode(`${meta.icon} ${meta.label}`));
+        summary.appendChild(this._badge(String(items.length), meta.color));
+        details.appendChild(summary);
+
+        const list = this._el("div", { marginTop: "6px", paddingLeft: "4px" });
+        const priority = { not_resolved: 0, fallback_broken: 1, fallback_renamed: 2, plausible: 3, cannot_verify: 4, resolved: 5 };
+        const sorted = [...items].sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9));
+        for (const check of sorted) {
+            list.appendChild(this._buildCheckRow(check));
+        }
+        details.appendChild(list);
+        return details;
+    }
+
+    _buildCheckRow(check) {
+        const row = this._el("div", {
+            padding: "6px 8px",
+            borderLeft: `3px solid ${this._statusColor(check.status)}`,
+            marginBottom: "4px",
+            background: "var(--background-secondary)",
+            fontSize: "12px"
+        });
+
+        row.appendChild(this._el("div", { fontWeight: "600" }, `[${check.status}] ${check.plugin}: ${check.label}`));
+
+        const hist = this._summarizeCheckHistory(check.label, check.plugin);
+        if (hist.scansObserved >= 2) {
+            const histLine = this._el("div", { fontSize: "11px", marginTop: "2px", opacity: "0.75" });
+            const parts = [];
+            if (hist.unhealthyCount > 0) {
+                histLine.style.opacity = "1";
+                histLine.style.color = this._statusColor("plausible");
+                parts.push(`unhealthy in ${hist.unhealthyCount} of the last ${hist.scansObserved} observed scan(s)`);
+            } else {
+                parts.push(`healthy in all ${hist.scansObserved} of the last observed scans`);
+            }
+            if (hist.matchedViaDrift) {
+                histLine.style.opacity = "1";
+                histLine.style.color = this._statusColor("plausible");
+                parts.push(`resolved via ${hist.distinctMatchedVia.length} different matches recently (possible drift)`);
+            }
+            histLine.textContent = `History: ${parts.join(" - ")}.`;
+            row.appendChild(histLine);
+        }
+
+        if (check.investigation?.verdict && check.investigation.verdict !== "unknown") {
+            row.appendChild(this._buildVerdictTag(check.investigation.verdict));
+        }
+
+        if (check.note) {
+            row.appendChild(this._el("div", { opacity: "0.75", marginTop: "2px" }, check.note));
+        }
+
+        if (check.requiresContext) {
+            row.appendChild(this._el("div", { opacity: "0.6", marginTop: "2px", fontStyle: "italic" }, `requires context: ${check.requiresContext}`));
+        }
+
+        if (check.investigation) {
+            row.appendChild(this._buildInvestigationDetails(check));
+        }
+
+        return row;
+    }
+
+    _buildVerdictTag(verdict) {
+        const tag = this._el("div", {
+            marginTop: "3px", display: "inline-block", padding: "2px 6px",
+            borderRadius: "3px", fontSize: "11px", fontWeight: "600"
+        });
+        if (verdict === "likely_discord_change") {
+            tag.style.background = "rgba(237, 66, 69, 0.15)";
+            tag.style.color = this._statusColor("not_resolved");
+            tag.textContent = "\u26A0 Likely Discord update broke this";
+        } else if (verdict === "likely_truncation") {
+            tag.style.background = "rgba(148, 155, 164, 0.15)";
+            tag.style.color = "var(--text-muted, #949ba4)";
+            tag.textContent = "\u2702\uFE0F Likely just a truncated snippet";
+        } else if (verdict === "likely_real_partial_match") {
+            tag.style.background = "rgba(250, 166, 26, 0.15)";
+            tag.style.color = this._statusColor("plausible");
+            tag.textContent = "\uD83D\uDD0D Partial match against full source - worth a look";
+        } else {
+            tag.style.background = "rgba(250, 166, 26, 0.15)";
+            tag.style.color = this._statusColor("plausible");
+            tag.textContent = "\uD83D\uDD27 Likely a ByeBlocked-side bug";
+        }
+        return tag;
+    }
+
+    _buildInvestigationDetails(check) {
+        const details = this._el("details", { marginTop: "4px" });
+
+        const summaryRow = this._el("summary", {
+            cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px"
+        });
+        summaryRow.appendChild(this._el("span", { color: "var(--text-link, #949cf7)" }, "Investigation details"));
+
+        const copyBtn = this._el("button", {
+            fontSize: "11px", padding: "2px 8px", borderRadius: "3px",
+            border: "1px solid var(--background-modifier-accent, #4a4a4a)",
+            background: "var(--background-secondary, #2b2d31)", color: "var(--text-normal)", cursor: "pointer"
+        }, "\uD83D\uDCCB Copy");
+        copyBtn.type = "button";
+        copyBtn.onclick = (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const payload = {
+                plugin: check.plugin, label: check.label, status: check.status,
+                verdict: check.investigation?.verdict, note: check.note, investigation: check.investigation
+            };
+            let text;
+            try { text = JSON.stringify(payload, null, 2); } catch (_) { text = "(could not serialize investigation data)"; }
+            this._copyToClipboard(text, copyBtn, "\uD83D\uDCCB Copy");
+        };
+        summaryRow.appendChild(copyBtn);
+        details.appendChild(summaryRow);
+
+        const topBroadCandidate = check.investigation?.broadScan?.candidates?.[0];
+        if (topBroadCandidate && topBroadCandidate.storeName) {
+            const replaceBtn = this._el("button", {
+                marginLeft: "6px", fontSize: "11px", padding: "2px 6px", cursor: "pointer"
+            }, `\uD83D\uDCCB Copy replacement: "${topBroadCandidate.storeName}"`);
+            replaceBtn.title = topBroadCandidate.methodsExpectedCount > 0
+                ? `${topBroadCandidate.methodHitCount}/${topBroadCandidate.methodsExpectedCount} expected methods matched. Copies just the name string, ready to add to this check's candidates array.`
+                : `Name-similarity match only (no expectedMethods declared for this check) - verify manually. Copies just the name string.`;
+            replaceBtn.onclick = () => this._copyToClipboard(topBroadCandidate.replacementSnippet, replaceBtn, replaceBtn.textContent);
+            summaryRow.appendChild(replaceBtn);
+        }
+
+        const topStructuralFinding = (check.investigation?.perKeyFindings || []).find(f => f.replacementSnippet);
+        if (topStructuralFinding) {
+            const bestGuess = topStructuralFinding.renameCandidates[0];
+            const structBtn = this._el("button", {
+                marginLeft: "6px", fontSize: "11px", padding: "2px 6px", cursor: "pointer"
+            }, `\uD83D\uDCCB Copy updated ${topStructuralFinding.missingKeyField}: "${bestGuess.key}"`);
+            structBtn.title = `Name-similarity guess only (distance ${bestGuess.distance} from "${topStructuralFinding.missingKey}") - the old key's behavior couldn't be compared since it's gone this session. Copies a ready-to-paste ${topStructuralFinding.missingKeyField} array with "${topStructuralFinding.missingKey}" replaced by "${bestGuess.key}". Verify this key actually behaves the same before using it.`;
+            structBtn.onclick = () => this._copyToClipboard(topStructuralFinding.replacementSnippet, structBtn, structBtn.textContent);
+            summaryRow.appendChild(structBtn);
+        }
+
+        details.appendChild(this._el("div", { marginTop: "4px", opacity: "0.85" }, check.investigation.summary || ""));
+
+        const pre = this._el("pre", {
+            whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "11px", marginTop: "4px",
+            padding: "6px", background: "var(--background-tertiary, rgba(0,0,0,0.15))",
+            borderRadius: "3px", maxHeight: "260px", overflow: "auto"
+        });
+        try { pre.textContent = JSON.stringify(check.investigation, null, 2); } catch (_) { pre.textContent = "(could not serialize investigation data)"; }
+        details.appendChild(pre);
+
+        return details;
+    }
+
+    _buildWatchTab() {
+        const wrap = this._el("div");
+
+        const statusBox = this._el("div", {
+            padding: "10px 12px", marginBottom: "12px", borderRadius: "6px",
+            background: "var(--background-secondary)", fontSize: "12px"
+        });
+        if (this.isWatchModeActive()) {
+            const seen = [...this._watchSeenContexts];
+            const elapsed = this._watchStartedAt ? Math.round((Date.now() - this._watchStartedAt) / 1000) : 0;
+            statusBox.appendChild(this._el("div", { fontWeight: "600", color: this._statusColor("resolved"), marginBottom: "4px" },
+                `\uD83D\uDC41 Watching (${elapsed}s)`));
+            statusBox.appendChild(this._el("div", { opacity: "0.75" },
+                `Screens seen this session: ${seen.length > 0 ? seen.join(", ") : "none yet"}. Re-checks automatically when a new one opens, and also scans for missing modules automatically.`));
+        } else {
+            statusBox.appendChild(this._el("div", { fontWeight: "600", opacity: "0.7" }, "\u23F9 Not watching"));
+            statusBox.appendChild(this._el("div", { opacity: "0.6", marginTop: "4px" },
+                "Start watching to have Probe quietly track which Discord screens you visit and re-run checks automatically."));
+        }
+        wrap.appendChild(statusBox);
+
+        const summaryBlock = this._buildWatchSessionSummaryBlock();
+        if (summaryBlock) {
+            wrap.appendChild(summaryBlock);
+        } else {
+            wrap.appendChild(this._el("div", { opacity: "0.55", fontSize: "12px", padding: "6px 2px" },
+                "No changes recorded yet this session."));
+        }
+
+        return wrap;
+    }
+
+    _buildWatchSessionSummaryBlock() {
+        const entries = this._watchSessionChanges;
+        if (!entries || entries.length === 0) return null;
+
+        const box = this._el("div", {
+            padding: "10px 12px", marginBottom: "10px", borderRadius: "6px",
+            border: "1px solid var(--background-modifier-accent)",
+            background: "var(--background-secondary)", fontSize: "12px"
+        });
+
+        const isActive = this.isWatchModeActive();
+        const totalChanges = entries.reduce((sum, e) =>
+            sum + e.changedChecks.length + e.matchedViaDrifts.length + e.missingStores.length + e.newStores.length, 0);
+        box.appendChild(this._el("div", { fontWeight: "600", marginBottom: "6px" }, isActive
+            ? `\uD83D\uDCCB Watch session so far: ${totalChanges} change(s) found across ${entries.length} scan(s)`
+            : `\uD83D\uDCCB Watch session summary (ended ${this._watchSessionEndedAt ? new Date(this._watchSessionEndedAt).toLocaleTimeString("en-US") : ""}): ${totalChanges} change(s) found across ${entries.length} scan(s)`));
+
+        for (const entry of entries) {
+            box.appendChild(this._el("div", { opacity: "0.7", marginTop: "6px" },
+                `\u2192 triggered by opening: ${entry.triggeredByContexts.join(", ")} (${new Date(entry.at).toLocaleTimeString("en-US")})`));
+
+            for (const c of entry.changedChecks) {
+                box.appendChild(this._el("div", { color: this._statusColor(c.after), marginLeft: "10px" },
+                    `${c.plugin}: ${c.label} - ${c.before} \u2192 ${c.after}`));
+            }
+            const fmtMatchedVia = (v) => Array.isArray(v) ? `[${v.join(", ")}]` : String(v);
+            for (const d of entry.matchedViaDrifts) {
+                let line;
+                if (d.sourceHashComparable && d.likelyRenumberedOnly) {
+                    line = this._el("div", { color: "var(--text-muted)", marginLeft: "10px" },
+                        `${d.plugin}: ${d.label} - matched a different module id (likely just renumbered).`);
+                } else if (d.sourceHashComparable) {
+                    line = this._el("div", { color: this._statusColor("not_resolved"), marginLeft: "10px" },
+                        `${d.plugin}: ${d.label} - resolved via different match AND different source content (${fmtMatchedVia(d.before)} \u2192 ${fmtMatchedVia(d.after)}). Worth reviewing.`);
+                } else {
+                    line = this._el("div", { color: this._statusColor("plausible"), marginLeft: "10px" },
+                        `${d.plugin}: ${d.label} - resolved via a different match than before. Possible early sign of an in-progress rename.`);
+                }
+                box.appendChild(line);
+            }
+            if (entry.missingStores.length > 0) {
+                box.appendChild(this._el("div", { color: this._statusColor("not_resolved"), marginLeft: "10px" },
+                    `Store(s) no longer found: ${entry.missingStores.join(", ")}`));
+            }
+            if (entry.newStores.length > 0) {
+                box.appendChild(this._el("div", { opacity: "0.8", marginLeft: "10px" },
+                    `New store(s) resolved: ${entry.newStores.join(", ")}`));
+            }
+        }
+
+        return box;
+    }
+
+    _buildInvestigationTab(snapshot) {
+        const wrap = this._el("div");
+        const compatEntity = snapshot?.entities?.find(e => e.type === "compatibility");
+        if (!compatEntity) {
+            wrap.appendChild(this._el("div", { opacity: "0.7", padding: "20px 0", textAlign: "center" }, "No compatibility data in this snapshot. Run a scan."));
+            return wrap;
+        }
+
+        const checks = compatEntity.data.checks || [];
+        const flagged = checks.filter(c => c.status !== "resolved" && c.investigation);
+
+        if (flagged.length === 0) {
+            wrap.appendChild(this._el("div", { opacity: "0.6", padding: "20px 0", textAlign: "center" },
+                "Nothing needs investigation right now - every non-resolved check either has no investigation data or everything is passing."));
+            return wrap;
+        }
+
+        wrap.appendChild(this._el("div", { opacity: "0.7", fontSize: "12px", marginBottom: "10px" },
+            `${flagged.length} check(s) with investigation data, sorted by severity:`));
+
+        const priority = { not_resolved: 0, fallback_broken: 1, fallback_renamed: 2, plausible: 3, cannot_verify: 4 };
+        const sorted = [...flagged].sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9));
+        for (const check of sorted) {
+            wrap.appendChild(this._buildCheckRow(check));
+        }
+
+        return wrap;
+    }
+
+    _buildTabBar(tabs, activeKey, onSelect) {
+        const bar = this._el("div", {
+            display: "flex", gap: "4px", marginBottom: "12px",
+            borderBottom: "1px solid var(--background-modifier-accent)"
+        });
+        for (const tab of tabs) {
+            const isActive = tab.key === activeKey;
+            const btn = this._el("button", {
+                padding: "7px 12px",
+                border: "none",
+                borderBottom: isActive ? "2px solid var(--brand-experiment, #5865f2)" : "2px solid transparent",
+                background: "transparent",
+                color: isActive ? "var(--text-normal)" : "var(--text-muted, #949ba4)",
+                fontWeight: isActive ? "600" : "500",
+                fontSize: "13px",
+                cursor: "pointer"
+            });
+            btn.type = "button";
+            btn.textContent = tab.badge ? `${tab.label} (${tab.badge})` : tab.label;
+            btn.onclick = () => onSelect(tab.key);
+            bar.appendChild(btn);
+        }
+        return bar;
+    }
+
+    getSettingsPanel() {
+        const panel = this._el("div", { padding: "12px", color: "var(--text-normal)" });
+
         const liveVersion = (() => {
             try { return BdApi.Plugins.get("Probe")?.version || null; } catch (_) { return null; }
         })();
-        title.textContent = liveVersion ? `Probe v${liveVersion}` : "Probe";
-        title.style.marginBottom = "4px";
+        const title = this._el("h3", { marginBottom: "2px" }, liveVersion ? `Probe v${liveVersion}` : "Probe");
         panel.appendChild(title);
+        panel.appendChild(this._el("p", { fontSize: "12px", opacity: "0.7", marginBottom: "12px", marginTop: "0" },
+            "Compatibility check for ByeBlocked"));
 
-        const desc = document.createElement("p");
-        desc.textContent = "Compatibility check for ByeBlocked";
-        desc.style.fontSize = "12px";
-        desc.style.opacity = "0.7";
-        desc.style.marginBottom = "12px";
-        panel.appendChild(desc);
+        const btnRow = this._el("div", { display: "flex", gap: "8px", marginBottom: "8px", flexWrap: "wrap" });
 
-        const btnRow = document.createElement("div");
-        btnRow.style.display = "flex";
-        btnRow.style.gap = "8px";
-        btnRow.style.marginBottom = "12px";
-
-        const scanBtn = document.createElement("button");
-        scanBtn.textContent = "Run compatibility check";
+        const scanBtn = this._el("button", {}, "Run compatibility check");
         this._styleButton(scanBtn, "primary");
         btnRow.appendChild(scanBtn);
 
-        const findBtn = document.createElement("button");
-        findBtn.textContent = "🔍 Find missing modules";
+        const findBtn = this._el("button", {}, "\uD83D\uDD0D Find missing modules");
         this._styleButton(findBtn, "secondary");
         findBtn.title = "Searches Discord's not-yet-loaded modules for the ones ByeBlocked's pending checks need, and executes only the likely matches (capped per run) instead of requiring you to navigate to that screen manually.";
         btnRow.appendChild(findBtn);
 
-        const exportBtn = document.createElement("button");
-        exportBtn.textContent = "Export .json";
+        const watchBtn = this._el("button", {});
+        this._styleButton(watchBtn, "secondary");
+        watchBtn.title = "While active, quietly watches which screens you visit (voice call, video/screen share, Activity/Watch-Together, Stage, member list, forum channel) and re-runs the compatibility check by itself the first time a screen you haven't visited this session opens. Also automatically scans for missing modules already present in the downloaded bundle (same as clicking \"Find missing modules\"), so some cannot_verify checks may resolve without navigating anywhere. No toasts - just check back on this panel whenever you like. Starts automatically when the plugin loads, so you don't have to remember to click it; stops automatically if you close Discord or disable the plugin, and you can still stop/restart it manually here anytime.";
+        btnRow.appendChild(watchBtn);
+
+        const exportBtn = this._el("button", {}, "Export .json");
         this._styleButton(exportBtn, "secondary");
         exportBtn.onclick = () => this.exportSnapshotAsFile(this._panelSnapshot);
         btnRow.appendChild(exportBtn);
 
-        const copyAllBtn = document.createElement("button");
-        copyAllBtn.textContent = "📋 Copy report";
+        const copyAllBtn = this._el("button", {}, "\uD83D\uDCCB Copy report");
         this._styleButton(copyAllBtn, "secondary");
         copyAllBtn.onclick = () => {
             const snapshot = this._panelSnapshot;
             if (!snapshot) return;
             let text;
-            try {
-                text = JSON.stringify(snapshot, null, 2);
-            } catch (_) {
-                text = "(could not serialize snapshot)";
-            }
-            const restore = () => { copyAllBtn.textContent = "📋 Copy report"; };
-            const ok = () => { copyAllBtn.textContent = "✅ Copied!"; setTimeout(restore, 1500); };
-            const fail = () => { copyAllBtn.textContent = "⚠ Copy failed"; setTimeout(restore, 1500); };
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(text).then(ok).catch(fail);
-            } else {
-                try {
-                    const ta = document.createElement("textarea");
-                    ta.value = text;
-                    ta.style.position = "fixed";
-                    ta.style.opacity = "0";
-                    document.body.appendChild(ta);
-                    ta.select();
-                    document.execCommand("copy");
-                    document.body.removeChild(ta);
-                    ok();
-                } catch (_) {
-                    fail();
-                }
-            }
+            try { text = JSON.stringify(snapshot, null, 2); } catch (_) { text = "(could not serialize snapshot)"; }
+            this._copyToClipboard(text, copyAllBtn, "\uD83D\uDCCB Copy report");
         };
         btnRow.appendChild(copyAllBtn);
 
         panel.appendChild(btnRow);
 
-        const metaEl = document.createElement("div");
-        metaEl.style.fontSize = "11px";
-        metaEl.style.opacity = "0.6";
-        metaEl.style.marginBottom = "10px";
+        const metaEl = this._el("div", { fontSize: "11px", opacity: "0.6", marginBottom: "12px" });
         panel.appendChild(metaEl);
 
-        const contentEl = document.createElement("div");
+        const tabBarSlot = this._el("div");
+        panel.appendChild(tabBarSlot);
+
+        const contentEl = this._el("div");
         panel.appendChild(contentEl);
+
+        if (!this._activeTab) this._activeTab = "overview";
 
         const render = () => {
             this._panelSnapshot = this.lastSnapshot || this.loadLastSnapshot();
             metaEl.textContent = this._panelSnapshot
-                ? `Captured at: ${new Date(this._panelSnapshot.capturedAt).toLocaleString("en-US")} — build: ${this._panelSnapshot.discordBuildNumber || "unknown"}`
+                ? `Captured at: ${new Date(this._panelSnapshot.capturedAt).toLocaleString("en-US")} - build: ${this._panelSnapshot.discordBuildNumber || "unknown"}`
                 : "No scan yet.";
+
+            const stats = this._panelSnapshot ? this._computeOverallStats(this._panelSnapshot) : null;
+            const watchBadge = this._watchSessionChanges && this._watchSessionChanges.length > 0
+                ? this._watchSessionChanges.reduce((sum, e) => sum + e.changedChecks.length + e.matchedViaDrifts.length + e.missingStores.length + e.newStores.length, 0)
+                : null;
+            const investigationCount = this._panelSnapshot?.entities?.find(e => e.type === "compatibility")?.data?.checks
+                ?.filter(c => c.status !== "resolved" && c.investigation)?.length || null;
+
+            const tabs = [
+                { key: "overview", label: "Overview", badge: stats && (stats.failed + stats.warnings) > 0 ? stats.failed + stats.warnings : null },
+                { key: "checks", label: "Checks", badge: stats ? `${stats.resolved}/${stats.total}` : null },
+                { key: "watch", label: "Watch", badge: this.isWatchModeActive() ? "\u25CF" : watchBadge },
+                { key: "investigation", label: "Investigation", badge: investigationCount || null }
+            ];
+
+            tabBarSlot.innerHTML = "";
+            tabBarSlot.appendChild(this._buildTabBar(tabs, this._activeTab, (key) => {
+                this._activeTab = key;
+                render();
+            }));
+
             contentEl.innerHTML = "";
-            if (this._lastFindResult && this._lastFindResult.candidatesFound > 0) {
-                contentEl.appendChild(this._buildFindResultBlock(this._lastFindResult));
+            if (this._activeTab === "overview") contentEl.appendChild(this._buildOverviewTab(this._panelSnapshot));
+            else if (this._activeTab === "checks") contentEl.appendChild(this._buildChecksTab(this._panelSnapshot));
+            else if (this._activeTab === "watch") contentEl.appendChild(this._buildWatchTab());
+            else if (this._activeTab === "investigation") contentEl.appendChild(this._buildInvestigationTab(this._panelSnapshot));
+        };
+
+        const updateWatchBtnLabel = () => {
+            if (this.isWatchModeActive()) {
+                watchBtn.textContent = "\u23F9 Stop watching";
+            } else {
+                watchBtn.textContent = "\uD83D\uDC41 Start watching";
             }
-            contentEl.appendChild(this._buildChecksList(this._panelSnapshot));
+            watchBtn.style.opacity = "1";
+        };
+
+        watchBtn.onclick = () => {
+            if (this.isWatchModeActive()) {
+                this.stopWatchMode();
+            } else {
+                this.startWatchMode(() => { render(); updateWatchBtnLabel(); });
+            }
+            updateWatchBtnLabel();
+            render();
         };
 
         scanBtn.onclick = async () => {
@@ -2737,7 +3520,7 @@ class class_Probe {
 
         findBtn.onclick = async () => {
             findBtn.disabled = true;
-            const originalLabel = "🔍 Find missing modules";
+            const originalLabel = "\uD83D\uDD0D Find missing modules";
             findBtn.textContent = "Searching...";
             findBtn.style.opacity = "0.6";
             try {
@@ -2745,12 +3528,12 @@ class class_Probe {
                 this._lastFindResult = result;
                 if (result.candidatesFound === 0) {
                     BdApi.UI.showToast(
-                        "No unresolved module looks like a match for the pending checks — they likely need a different Discord screen open (e.g. a voice call, a DM) to load at all. Navigate there, then re-run the compatibility check.",
+                        "No unresolved module looks like a match for the pending checks - they likely need a different Discord screen open (e.g. a voice call, a DM) to load at all. Navigate there, then re-run the compatibility check.",
                         { type: "warn" }
                     );
                 } else {
                     BdApi.UI.showToast(
-                        `Found ${result.candidatesFound} candidate module(s) that mention the pending checks' terms — see the list below. This is read-only (nothing was executed); open the matching screen in Discord, then re-run the compatibility check to confirm.`,
+                        `Found ${result.candidatesFound} candidate module(s) that mention the pending checks' terms - see the Overview tab. This is read-only (nothing was executed); open the matching screen in Discord, then re-run the compatibility check to confirm.`,
                         { type: "info" }
                     );
                 }
@@ -2764,6 +3547,10 @@ class class_Probe {
             render();
         };
 
+        if (this.isWatchModeActive()) {
+            this._watchOnUpdate = () => { render(); updateWatchBtnLabel(); };
+        }
+        updateWatchBtnLabel();
         render();
         return panel;
     }
