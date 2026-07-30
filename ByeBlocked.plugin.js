@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.4.11
+ * @version 2.5.0
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -13,12 +13,24 @@ class ProbeScannerBridge {
         this.consumerPluginName = options.consumerPluginName || "ByeBlocked";
         this._cachedSnapshot = null;
         this._cachedAt = 0;
+        this._cachedBuildNumber = null;
         this._maxAgeMs = options.maxAgeMs ?? 5 * 60 * 1000;
+    }
+
+    _currentBuildNumber() {
+        try {
+            return (window?.GLOBAL_ENV?.RELEASE_CHANNEL && window?.GLOBAL_ENV?.BUILD_NUMBER)
+                ? `${window.GLOBAL_ENV.RELEASE_CHANNEL}-${window.GLOBAL_ENV.BUILD_NUMBER}`
+                : null;
+        } catch (_) { return null; }
     }
 
     _getSnapshot() {
         const now = Date.now();
-        if (this._cachedSnapshot && (now - this._cachedAt) < this._maxAgeMs) {
+        const currentBuildNumber = this._currentBuildNumber();
+        const buildChanged = this._cachedBuildNumber && currentBuildNumber
+            && this._cachedBuildNumber !== currentBuildNumber;
+        if (this._cachedSnapshot && !buildChanged && (now - this._cachedAt) < this._maxAgeMs) {
             return this._cachedSnapshot;
         }
         try {
@@ -26,6 +38,7 @@ class ProbeScannerBridge {
             if (!snapshot || !Array.isArray(snapshot.entities)) return null;
             this._cachedSnapshot = snapshot;
             this._cachedAt = now;
+            this._cachedBuildNumber = snapshot.discordBuildNumber || currentBuildNumber || null;
             return snapshot;
         } catch (_) {
             return null;
@@ -54,12 +67,64 @@ class ProbeScannerBridge {
         return { found: false, matchedName: null, confidence: null, stability: null, discoveredVia: null };
     }
 
+    getModuleHint(kind, label) {
+        const issue = this.getCompatibilityIssues().find(c => c.kind === kind && c.label === label);
+        if (!issue) return null;
+        return {
+            found: issue.status === "resolved",
+            status: issue.status,
+            matchedVia: issue.matchedVia ?? null,
+            confidence: issue.confidence ?? null,
+            note: issue.note || null
+        };
+    }
+
     getCompatibilityIssues() {
         const snapshot = this._getSnapshot();
         if (!snapshot) return [];
         const report = snapshot.entities.find(e => e.type === "compatibility" && e.id === "compatibility:report");
         if (!report || !Array.isArray(report.data?.checks)) return [];
         return report.data.checks.filter(c => c.plugin === this.consumerPluginName);
+    }
+
+    getReplacementFor(label) {
+        const issue = this.getCompatibilityIssues().find(c => c.label === label);
+        if (!issue || issue.status !== "resolved" || !issue.matchedVia) return null;
+
+        const base = {
+            label,
+            kind: issue.kind,
+            matchedVia: issue.matchedVia,
+            confidence: issue.confidence ?? null,
+            note: issue.note || null,
+            resolvedModule: null
+        };
+
+        if (issue.kind === "storeName") {
+            const storeName = String(issue.matchedVia).replace(/\s*\([^)]*\)\s*$/, "").trim();
+            try {
+                if (typeof BdApi !== "undefined" && BdApi.Webpack && typeof BdApi.Webpack.getStore === "function") {
+                    base.resolvedModule = BdApi.Webpack.getStore(storeName) || null;
+                }
+            } catch (_) {}
+            return base;
+        }
+
+        if (issue.kind === "sourceString" || issue.kind === "structuralModule") {
+            const ids = Array.isArray(issue.matchedVia) ? issue.matchedVia : [issue.matchedVia];
+            for (const id of ids) {
+                if (typeof id !== "string" && typeof id !== "number") continue;
+                try {
+                    if (typeof BdApi.Webpack.getModule === "function") {
+                        const m = BdApi.Webpack.getModule(() => true, { id, defaultExport: false });
+                        if (m) { base.resolvedModule = m; return base; }
+                    }
+                } catch (_) {}
+            }
+            return base;
+        }
+
+        return base;
     }
 
     getConfirmedBreaks() {
@@ -82,13 +147,31 @@ class ModuleResolver {
     constructor(options = {}) {
         this._cache = {};
         this.bridge = options.bridge || null;
+        this._usedProbeHints = new Set();
+    }
+    _recordHintUsed(label) {
+        if (label) this._usedProbeHints.add(label);
+    }
+    getUsedProbeHints() {
+        return [...this._usedProbeHints];
+    }
+    _resolveModuleId(id) {
+        if (id == null) return null;
+        try { if (typeof BdApi.Webpack.getModule === "function") {
+            const m = BdApi.Webpack.getModule(m => true, { id, defaultExport: false });
+            if (m) return m;
+        } } catch (_) {}
+        try { if (BdApi.Webpack.require && BdApi.Webpack.require.c && BdApi.Webpack.require.c[id]) {
+            return BdApi.Webpack.require.c[id].exports;
+        } } catch (_) {}
+        return null;
     }
     getStore(...names) {
         for (const n of names) { try { const s = BdApi.Webpack.getStore(n); if (s) return s; } catch (_) {} }
         if (this.bridge && this.bridge.isAvailable()) {
             const hint = this.bridge.getStoreHint(...names);
             if (hint && hint.found && hint.matchedName && !names.includes(hint.matchedName)) {
-                try { const s = BdApi.Webpack.getStore(hint.matchedName); if (s) return s; } catch (_) {}
+                try { const s = BdApi.Webpack.getStore(hint.matchedName); if (s) { this._recordHintUsed(names[0]); return s; } } catch (_) {}
             }
         }
         return this._byHeuristic(names[0]);
@@ -117,13 +200,45 @@ class ModuleResolver {
         } catch (_) {}
         return null;
     }
-    get(f, o) { try { return BdApi.Webpack.getModule(f, o); } catch (_) { return null; } }
-    getBySource(s, o) { try { return BdApi.Webpack.getBySource(s, o); } catch (_) { return null; } }
-    getWithKey(f) { try { return BdApi.Webpack.getWithKey(f); } catch (_) { return null; } }
+    get(f, o, label) {
+        try { const m = BdApi.Webpack.getModule(f, o); if (m) return m; } catch (_) {}
+        if (label) return this._tryBridgeModuleHint("structuralModule", label) ?? this._tryBridgeModuleHint("sourceString", label);
+        return null;
+    }
+    getBySource(s, o, label) {
+        try { const m = BdApi.Webpack.getBySource(s, o); if (m) return m; } catch (_) {}
+        if (label) return this._tryBridgeModuleHint("sourceString", label);
+        return null;
+    }
+    getWithKey(f, label) {
+        try { const m = BdApi.Webpack.getWithKey(f); if (m) return m; } catch (_) {}
+        if (label) {
+            const m = this._tryBridgeModuleHint("sourceString", label);
+            if (m) return [m, null];
+        }
+        return null;
+    }
     findByKeys(...keys) {
         for (const key of keys) { try { const m = BdApi.Webpack.getByKeys(key); if (m) return m; } catch (_) {} }
         try { const m = this.get(mod => mod && typeof mod === 'object' && keys.every(k => k in mod)); if (m) return m; } catch (_) {}
         try { return BdApi.Webpack.getByKeys(...keys); } catch (_) { return null; }
+    }
+    findByKeysWithHint(label, ...keys) {
+        const m = this.findByKeys(...keys);
+        if (m) return m;
+        if (label) return this._tryBridgeModuleHint("structuralModule", label);
+        return null;
+    }
+    _tryBridgeModuleHint(kind, label) {
+        if (!this.bridge || !this.bridge.isAvailable()) return null;
+        const hint = this.bridge.getModuleHint(kind, label);
+        if (!hint || !hint.found || !hint.matchedVia) return null;
+        const ids = Array.isArray(hint.matchedVia) ? hint.matchedVia : [hint.matchedVia];
+        for (const id of ids) {
+            const mod = this._resolveModuleId(id);
+            if (mod) { this._recordHintUsed(label); return mod; }
+        }
+        return null;
     }
     findFnKey(mod, ...needles) {
         if (!mod || typeof mod !== 'object') return null;
@@ -247,10 +362,14 @@ class HealthMonitor {
                         : null;
                 } catch (_) { return null; }
             })();
+            const usedProbeHintFor = (() => {
+                try { return this.p?._r?.getUsedProbeHints?.() || []; } catch (_) { return []; }
+            })();
             BdApi.Data.save(this._publishSourcePluginName, this._publishKey, {
-                schemaVersion: "0.3.2",
+                schemaVersion: "0.4.0",
                 publishedAt: Date.now(),
                 discordBuildNumber: buildNumber,
+                usedProbeHintFor,
                 checks
             });
         } catch (_) {}
@@ -314,8 +433,63 @@ function _findCloseButton(dialog) {
     } catch (_) {}
 })();
 
+class ScrollManager {
+    constructor() {
+        this._pending = new Map();
+        this._flushScheduled = false;
+    }
+    request(scroller, nextTop, reason = "unknown") {
+        if (!scroller || !scroller.isConnected) return;
+        if (!Number.isFinite(nextTop)) return;
+        const existing = this._pending.get(scroller);
+        if (existing) {
+            existing.nextTop = nextTop;
+            existing.reasons.push(reason);
+        } else {
+            this._pending.set(scroller, { nextTop, reasons: [reason] });
+        }
+        this._scheduleFlush();
+    }
+    requestImmediate(scroller, nextTop, reason = "unknown") {
+        if (!scroller || !scroller.isConnected) return;
+        if (!Number.isFinite(nextTop)) return;
+        try {
+            if (Math.abs(scroller.scrollTop - nextTop) > 0.5) {
+                scroller.scrollTop = nextTop;
+            }
+        } catch (_) {}
+        this._pending.delete(scroller);
+    }
+    _scheduleFlush() {
+        if (this._flushScheduled) return;
+        this._flushScheduled = true;
+        const flush = () => {
+            this._flushScheduled = false;
+            const entries = this._pending;
+            this._pending = new Map();
+            for (const [scroller, { nextTop }] of entries) {
+                try {
+                    if (!scroller.isConnected) continue;
+                    if (Math.abs(scroller.scrollTop - nextTop) > 0.5) {
+                        scroller.scrollTop = nextTop;
+                    }
+                } catch (_) {}
+            }
+        };
+        Promise.resolve().then(flush);
+    }
+    getEffectiveScrollTop(scroller) {
+        const pending = this._pending.get(scroller);
+        if (pending) return pending.nextTop;
+        try { return scroller.scrollTop; } catch (_) { return 0; }
+    }
+    hasPending(scroller) {
+        return this._pending.has(scroller);
+    }
+}
+
 module.exports = class ByeBlocked {
-    static VERSION="2.4.11";
+    static VERSION="2.5.0";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -376,11 +550,11 @@ module.exports = class ByeBlocked {
     static get INVITE_LABELS() {
         return [
             'Invite to Voice',      // en
-            'Convidar para',        // pt (canal de voz / chamada de voz)
-            'Invitar a',            // es (canal de voz)
-            'Invitar al canal',     // es (alt phrasing)
-            'Inviter au',           // fr (salon vocal)
-            'Sprachkanal beitreten',// de (may appear as a variant label)
+            'Convidar para',        // pt
+            'Invitar a',            // es
+            'Invitar al canal',     // es
+            'Inviter au',           // fr
+            'Sprachkanal beitreten',// de
             'In den Sprachkanal',   // de
             'Invita al canale',     // it
             'Uitnodigen voor'       // nl
@@ -416,6 +590,8 @@ module.exports = class ByeBlocked {
             CHANNEL_STATUS_REGEX: /CHANNEL_STATUS|VOICE_STATUS|VOICE_CHANNEL_STATUS/i,
         };
     }
+    static get VOICE_SYNC_STALE_STORE_MAX_RETRIES() { return 12; }
+    static get VOICE_SYNC_STALE_STORE_RETRY_DELAY_MS() { return 1500; }
     static get STORE_NAMES() {
         return {
             RELATIONSHIP: ["RelationshipStore", "RelationshipManagerStore", "RelationshipStoreManager"],
@@ -426,6 +602,65 @@ module.exports = class ByeBlocked {
             STAGE_INSTANCE: ["StageInstanceStore", "StageInstancesStore"],
             ACTIVITY: ["ChannelRTCStore", "ActivityStore", "EmbeddedActivityStore", "ActivityParticipantsStore", "ActivityManagerStore"],
         };
+    }
+    static get DEPENDENCY_MANIFEST() {
+        return [
+            { label: "RelationshipStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.RELATIONSHIP },
+            { label: "GuildMemberStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.GUILD_MEMBER },
+            { label: "ReactionsStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.REACTIONS },
+            { label: "SortedVoiceStateStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.VOICE_STATE, requiresContext: "voiceCall" },
+            { label: "StageChannelParticipantStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.STAGE_PARTICIPANT, requiresContext: "stageChannel" },
+            { label: "StageInstanceStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.STAGE_INSTANCE, requiresContext: "stageChannel" },
+            { label: "ActivityStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.ACTIVITY, requiresContext: "voiceCallWithActivity" },
+
+            { label: "ChannelStore", kind: "storeName", candidates: ["ChannelStore", "ChannelsStore"] },
+            { label: "MessageStore", kind: "storeName", candidates: ["MessageStore", "MessagesStore", "ChannelMessagesStore"] },
+            { label: "UserStore", kind: "storeName", candidates: ["UserStore", "UsersStore", "CurrentUserStore"] },
+            { label: "SelectedGuildStore", kind: "storeName", candidates: ["SelectedGuildStore", "SelectedGuildIdStore"] },
+            { label: "SelectedChannelStore", kind: "storeName", candidates: ["SelectedChannelStore", "ChannelSelectedStore"] },
+            { label: "CallStore", kind: "storeName", candidates: ["CallStore", "VoiceCallStore"], requiresContext: "voiceCall" },
+            { label: "VoiceStateStore", kind: "storeName", candidates: ["VoiceStateStore", "VoiceStatesStore"], requiresContext: "voiceCall" },
+            { label: "MediaEngineStore", kind: "storeName", candidates: ["MediaEngineStore", "MediaEngineManagerStore"], requiresContext: "voiceCallWithVideo" },
+            { label: "ReadStateStore", kind: "storeName", candidates: ["ReadStateStore", "ChannelReadStateStore", "ReadStatesStore"] },
+            { label: "GuildReadStateStore", kind: "storeName", candidates: ["GuildReadStateStore", "GuildUnreadStore", "GuildReadStatesStore"] },
+            { label: "GuildChannelStore", kind: "storeName", candidates: ["GuildChannelStore", "GuildChannelsStore"] },
+            { label: "GuildStore", kind: "storeName", candidates: ["GuildStore", "GuildsStore"] },
+            { label: "PrivateChannelStore", kind: "storeName", candidates: ["PrivateChannelStore", "PrivateChannelsStore"],
+              methodFallback: {
+                  storeCandidates: ["ChannelStore", "ChannelsStore"],
+                  originalMethodNames: ["getPrivateChannelIds", "getMutablePrivateChannels", "getPrivateChannels"],
+                  methodNames: ["getSortedPrivateChannels"]
+              } },
+            { label: "NotificationSettingsStore", kind: "storeName", candidates: ["NotificationSettingsStore", "NotificationStore"] },
+            { label: "ChannelPinsStore", kind: "storeName", candidates: ["ChannelPinsStore", "PinnedMessagesStore"] },
+            { label: "ActiveJoinedThreadsStore", kind: "storeName", candidates: ["ActiveJoinedThreadsStore", "JoinedThreadsStore"] },
+            { label: "ThreadStore", kind: "storeName", candidates: ["ActiveThreadsStore", "ThreadStore", "ForumChannelStore", "GuildThreadStore", "ThreadsStore"] },
+            { label: "GuildScheduledEventStore", kind: "storeName", candidates: ["GuildScheduledEventStore", "ScheduledEventStore", "GuildEventsStore"] },
+            { label: "ChannelStatusStore", kind: "storeName", candidates: ["ChannelStatusStore", "VoiceChannelStatusStore", "ChannelStatusesStore"] },
+
+            { label: "RelationshipUtils", kind: "structuralModule", filter: { keys: ["addRelationship", "removeRelationship"] } },
+            { label: "RTCConnectionUtils", kind: "structuralModule", filter: { keys: ["getChannelId", "getGuildId"], requireFunctions: true }, requiresContext: "voiceCall" },
+            { label: "RTCParticipantsModule", kind: "structuralModule",
+              filter: { keysAny: ["getParticipants", "getVoiceParticipants"], excludeKeys: ["getChannelId"], requireFunctions: true, searchExports: true },
+              requiresContext: "voiceCall" },
+
+            { label: "SoundUtils function", kind: "sourceString", needles: ["disableSounds", "getSoundpack"], minHits: 2,
+              fuzzyFallback: { needles: ["playSound", "playFile"] } },
+            { label: "BlockedMessageGroup render", kind: "sourceString",
+              needles: ["MESSAGE_GROUP_BLOCKED", "blockedMessageGroup", "BlockedMessages", "blockedMessages", "messageGroupSpacing", "isBlockedMessage", "BLOCKED_MESSAGE"],
+              minHits: 2 },
+            { label: "MessagesWrap component", kind: "sourceString", needles: ["MessagesWrap"], minHits: 1 },
+            { label: "InviteQueryModule (queryFriends/queryDMUsers)", kind: "sourceString",
+              needles: ["queryFriends", "queryDMUsers", "friendSuggestions"], minHits: 2 },
+            { label: "Autocomplete row component (patchAutocompleteRowComponent target)", kind: "sourceString",
+              needles: ["autocomplete", "aria-selected", "user", "userId"], minHits: 3 },
+            { label: "Forum post card component (patchForumPostComponent target)", kind: "sourceString",
+              needles: ["mainCard_", "forumPostItem", "ForumPostCard", "forum-channel-list-"], minHits: 2 },
+
+            { label: "Flux Dispatcher", kind: "sourceString", needles: ["dispatch", "subscribe"], minHits: 2,
+              fuzzyFallback: { needles: ["dispatchAction", "connectStore"] },
+              note: "Resolvido via 4 estratégias em cascata em _resolveDispatcher(); este check cobre só 2 delas. fuzzyFallback cobre o layout observado onde o Flux Dispatcher passa por uma camada WASM (fluxapi)." },
+        ];
     }
     static get RELATIONSHIP_METHOD_NAMES() {
         return {
@@ -459,6 +694,7 @@ module.exports = class ByeBlocked {
         this.hiddenParents = new Set;
         this.observer = null;
         this._patchedStoreMethods = new WeakMap();
+        this._scrollManager = new ScrollManager();
         
         this.settings = this.loadSettings();
         
@@ -590,10 +826,11 @@ module.exports = class ByeBlocked {
         } catch (_) {}
         return null;
     }
-    _wpGetModule(f, o) { return this._r ? this._r.get(f, o) : (() => { try { return BdApi.Webpack.getModule(f, o); } catch (_) { return null; } })(); }
-    _wpGetBySource(s, o) { return this._r ? this._r.getBySource(s, o) : (() => { try { return BdApi.Webpack.getBySource(s, o); } catch (_) { return null; } })(); }
-    _wpGetModuleWithKey(f) { return this._r ? this._r.getWithKey(f) : (() => { try { return BdApi.Webpack.getWithKey(f); } catch (_) { return null; } })(); }
+    _wpGetModule(f, o, label) { return this._r ? this._r.get(f, o, label) : (() => { try { return BdApi.Webpack.getModule(f, o); } catch (_) { return null; } })(); }
+    _wpGetBySource(s, o, label) { return this._r ? this._r.getBySource(s, o, label) : (() => { try { return BdApi.Webpack.getBySource(s, o); } catch (_) { return null; } })(); }
+    _wpGetModuleWithKey(f, label) { return this._r ? this._r.getWithKey(f, label) : (() => { try { return BdApi.Webpack.getWithKey(f); } catch (_) { return null; } })(); }
     _wpGetModuleByKeys(...keys) { return this._r ? this._r.findByKeys(...keys) : this._wpGetModuleByKeysLegacy(...keys); }
+    _wpGetModuleByKeysWithHint(label, ...keys) { return this._r ? this._r.findByKeysWithHint(label, ...keys) : this._wpGetModuleByKeysLegacy(...keys); }
     _wpGetModuleByKeysLegacy(...keys) {
         for (const key of keys) { try { const mod = BdApi.Webpack.getByKeys(key); if (mod) return mod; } catch (_) {} }
         try { const mod = BdApi.Webpack.getModule(m => m && typeof m === 'object' && keys.every(k => k in m)); if (mod) return mod; } catch (_) {}
@@ -628,32 +865,6 @@ module.exports = class ByeBlocked {
             }
             return best;
         } catch (_) {}
-        return null;
-    }
-    _wpGetModuleByKeys(...keys) {
-        for (const key of keys) {
-            try {
-                const mod = BdApi.Webpack.getByKeys(key);
-                if (mod) return mod;
-            } catch (_) {}
-        }
-        try {
-            const mod = BdApi.Webpack.getModule(m => m && typeof m === "object" && keys.every(k => k in m));
-            if (mod) return mod;
-        } catch (_) {}
-        try {
-            const mod = BdApi.Webpack.getByKeys(...keys);
-            if (mod) return mod;
-        } catch (_) {}
-        return null;
-    }
-    _wpGetModuleBySourceAny(...sources) {
-        for (const src of sources) {
-            try {
-                const mod = BdApi.Webpack.getBySource(src);
-                if (mod) return mod;
-            } catch (_) {}
-        }
         return null;
     }
     _wpPatchRenderBySourceHeuristic(shouldSuppress, matchingStrings, requiredMatches = 1, label = null) {
@@ -743,7 +954,7 @@ module.exports = class ByeBlocked {
             }
         } catch (_) {}
         if (label) {
-            console.warn(`[ByeBlocked] ${label}: source-heuristic lookup failed. Best candidate matched ${bestHitCount}/${requiredMatches} required strings (${bestHitStrings.join(", ") || "none"}) out of [${matchingStrings.join(", ")}]. Discord likely renamed something in this component — this diagnostic is meant to help pin down which term to update.`);
+            console.warn(`[ByeBlocked] ${label}: source-heuristic lookup failed. Best candidate matched ${bestHitCount}/${requiredMatches} required strings (${bestHitStrings.join(", ") || "none"}) out of [${matchingStrings.join(", ")}]. Discord likely renamed something in this component - this diagnostic is meant to help pin down which term to update.`);
         }
         return false;
     }
@@ -968,7 +1179,7 @@ module.exports = class ByeBlocked {
                     try {
                         const noticeText = verified
                             ? `ByeBlocked v${remote} is now available!`
-                            : `ByeBlocked v${remote} is available (integrity unverified — manual download recommended).`;
+                            : `ByeBlocked v${remote} is available (integrity unverified - manual download recommended).`;
                         this._updateNotice = BdApi.UI.showNotice(noticeText, {
                             timeout: 0,
                             buttons: [ {
@@ -1092,7 +1303,7 @@ module.exports = class ByeBlocked {
                     try {
                         const noticeText = verified
                             ? `ByeBlocked v${remote} is now available!`
-                            : `ByeBlocked v${remote} is available (integrity unverified — manual download recommended).`;
+                            : `ByeBlocked v${remote} is available (integrity unverified - manual download recommended).`;
                         this._updateNotice = BdApi.UI.showNotice(noticeText, {
                             timeout: 0,
                             buttons: [ {
@@ -1262,11 +1473,11 @@ module.exports = class ByeBlocked {
         try {
             this._removeNotice();
             if (verified !== true) {
-                throw new Error("Integrity unverified (no matching SHA256 published in the release notes) — installation cancelled for safety.");
+                throw new Error("Integrity unverified (no matching SHA256 published in the release notes) - installation cancelled for safety.");
             }
             const inFileVersionMatch = remoteText.match(/@version\s+([\d.]+)/);
             if (!inFileVersionMatch || inFileVersionMatch[1] !== remoteVersion) {
-                throw new Error("Downloaded content version doesn't match the expected version — installation cancelled for safety.");
+                throw new Error("Downloaded content version doesn't match the expected version - installation cancelled for safety.");
             }
             const fs = require("fs");
             const path = require("path");
@@ -1292,7 +1503,7 @@ module.exports = class ByeBlocked {
                 }
             }, 2500);
         } catch (err) {
-            this.toast("Auto-install failed: " + err.message + " — download manually from GitHub.", "error");
+            this.toast("Auto-install failed: " + err.message + " - download manually from GitHub.", "error");
             this._safeOpenExternal(htmlUrl);
         }
     }
@@ -1317,12 +1528,12 @@ module.exports = class ByeBlocked {
                 disabled: false
             },
             available: {
-                label: this._updateState.verified === true ? "Install update" : "Unverified — open GitHub",
+                label: this._updateState.verified === true ? "Install update" : "Unverified - open GitHub",
                 cls: this._updateState.verified === true ? "is-update-available" : "is-error",
                 disabled: false
             },
             error: {
-                label: "Error — try again",
+                label: "Error - try again",
                 cls: "is-error",
                 disabled: false
             }
@@ -2185,10 +2396,21 @@ module.exports = class ByeBlocked {
             }
         } catch (_) {}
     }
+    _watchForUserScrollInteractionWithRetry(attempt = 0) {
+        if (!this.isRunning) return;
+        const scroller = this._findMessagesScroller();
+        if (!scroller) {
+            if (attempt < 20) setTimeout(() => this._watchForUserScrollInteractionWithRetry(attempt + 1), 500);
+            return;
+        }
+        try { this._watchForUserScrollInteraction(); } catch (_) {}
+    }
     _watchForUserScrollInteraction() {
         try {
             const scroller = this._findMessagesScroller();
             if (!scroller) return;
+            if (scroller.dataset.nmbScrollWatchBound === "true") return;
+            scroller.dataset.nmbScrollWatchBound = "true";
             const opts = { passive: true };
             const mark = () => { this._userScrolledSinceNav = true; };
             scroller.addEventListener("wheel", mark, opts);
@@ -2196,6 +2418,12 @@ module.exports = class ByeBlocked {
             scroller.addEventListener("pointerdown", mark, opts);
             scroller.addEventListener("keydown", mark, opts);
             scroller.addEventListener("scroll", mark, opts);
+            const markManual = () => { this._lastManualScrollAt = Date.now(); };
+            scroller.addEventListener("wheel", markManual, opts);
+            scroller.addEventListener("touchstart", markManual, opts);
+            scroller.addEventListener("touchmove", markManual, opts);
+            scroller.addEventListener("pointerdown", markManual, opts);
+            scroller.addEventListener("keydown", markManual, opts);
         } catch (_) {}
     }
     _findMessagesScroller() {
@@ -2306,8 +2534,12 @@ module.exports = class ByeBlocked {
     }
     _startScrollCorrectionLoop(navToken) {
         if (this._scrollLoopActive && this._scrollLoopNavToken === navToken) return;
+        if (this._scrollLoopActive) {
+            this._scrollLoopActive = false;
+        }
         this._scrollLoopActive = true;
         this._scrollLoopNavToken = navToken;
+        try { this._watchForUserScrollInteraction(); } catch (_) {}
         const startedAt = Date.now();
         const MAX_MS = 2000;
         const STABLE_FRAMES_NEEDED = 6;
@@ -2378,10 +2610,12 @@ module.exports = class ByeBlocked {
                 requestAnimationFrame(tick);
                 return;
             }
-            const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+            if (this._userScrolledSinceNav) return stop("user-scrolled");
+            const effectiveTop = this._scrollManager.getEffectiveScrollTop(scroller);
+            const distanceFromBottom = scroller.scrollHeight - effectiveTop - scroller.clientHeight;
             if (distanceFromBottom > 24) {
                 applyMask(scroller);
-                scroller.scrollTop = scroller.scrollHeight;
+                this._scrollManager.request(scroller, scroller.scrollHeight, "post-nav-loop");
                 stableStreak = 0;
             } else {
                 stableStreak++;
@@ -2495,8 +2729,6 @@ module.exports = class ByeBlocked {
         this._observerFramePending = false;
         this.observer = new MutationObserver(mutations => {
             if (!this._isRelevantMutation(mutations)) return;
-            const willFastHideMessages = this.isRunning && this.settings.places?.messages;
-            const nmbScrollState = willFastHideMessages ? this._captureMessageScrollState() : null;
             if (this.isRunning && this.settings?.places?.voiceChannels) {
                 try { this._fastHideChannelStatusFromMutations(mutations); } catch (_) {}
             }
@@ -2506,7 +2738,6 @@ module.exports = class ByeBlocked {
             if (this.isRunning && (this.settings.places?.messages || this.settings.places?.memberList)) {
                 try { this._fastHideFromMutations(mutations); } catch (_) {}
             }
-            if (nmbScrollState) this._restoreMessageScrollState(nmbScrollState);
             if (this._observerFramePending) return;
             this._observerFramePending = true;
             requestAnimationFrame(() => {
@@ -2609,7 +2840,7 @@ module.exports = class ByeBlocked {
                 return originalRemoveChild.call(this, child);
             } catch (err) {
                 if (err instanceof DOMException && err.name === "NotFoundError" && self._isNmbTrackedNode(child)) {
-                    console.warn("[ByeBlocked] removeChild threw NotFoundError on a node tracked by ByeBlocked — swallowed to avoid a crash.", { parent: this, child: child });
+                    console.warn("[ByeBlocked] removeChild threw NotFoundError on a node tracked by ByeBlocked - swallowed to avoid a crash.", { parent: this, child: child });
                     noteSwallow();
                     return child;
                 }
@@ -2629,7 +2860,7 @@ module.exports = class ByeBlocked {
                 return originalInsertBefore.call(this, newNode, referenceNode);
             } catch (err) {
                 if (err instanceof DOMException && err.name === "NotFoundError" && self._isNmbTrackedNode(referenceNode)) {
-                    console.warn("[ByeBlocked] insertBefore threw NotFoundError on a node tracked by ByeBlocked — swallowed to avoid a crash.", { parent: this, referenceNode: referenceNode });
+                    console.warn("[ByeBlocked] insertBefore threw NotFoundError on a node tracked by ByeBlocked - swallowed to avoid a crash.", { parent: this, referenceNode: referenceNode });
                     noteSwallow();
                     return originalInsertBefore.call(this, newNode, null);
                 }
@@ -2669,7 +2900,7 @@ module.exports = class ByeBlocked {
                 return count < SWALLOW_RATE_THRESHOLD;
             },
             () => {
-                console.warn(`[ByeBlocked] The DOM removal guard swallowed ${lastMeasuredCount} removeChild/insertBefore errors in the last check window (threshold: ${SWALLOW_RATE_THRESHOLD}). This can mean Discord changed how it reconciles the DOM — consider updating the plugin or reporting this.`);
+                console.warn(`[ByeBlocked] The DOM removal guard swallowed ${lastMeasuredCount} removeChild/insertBefore errors in the last check window (threshold: ${SWALLOW_RATE_THRESHOLD}). This can mean Discord changed how it reconciles the DOM - consider updating the plugin or reporting this.`);
             },
             1
         );
@@ -2738,6 +2969,7 @@ module.exports = class ByeBlocked {
         const p = this._patcher;
         this._runEarlyPatches();
         p.safe('restartObserver', () => this._restartObserver());
+        p.safe('watchForUserScrollInteractionBoot', () => this._watchForUserScrollInteractionWithRetry());
         p.safe('startReactionClickWatcher', () => this._startReactionClickWatcher());
         p.safe('startChannelSwitchWatcher', () => this._startChannelSwitchWatcher());
         p.safe('seedVoiceChannelMembers', () => this._seedVoiceChannelMembers());
@@ -3126,7 +3358,7 @@ module.exports = class ByeBlocked {
     }
     resolveModules() {
         const getStore = (...names) => this._wpGetStore(...names);
-        const getModule = (filter, opts) => this._wpGetModule(filter, opts);
+        const getModule = (filter, opts, label) => this._wpGetModule(filter, opts, label);
         const hadRelationshipStore = !!this._relIsBlockedFn;
         this.modules.RelationshipStore = getStore(...ByeBlocked.STORE_NAMES.RELATIONSHIP);
         this._resolveRelationshipMethods();
@@ -3142,7 +3374,7 @@ module.exports = class ByeBlocked {
         this._resolveMessagesGet();
         this.modules.UserStore = getStore("UserStore", "UsersStore", "CurrentUserStore");
         this.modules.SelectedGuildStore = getStore("SelectedGuildStore", "SelectedGuildIdStore");
-        this.modules.RelationshipUtils = getModule(m => m?.addRelationship && m?.removeRelationship);
+        this.modules.RelationshipUtils = getModule(m => m?.addRelationship && m?.removeRelationship, undefined, "RelationshipUtils");
         this.modules.SelectedChannelStore = getStore("SelectedChannelStore", "ChannelSelectedStore");
         this.modules.CallStore = getStore("CallStore", "VoiceCallStore");
         this.modules.VoiceStateStore = getStore("VoiceStateStore", "VoiceStatesStore");
@@ -3212,12 +3444,12 @@ module.exports = class ByeBlocked {
         }
         if (!this._relIsBlockedFn && !this._relationshipMethodsWarned) {
             this._relationshipMethodsWarned = true;
-            this._patcher?._warn("_resolveRelationshipMethods", new Error("Could not resolve RelationshipStore.isBlocked (or an alternate) — ByeBlocked cannot detect blocked users until this is fixed. Discord may have renamed this method; update the plugin."));
-            this.toast?.("ByeBlocked couldn't find Discord's block-list method — the plugin may not hide blocked users until it's updated.", "error");
+            this._patcher?._warn("_resolveRelationshipMethods", new Error("Could not resolve RelationshipStore.isBlocked (or an alternate) - ByeBlocked cannot detect blocked users until this is fixed. Discord may have renamed this method; update the plugin."));
+            this.toast?.("ByeBlocked couldn't find Discord's block-list method - the plugin may not hide blocked users until it's updated.", "error");
         }
     }
     _resolveSoundUtils() {
-        const getModuleRaw = filter => this._wpGetModule(filter, { defaultExport: false });
+        const getModuleRaw = (filter, label) => this._wpGetModule(filter, { defaultExport: false }, label);
         this.modules.SoundUtils = getModuleRaw(m => {
             if (!m || typeof m !== "object") return false;
             try {
@@ -3227,7 +3459,7 @@ module.exports = class ByeBlocked {
                     return src.includes("disableSounds") && src.includes("getSoundpack");
                 });
             } catch (_) { return false; }
-        });
+        }, "SoundUtils function");
         if (this.modules.SoundUtils) {
             this._soundPlayKey = null;
             this._soundFileKey = null;
@@ -3271,16 +3503,17 @@ module.exports = class ByeBlocked {
         }
     }
     _resolveRtcModules(attempt = 0) {
-        const getModule = (filter, opts) => this._wpGetModule(filter, opts);
+        const getModule = (filter, opts, label) => this._wpGetModule(filter, opts, label);
         if (!this.modules.RTCConnectionUtils) {
-            this.modules.RTCConnectionUtils = getModule(m => typeof m?.getChannelId === "function" && typeof m?.getGuildId === "function");
+            this.modules.RTCConnectionUtils = getModule(m => typeof m?.getChannelId === "function" && typeof m?.getGuildId === "function", undefined, "RTCConnectionUtils");
         }
         if (!this.modules.RTCParticipantsModule) {
             this.modules.RTCParticipantsModule = getModule(
                 m => m && (typeof m.getParticipants === "function" || typeof m.getVoiceParticipants === "function")
                     && typeof m.getChannelId !== "function"
                     && m !== this.modules.StageChannelParticipantStore,
-                { searchExports: true }
+                { searchExports: true },
+                "RTCParticipantsModule"
             );
         }
         const stillMissing = !this.modules.RTCConnectionUtils || !this.modules.RTCParticipantsModule;
@@ -3288,7 +3521,7 @@ module.exports = class ByeBlocked {
             const delays = [1000, 2000, 3000, 5000, 8000, 12000, 18000, 25000];
             setTimeout(() => { if (this.isRunning) this._resolveRtcModules(attempt + 1); }, delays[attempt] || 5000);
         } else if (attempt >= 8 && stillMissing) {
-            this._patcher._logFail("resolveRtcModules", new Error("ran out of attempts to locate RTCConnectionUtils/RTCParticipantsModule — proceeding with gateway data only; some call-participant filtering may be degraded until the plugin is updated"));
+            this._patcher._logFail("resolveRtcModules", new Error("ran out of attempts to locate RTCConnectionUtils/RTCParticipantsModule - proceeding with gateway data only; some call-participant filtering may be degraded until the plugin is updated"));
         }
     }
     _resolveMediaEngineActions(attempt = 0) {
@@ -3349,7 +3582,7 @@ module.exports = class ByeBlocked {
             const delays = [1000, 2000, 3000, 5000, 8000, 12000, 18000, 25000];
             setTimeout(() => this._resolveMediaEngineActions(attempt + 1), delays[attempt] || 5000);
         } else if (attempt >= 8 && (!this.modules.MediaEngineActions || (!this._localVolumeKey && !this._localMuteKey))) {
-            this._patcher._logFail("resolveMediaEngineActions", new Error("ran out of attempts to locate setLocalVolume/setLocalMute/toggleLocalMute — Discord likely renamed these methods; local-mute/volume suppression for blocked users' voice audio will not work until the plugin is updated"));
+            this._patcher._logFail("resolveMediaEngineActions", new Error("ran out of attempts to locate setLocalVolume/setLocalMute/toggleLocalMute - Discord likely renamed these methods; local-mute/volume suppression for blocked users' voice audio will not work until the plugin is updated"));
         }
     }
     _resolveMessagesGet() {
@@ -3373,7 +3606,7 @@ module.exports = class ByeBlocked {
             if (d) { this.modules.Dispatcher = d; return; }
         } catch (_) {}
         try {
-            const d2 = this._wpGetBySource("dispatch", { defaultExport: false });
+            const d2 = this._wpGetBySource("dispatch", { defaultExport: false }, "Flux Dispatcher");
             if (d2 && typeof d2.dispatch === "function") { this.modules.Dispatcher = d2; return; }
         } catch (_) {}
         try {
@@ -3431,7 +3664,7 @@ module.exports = class ByeBlocked {
         }
         this._nmbMissingCoreModules = missing;
         if (missing.length) {
-            console.warn(`[ByeBlocked] Essential modules not found: ${missing.join(", ")}. Discord likely changed something internally — related features may not work until the plugin is updated.`);
+            console.warn(`[ByeBlocked] Essential modules not found: ${missing.join(", ")}. Discord likely changed something internally - related features may not work until the plugin is updated.`);
             this._nmbMaybeWarnViaProbe(missing);
         }
         return missing;
@@ -3759,15 +3992,18 @@ module.exports = class ByeBlocked {
         try {
             const AUTOCOMPLETE_TERMS = ["autocomplete", "aria-selected", "user", "userId"];
             const AUTOCOMPLETE_REQUIRED = 3;
-            const result = BdApi.Webpack.getWithKey(m => {
+            const LABEL = "Autocomplete row component (patchAutocompleteRowComponent target)";
+            const result = this._wpGetModuleWithKey(m => {
                 if (typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
                     return AUTOCOMPLETE_TERMS.filter(t => src.includes(t)).length >= AUTOCOMPLETE_REQUIRED;
                 } catch (_) { return false; }
-            });
+            }, LABEL);
             if (result) {
-                const [mod, key] = result;
+                let [mod, key] = result;
+                if (mod && key == null) key = this._wpFindFnKeyFuzzy(mod, ...AUTOCOMPLETE_TERMS);
+                if (mod && key) {
                 this.patchInstead(mod, key, function(ctx, args, orig) {
                     try {
                         if (!self.settings.places.autocomplete) return orig.apply(ctx, args);
@@ -3779,12 +4015,13 @@ module.exports = class ByeBlocked {
                 });
                 this._autocompleteRowPatched = true;
                 return;
+                }
             }
         } catch (err) { this._patcher?._warn("patchAutocompleteRowComponent", err); }
         if (!this._autocompleteRowPatched && attempt < 6) {
             setTimeout(() => this.patchAutocompleteRowComponent(attempt + 1), 5000);
         } else if (!this._autocompleteRowPatched) {
-            this._patcher?._warn("patchAutocompleteRowComponent", new Error("ran out of attempts — no module matched the autocomplete-row term set; Discord likely renamed something in this component"));
+            this._patcher?._warn("patchAutocompleteRowComponent", new Error("ran out of attempts - no module matched the autocomplete-row term set; Discord likely renamed something in this component"));
         }
     }
     patchVoiceUserComponent(attempt = 0) {
@@ -3818,7 +4055,7 @@ module.exports = class ByeBlocked {
         if (!this._voiceUserComponentPatched && attempt < 6) {
             setTimeout(() => this.patchVoiceUserComponent(attempt + 1), 5000);
         } else if (!this._voiceUserComponentPatched) {
-            this._patcher?._warn("patchVoiceUserComponent", new Error("ran out of attempts — no module matched the voice-user term set; Discord likely renamed something in this component"));
+            this._patcher?._warn("patchVoiceUserComponent", new Error("ran out of attempts - no module matched the voice-user term set; Discord likely renamed something in this component"));
         }
     }
     patchMessageItemComponent(attempt = 0) {
@@ -3931,7 +4168,7 @@ module.exports = class ByeBlocked {
         }
         if (!mod || !key || typeof mod[key] !== "function") {
             if (attempt < 20) setTimeout(() => this.patchMentionAutocomplete(attempt + 1), 3e3);
-            else this._patcher._logFail("patchMentionAutocomplete", new Error("ran out of attempts — indicators did not find the module; see maintenance notes"));
+            else this._patcher._logFail("patchMentionAutocomplete", new Error("ran out of attempts - indicators did not find the module; see maintenance notes"));
             return;
         }
         const self = this;
@@ -3997,7 +4234,7 @@ return false;
         } else if (attempt < 20) {
             setTimeout(() => this.patchGuildMembersPageRow(attempt + 1), 2500);
         } else {
-            this._patcher._logFail("patchGuildMembersPageRow", new Error("ran out of attempts — indicators did not find the module; see maintenance notes"));
+            this._patcher._logFail("patchGuildMembersPageRow", new Error("ran out of attempts - indicators did not find the module; see maintenance notes"));
         }
     }
     patchMemberListRow(attempt = 0) {
@@ -4013,7 +4250,7 @@ return false;
         } else if (attempt < 20) {
             setTimeout(() => this.patchMemberListRow(attempt + 1), 2500);
         } else {
-            this._patcher._logFail("patchMemberListRow", new Error("ran out of attempts — indicators did not find the module; see maintenance notes"));
+            this._patcher._logFail("patchMemberListRow", new Error("ran out of attempts - indicators did not find the module; see maintenance notes"));
         }
     }
     patchGroupDMChannelPrototype(attempt = 0) {
@@ -4053,7 +4290,7 @@ return false;
             }
             if (!proto || proto === Object.prototype) {
                 if (attempt < 20) { setTimeout(() => this.patchGroupDMChannelPrototype(attempt + 1), 2500); return; }
-                this._patcher._logFail("patchGroupDMChannelPrototype", new Error("invalid Channel prototype — see maintenance notes"));
+                this._patcher._logFail("patchGroupDMChannelPrototype", new Error("invalid Channel prototype - see maintenance notes"));
                 this._retryGuardExit("patchGroupDMChannelPrototype");
                 return;
             }
@@ -4149,7 +4386,7 @@ return false;
     }
     _scheduleGroupDMPrototypeRetryOnDataReady(attempt) {
         if (attempt >= 20) {
-            this._patcher._logFail("patchGroupDMChannelPrototype", new Error("no Group DM found to locate the prototype — see maintenance notes"));
+            this._patcher._logFail("patchGroupDMChannelPrototype", new Error("no Group DM found to locate the prototype - see maintenance notes"));
             this._retryGuardExit("patchGroupDMChannelPrototype");
             return;
         }
@@ -4401,7 +4638,7 @@ return false;
         if (!this._stageRenderComponentPatched && attempt < 20) {
             setTimeout(() => this.patchStageRenderComponent(attempt + 1), 3000);
         } else if (!this._stageRenderComponentPatched) {
-            this._patcher._logFail("patchStageRenderComponent", new Error("ran out of attempts — weak indicators did not find the module; see maintenance notes"));
+            this._patcher._logFail("patchStageRenderComponent", new Error("ran out of attempts - weak indicators did not find the module; see maintenance notes"));
         }
     }
     patchActivityPanelComponent(attempt = 0) {
@@ -4469,7 +4706,7 @@ return false;
         if (!this._activityPanelComponentPatched && attempt < 20) {
             setTimeout(() => this.patchActivityPanelComponent(attempt + 1), 3000);
         } else if (!this._activityPanelComponentPatched) {
-            this._patcher._logFail("patchActivityPanelComponent", new Error("ran out of attempts — weak indicators did not find the module; see maintenance notes"));
+            this._patcher._logFail("patchActivityPanelComponent", new Error("ran out of attempts - weak indicators did not find the module; see maintenance notes"));
         }
     }
     _onRelationshipChanged() {
@@ -4581,9 +4818,9 @@ return false;
         };
         let patchedAny = false;
         try {
-            const CardModule = BdApi.Webpack.getModule(m => looksLikeForumCardFn(m) || looksLikeForumCardFn(m?.default) || looksLikeForumCardFn(m?.prototype?.render), {
+            const CardModule = this._wpGetModule(m => looksLikeForumCardFn(m) || looksLikeForumCardFn(m?.default) || looksLikeForumCardFn(m?.prototype?.render), {
                 searchExports: true
-            });
+            }, "Forum post card component (patchForumPostComponent target)");
             if (CardModule?.prototype?.render && looksLikeForumCardFn(CardModule.prototype.render)) {
                 this.patchInstead(CardModule.prototype, "render", function(context, args, original) {
                     const result = beforeRender(context, [ context.props ]);
@@ -4600,13 +4837,11 @@ return false;
         } catch (_) {}
         if (!patchedAny) {
             try {
-                const result = BdApi.Webpack.getWithKey(m => {
+                const result = this._wpGetModuleWithKey(m => {
                     if (!m || typeof m !== "function") return false;
                     return looksLikeForumCardFn(m);
-                }, {
-                    searchExports: true
-                });
-                if (result) {
+                }, "Forum post card component (patchForumPostComponent target)");
+                if (result && result[1] != null) {
                     const [moduleObj, key] = result;
                     this.patchInstead(moduleObj, key, function(context, args, original) {
                         const result = beforeRender(context, args);
@@ -4641,7 +4876,7 @@ return false;
             return hits.length;
         };
         try {
-            const BlockedMessageGroup = BdApi.Webpack.getModule(m => {
+            const BlockedMessageGroup = this._wpGetModule(m => {
                 try {
                     if (m?.displayName === "BlockedMessageGroup" || m?.name === "BlockedMessageGroup") return true;
                     const renderSrc = m?.prototype?.render?.toString?.();
@@ -4652,7 +4887,7 @@ return false;
                     }
                 } catch (_) {}
                 return false;
-            });
+            }, undefined, "BlockedMessageGroup render");
             if (BlockedMessageGroup?.prototype?.render) {
                 this.patchInstead(BlockedMessageGroup.prototype, "render", () => null);
                 this._blockedMsgGroupPatched = true;
@@ -4661,7 +4896,7 @@ return false;
             }
         } catch (_) {}
         try {
-            const result = BdApi.Webpack.getWithKey(m => {
+            const result = this._wpGetModuleWithKey(m => {
                 if (!m || typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
@@ -4669,8 +4904,8 @@ return false;
                 } catch (_) {
                     return false;
                 }
-            });
-            if (result) {
+            }, "BlockedMessageGroup render");
+            if (result && result[1] != null) {
                 const [moduleObj, key] = result;
                 this.patchInstead(moduleObj, key, () => null);
                 this._blockedMsgGroupPatched = true;
@@ -4708,7 +4943,7 @@ return false;
             setTimeout(() => this.patchBlockedMessageGroup(attempt + 1), 5000);
             return;
         }
-        this._patcher?._warn("patchBlockedMessageGroup", new Error(`ran out of attempts to locate the BlockedMessageGroup module — best candidate matched ${bestHitCount}/${BLOCKED_REQUIRED} required strings (${bestHitStrings.join(", ") || "none"})`));
+        this._patcher?._warn("patchBlockedMessageGroup", new Error(`ran out of attempts to locate the BlockedMessageGroup module - best candidate matched ${bestHitCount}/${BLOCKED_REQUIRED} required strings (${bestHitStrings.join(", ") || "none"})`));
         this._retryGuardExit("patchBlockedMessageGroup");
     }
     isBlockedMessageData(message, referencedMessage = null) {
@@ -4803,7 +5038,7 @@ return false;
             } catch (_) {}
         };
         try {
-            const MessagesWrap = BdApi.Webpack.getModule(m => m?.displayName === "MessagesWrap" || m?.name === "MessagesWrap" || m?.prototype?.render?.toString?.().includes("MessagesWrap"));
+            const MessagesWrap = this._wpGetModule(m => m?.displayName === "MessagesWrap" || m?.name === "MessagesWrap" || m?.prototype?.render?.toString?.().includes("MessagesWrap"), undefined, "MessagesWrap component");
             if (MessagesWrap?.prototype?.render) {
                 this.patchBefore(MessagesWrap.prototype, "render", context => applyFilterToProps(context?.props));
                 this._messagesWrapPatched = true;
@@ -4813,7 +5048,7 @@ return false;
         } catch (_) {}
         const WRAP_STRINGS = [ "messages._array", "scrollToMessage", "MessagesWrap", "renderMessages" ];
         try {
-            const result = BdApi.Webpack.getWithKey(m => {
+            const result = this._wpGetModuleWithKey(m => {
                 if (!m || typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
@@ -4821,8 +5056,8 @@ return false;
                 } catch (_) {
                     return false;
                 }
-            });
-            if (result) {
+            }, "MessagesWrap component");
+            if (result && result[1] != null) {
                 const [moduleObj, key] = result;
                 this.patchBefore(moduleObj, key, (_, args) => applyFilterToProps(args?.[0]));
                 this._messagesWrapPatched = true;
@@ -4951,7 +5186,7 @@ return false;
             this._rowPatchRetryTimeout = setTimeout(() => this.patchPrivateChannelRowComponent(attempt + 1), 1500);
         } else {
             this._rowPatchInFlight = false;
-            this._patcher._logFail("patchPrivateChannelRowComponent", new Error("no group DM row found in the DOM after several attempts — see maintenance notes"));
+            this._patcher._logFail("patchPrivateChannelRowComponent", new Error("no group DM row found in the DOM after several attempts - see maintenance notes"));
         }
     }
     _watchForGroupDmRowRetry() {
@@ -5085,7 +5320,7 @@ return false;
             setTimeout(() => this.patchCallGridParticipants(attempt + 1), 3000);
         } else {
             this._callGridPatchInFlight = false;
-            this._patcher._logFail("patchCallGridParticipants", new Error(`ran out of attempts — no grid-like element (matching ${gridSelector}) had a participant-shaped prop, and the per-participant source-heuristic lookup also failed. Closest array-shape candidate exposed: [${bestPropKeysSeen.join(", ") || "none"}]. Discord likely restructured the call grid further.`));
+            this._patcher._logFail("patchCallGridParticipants", new Error(`ran out of attempts - no grid-like element (matching ${gridSelector}) had a participant-shaped prop, and the per-participant source-heuristic lookup also failed. Closest array-shape candidate exposed: [${bestPropKeysSeen.join(", ") || "none"}]. Discord likely restructured the call grid further.`));
         }
     }
     _watchVoiceJoinForGridPatch() {
@@ -5887,7 +6122,7 @@ return false;
                 }
             },
             () => {
-                console.warn("[ByeBlocked] The message dispatcher patch (blocked-user badge/notification suppression) appears to be inactive — Discord may have changed something internally. Consider updating the plugin.");
+                console.warn("[ByeBlocked] The message dispatcher patch (blocked-user badge/notification suppression) appears to be inactive - Discord may have changed something internally. Consider updating the plugin.");
             },
             2
         );
@@ -5911,7 +6146,7 @@ return false;
                 }
             },
             () => {
-                console.warn("[ByeBlocked] The profile popout filter (voice states) appears to have stopped recognizing blocked users — Discord may have changed the data format. Consider updating the plugin.");
+                console.warn("[ByeBlocked] The profile popout filter (voice states) appears to have stopped recognizing blocked users - Discord may have changed the data format. Consider updating the plugin.");
             },
             2
         );
@@ -6185,7 +6420,7 @@ return false;
                 return !!this._autocompleteRowPatched;
             },
             () => {
-                console.warn("[ByeBlocked] The autocomplete row patch appears inactive — Discord may have changed the component's structure. Consider updating the plugin.");
+                console.warn("[ByeBlocked] The autocomplete row patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
                 try { this.patchAutocompleteRowComponent(); } catch (_) {}
             }
         );
@@ -6197,7 +6432,7 @@ return false;
                 return !!this._voiceUserComponentPatched;
             },
             () => {
-                console.warn("[ByeBlocked] The voice user component patch appears inactive — Discord may have changed the component's structure. Consider updating the plugin.");
+                console.warn("[ByeBlocked] The voice user component patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
                 try { this.patchVoiceUserComponent(); } catch (_) {}
             }
         );
@@ -6209,21 +6444,41 @@ return false;
                 return !!(this._inviteSuggestionsPatched || (this.modules.InviteQueryModule && this.modules.InviteQueryComposeKey));
             },
             () => {
-                console.warn("[ByeBlocked] The invite suggestions patch appears inactive — Discord may have changed the invite query module. Consider updating the plugin.");
+                console.warn("[ByeBlocked] The invite suggestions patch appears inactive - Discord may have changed the invite query module. Consider updating the plugin.");
                 try { this.patchInviteSuggestions(); } catch (_) {}
             }
         );
 
         this._health.register(
             "forumPostPatch",
-            () => !!this._forumPostComponentPatched,
             () => {
-                console.warn("[ByeBlocked] The forum post card patch appears inactive — Discord may have changed the component's structure. Consider updating the plugin.");
+                if (!this.settings.places?.messages) return true;
+                if (this._forumPostComponentPatched) return true;
+                try {
+                    const forumOpen = document.querySelector('[data-list-id^="forum-channel-list-"], [class*="mainCard_"]');
+                    if (!forumOpen) return true;
+                } catch (_) { return true; }
+                return false;
+            },
+            () => {
+                console.warn("[ByeBlocked] The forum post card patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
                 try { this.patchForumPostComponent(); } catch (_) {}
             }
         );
 
         this._health.start();
+        this.publishDependencyManifest();
+    }
+    publishDependencyManifest() {
+        try {
+            if (typeof BdApi === "undefined" || !BdApi.Data || typeof BdApi.Data.save !== "function") return;
+            BdApi.Data.save(this.pluginName, "dependencyManifest", {
+                schemaVersion: "1.0",
+                publishedAt: Date.now(),
+                pluginVersion: ByeBlocked.VERSION || null,
+                dependencies: ByeBlocked.DEPENDENCY_MANIFEST
+            });
+        } catch (_) {}
     }
     _sweepOrphanedScrollMasks() {
         try {
@@ -7830,7 +8085,8 @@ return false;
         }
     }
     scanDom(fromMutation = false) {
-        const scrollState = fromMutation ? null : this._captureMessageScrollState();
+        const willTouchMessages = fromMutation ? true : !!this.settings.places?.messages;
+        const scrollState = willTouchMessages ? this._captureMessageScrollState() : null;
         try {
             this._shouldHideCache = new Map;
             const navCooldown = this._navStartedAt && (Date.now() - this._navStartedAt < 1200);
@@ -7892,7 +8148,9 @@ return false;
             this.collapseGhostSlots();
             this.promoteOrphanedMessages();
         } catch (_) {}
-        finally { if (scrollState) this._restoreMessageScrollState(scrollState); }
+        finally {
+            if (scrollState) this._restoreMessageScrollState(scrollState);
+        }
     }
     _hideSingleMention(el) {
         if (!el || el.dataset?.nmbMentionHidden === "true") return;
@@ -8670,7 +8928,7 @@ return false;
     }
     hideStageSpeakerRequests() {
         try {
-            const headingRe = /^(Pedidos para falar|Requests to Speak)(\s*[—-]\s*\d+)?$/i;
+            const headingRe = /^(Pedidos para falar|Requests to Speak)(\s*[--]\s*\d+)?$/i;
             const t = _locale(_getLocale(), ByeBlocked.STAGE_LOCALE);
             const headings = document.querySelectorAll('[class*="listTitle__"]');
             let anyPanelProcessed = false;
@@ -10355,7 +10613,7 @@ return false;
         const Dispatcher = this.modules.Dispatcher;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") {
             if (attempt < 20) { setTimeout(() => this.patchVoiceMute(attempt + 1), 2000); return; }
-            this._patcher?._warn("patchVoiceMute", new Error("Dispatcher unavailable after several attempts — audio mute for blocked users may not react to real-time call joins/leaves"));
+            this._patcher?._warn("patchVoiceMute", new Error("Dispatcher unavailable after several attempts - audio mute for blocked users may not react to real-time call joins/leaves"));
             this._retryGuardExit("patchVoiceMute");
             return;
         }
@@ -10386,6 +10644,14 @@ return false;
                     this._selfJoinTimestamp = this._selfJoinTimestamp || Date.now();
                     this._lastSelfVoiceChannelId = channelId;
                     this._resetFakeVoiceTimer(channelId);
+                    return;
+                }
+                const selfId = this._getSelfUserId();
+                const otherIds = states.map(s => this.extractUserId(s)).filter(id => id && id !== selfId);
+                const onlySelfSoFar = selfId && !otherIds.length;
+                if (onlySelfSoFar && attempt < ByeBlocked.VOICE_SYNC_STALE_STORE_MAX_RETRIES) {
+                    this._lastSelfVoiceChannelId = channelId;
+                    setTimeout(() => this._syncVoiceStateOnLoad(attempt + 1), ByeBlocked.VOICE_SYNC_STALE_STORE_RETRY_DELAY_MS);
                 }
                 return;
             }
@@ -10592,7 +10858,7 @@ return false;
                 setTimeout(() => this.patchHideBlockedCallUI(attempt + 1), 2000);
                 return;
             }
-            this._patcher?._warn("patchHideBlockedCallUI", new Error(`ran out of attempts to locate the call buttons component — exact-name lookup, source-heuristic (best candidate matched ${bestHitCount}/${REQUIRED} required strings: ${bestHitStrings.join(", ") || "none"}), and structural Fiber lookup all failed; Discord likely renamed or restructured this component`));
+            this._patcher?._warn("patchHideBlockedCallUI", new Error(`ran out of attempts to locate the call buttons component - exact-name lookup, source-heuristic (best candidate matched ${bestHitCount}/${REQUIRED} required strings: ${bestHitStrings.join(", ") || "none"}), and structural Fiber lookup all failed; Discord likely renamed or restructured this component`));
             this._retryGuardExit("patchHideBlockedCallUI");
             return;
         }
@@ -10689,7 +10955,7 @@ return false;
             if (proto.play && proto.play.__byeBlockedPatchedPlay) {
                 proto.play = this._origMediaPlay;
             } else if (proto.play !== this._origMediaPlay) {
-                try { console.warn("[ByeBlocked] Skipped restoring HTMLMediaElement.prototype.play — another patch is layered on top of ours."); } catch (_) {}
+                try { console.warn("[ByeBlocked] Skipped restoring HTMLMediaElement.prototype.play - another patch is layered on top of ours."); } catch (_) {}
             }
             this._origMediaPlay = null;
         }
@@ -11356,9 +11622,36 @@ return false;
             const identityKey = el.dataset?.listItemId || el.id || "";
             if (identityKey) el.dataset.nmbUserIdKey = identityKey;
         }
+        this._compensateScrollForHide(el);
         el.dataset.hiddenBlocked = "true";
         el.dataset.nmbReason = reason;
         this.hiddenElements.add(el);
+    }
+    _compensateScrollForHide(el) {
+        try {
+            if (!el.isConnected) return;
+            const scroller = el.closest('[class*="scroller"]');
+            if (!scroller) return;
+            const style = getComputedStyle(scroller);
+            if (style.overflowY !== "auto" && style.overflowY !== "scroll") return;
+            if (scroller.scrollHeight <= scroller.clientHeight) return;
+            const scrollerRect = scroller.getBoundingClientRect();
+            const elRect = el.getBoundingClientRect();
+            const effectiveTop = this._scrollManager.getEffectiveScrollTop(scroller);
+            if (elRect.bottom <= scrollerRect.top) {
+                const collapsedHeight = elRect.height;
+                if (collapsedHeight > 0.5) {
+                    this._scrollManager.request(scroller, effectiveTop - collapsedHeight, "compensate-hide-above");
+                }
+                return;
+            }
+            if (elRect.top < scrollerRect.top) {
+                const visiblePortionAbove = scrollerRect.top - elRect.top;
+                if (visiblePortionAbove > 0.5) {
+                    this._scrollManager.request(scroller, effectiveTop - visiblePortionAbove, "compensate-hide-partial");
+                }
+            }
+        } catch (_) {}
     }
     restoreElement(el) {
         if (!el) return;
@@ -11405,13 +11698,14 @@ return false;
         const scroller = state?.scroller;
         if (!scroller || !scroller.isConnected) return null;
         const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+        const effectiveTop = this._scrollManager.getEffectiveScrollTop(scroller);
         let nextTop = null;
         if (state.anchorEl && state.anchorEl.isConnected) {
             try {
                 const scrollerRect = scroller.getBoundingClientRect();
                 const rect = state.anchorEl.getBoundingClientRect();
                 const currentOffset = rect.top - scrollerRect.top;
-                nextTop = scroller.scrollTop + (currentOffset - (state.anchorOffset || 0));
+                nextTop = effectiveTop + (currentOffset - (state.anchorOffset || 0));
             } catch (_) { nextTop = null; }
         }
         if (nextTop === null || !Number.isFinite(nextTop)) {
@@ -11425,15 +11719,25 @@ return false;
     }
     _restoreMessageScrollState(state) {
         try {
+            const MANUAL_SCROLL_GUARD_MS = 150;
+            const lastManual = this._lastManualScrollAt || 0;
+            const sinceManual = lastManual ? (Date.now() - lastManual) : null;
+            if (lastManual && sinceManual < MANUAL_SCROLL_GUARD_MS) {
+                return;
+            }
             const correction = this._computeScrollCorrection(state);
-            if (correction && Math.abs(correction.scroller.scrollTop - correction.nextTop) > 0.5) {
-                correction.scroller.scrollTop = correction.nextTop;
+            if (correction) {
+                const effectiveTop = this._scrollManager.getEffectiveScrollTop(correction.scroller);
+                if (Math.abs(effectiveTop - correction.nextTop) > 0.5) {
+                    this._scrollManager.request(correction.scroller, correction.nextTop, "restore-post-scan");
+                }
             }
         } catch (_) {}
     }
     _shouldFastHideMessagesInDom() {
         try {
-            if (!this._storePatched || !this._messagesWrapPatched) return true;
+            const result = (!this._storePatched || !this._messagesWrapPatched);
+            if (result) return true;
         } catch (_) {
             return true;
         }
@@ -12023,6 +12327,7 @@ return false;
     }
     resolveInviteQueryModule() {
         const PRIMARY_SOURCES = ["queryFriends", "queryDMUsers", "friendSuggestions"];
+        const LABEL = "InviteQueryModule (queryFriends/queryDMUsers)";
         let inviteQueryMod = null;
         for (const src of PRIMARY_SOURCES) {
             inviteQueryMod = this._wpGetBySource(src, { defaultExport: false });
@@ -12039,7 +12344,7 @@ return false;
                         return PRIMARY_SOURCES.filter(s => src.includes(s)).length >= REQUIRED_MODULE_MATCHES;
                     });
                 } catch (_) { return false; }
-            }, { defaultExport: false });
+            }, { defaultExport: false }, LABEL);
         }
         this.modules.InviteQueryModule = inviteQueryMod || null;
         this.modules.InviteQueryComposeKey = null;
@@ -12197,7 +12502,7 @@ return false;
             setTimeout(() => this.patchInviteSuggestions(attempt + 1), 5e3);
             this._startInviteClickListener();
         } else if (!this._inviteSuggestionsPatched) {
-            this._patcher._logFail("patchInviteSuggestions", new Error("ran out of attempts — weak indicators did not find the module; see maintenance notes"));
+            this._patcher._logFail("patchInviteSuggestions", new Error("ran out of attempts - weak indicators did not find the module; see maintenance notes"));
             this._startInviteClickListener();
             this._retryGuardExit("patchInviteSuggestions");
         }
@@ -12514,7 +12819,7 @@ return false;
                 if (this._updateState.verified === true) {
                     this._autoInstall(this._updateState.latestVersion, this._updateState.remoteText, this._updateState.sha256, this._updateState.verified, panel, this._updateState.htmlUrl);
                 } else {
-                    this.toast("Integrity unverified for this release — opening GitHub for a manual download.", "warn");
+                    this.toast("Integrity unverified for this release - opening GitHub for a manual download.", "warn");
                     this._safeOpenExternal(this._updateState.htmlUrl);
                 }
             } else {
