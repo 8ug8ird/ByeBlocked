@@ -1,5 +1,5 @@
 <div align="center">
-<img src="assets/img2.png" width="900" alt="ByeBlocked Banner">
+<img src="assets/img3.png" width="900" alt="ByeBlocked Banner">
 
 **Discord reminds you they're blocked. ByeBlocked makes you forget they exist.**
 
