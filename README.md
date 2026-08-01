@@ -18,7 +18,7 @@
 - **Member List** - Hides blocked profiles and empty role sections
 - **Autocomplete** - Excludes blocked users from mention and invite suggestions
 - **Events** - Hides blocked users from scheduled events
-- **Notifications** - Suppresses the taskbar/tray badge when unread activity is only from blocked users
+- **Notifications** - Suppresses the taskbar/tray badge when unread activity is only from blocked users.
 
 <br>
 
