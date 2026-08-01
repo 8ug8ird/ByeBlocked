@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.5.0
+ * @version 2.6.0
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -211,7 +211,16 @@ class ModuleResolver {
         return null;
     }
     getWithKey(f, label) {
-        try { const m = BdApi.Webpack.getWithKey(f); if (m) return m; } catch (_) {}
+        try {
+            const raw = BdApi.Webpack.getWithKey(f);
+            if (raw) {
+                if (Array.isArray(raw)) return raw;
+                if (typeof raw[Symbol.iterator] === "function" || typeof raw.next === "function") {
+                    const pair = [...raw];
+                    if (pair.length && pair[0] !== undefined) return pair;
+                }
+            }
+        } catch (_) {}
         if (label) {
             const m = this._tryBridgeModuleHint("sourceString", label);
             if (m) return [m, null];
@@ -262,7 +271,8 @@ class PatchManager {
     _warn(l, e) {
         try {
             this.failCounts[l] = (this.failCounts[l] || 0) + 1;
-            console.warn("[ByeBlocked] " + l + ": " + (e?.message || String(e)));
+            if (this.p?.logger) this.p.logger.warn(l, e);
+            else console.warn("[ByeBlocked] " + l + ": " + (e?.message || String(e)));
         } catch (_) {}
     }
     report() {
@@ -270,6 +280,44 @@ class PatchManager {
         if (!entries.length) { console.info("[ByeBlocked] No failures registered."); return {}; }
         console.table(entries.map(([label, count]) => ({ label, count })));
         return Object.fromEntries(entries);
+    }
+}
+
+class Logger {
+    constructor(prefix = "ByeBlocked", maxEntries = 200) {
+        this.prefix = prefix;
+        this.maxEntries = maxEntries;
+        this._buffer = [];
+    }
+    _push(level, message, extra) {
+        try {
+            const entry = { ts: Date.now(), level, message: String(message) };
+            if (extra !== undefined) {
+                entry.extra = extra instanceof Error
+                    ? { name: extra.name, message: extra.message }
+                    : extra;
+            }
+            this._buffer.push(entry);
+            if (this._buffer.length > this.maxEntries) this._buffer.shift();
+        } catch (_) {}
+    }
+    info(message, extra) {
+        this._push("info", message, extra);
+        try { console.info(`[${this.prefix}] ${message}`, extra ?? ""); } catch (_) {}
+    }
+    warn(message, extra) {
+        this._push("warn", message, extra);
+        try { console.warn(`[${this.prefix}] ${message}`, extra ?? ""); } catch (_) {}
+    }
+    error(message, extra) {
+        this._push("error", message, extra);
+        try { console.error(`[${this.prefix}] ${message}`, extra ?? ""); } catch (_) {}
+    }
+    getEntries() {
+        return this._buffer.slice();
+    }
+    clear() {
+        this._buffer = [];
     }
 }
 
@@ -286,7 +334,17 @@ class HealthMonitor {
         this._publishTimer = null;
     }
     register(name, checkFn, fallbackFn, failThreshold = 2) {
-        this.checks[name] = { checkFn, fallbackFn, failStreak: 0, failThreshold, totalFailures: 0, degradedCount: 0 };
+        this.checks[name] = { checkFn, fallbackFn, failStreak: 0, failThreshold, totalFailures: 0, degradedCount: 0, lastHeartbeatAt: null };
+    }
+    heartbeat(name) {
+        const entry = this.checks[name];
+        if (!entry) return;
+        entry.lastHeartbeatAt = Date.now();
+    }
+    msSinceHeartbeat(name) {
+        const entry = this.checks[name];
+        if (!entry || !entry.lastHeartbeatAt) return null;
+        return Date.now() - entry.lastHeartbeatAt;
     }
     start() {
         if (this._timer) return;
@@ -307,21 +365,29 @@ class HealthMonitor {
         if (!entry) return;
         let healthy = true;
         try { healthy = !!entry.checkFn(); }
-        catch (_) { healthy = false; }
+        catch (e) { healthy = false; entry.lastError = e; }
         if (!healthy) {
             entry.failStreak++;
             entry.totalFailures++;
             if (entry.failStreak >= (entry.failThreshold ?? 2) && !this._degraded[name]) {
                 this._degraded[name] = true;
                 entry.degradedCount++;
-                try { console.warn(`[ByeBlocked] HealthMonitor: '${name}' appears to have failed, activating DOM fallback.`); } catch (_) {}
+                try {
+                    const detail = entry.lastError ? (entry.lastError.message || entry.lastError) : null;
+                    if (this.p?.logger) this.p.logger.warn(`HealthMonitor: '${name}' appears to have failed, activating DOM fallback.`, detail);
+                    else console.warn(`[ByeBlocked] HealthMonitor: '${name}' appears to have failed, activating DOM fallback.${detail ? " " + detail : ""}`);
+                } catch (_) {}
                 try { entry.fallbackFn?.(); } catch (_) {}
             }
         } else {
             entry.failStreak = 0;
+            entry.lastError = null;
             if (this._degraded[name]) {
                 this._degraded[name] = false;
-                try { console.info(`[ByeBlocked] HealthMonitor: '${name}' returned to normal.`); } catch (_) {}
+                try {
+                    if (this.p?.logger) this.p.logger.info(`HealthMonitor: '${name}' returned to normal.`);
+                    else console.info(`[ByeBlocked] HealthMonitor: '${name}' returned to normal.`);
+                } catch (_) {}
             }
         }
     }
@@ -353,7 +419,10 @@ class HealthMonitor {
                 failStreak: this.checks[name].failStreak,
                 totalFailures: this.checks[name].totalFailures,
                 degradedCount: this.checks[name].degradedCount,
-                failThreshold: this.checks[name].failThreshold ?? 2
+                failThreshold: this.checks[name].failThreshold ?? 2,
+                lastHeartbeatAt: this.checks[name].lastHeartbeatAt ?? null,
+                msSinceHeartbeat: this.msSinceHeartbeat(name),
+                lastError: this.checks[name].lastError ? (this.checks[name].lastError.message || String(this.checks[name].lastError)) : null
             }));
             const buildNumber = (() => {
                 try {
@@ -366,7 +435,7 @@ class HealthMonitor {
                 try { return this.p?._r?.getUsedProbeHints?.() || []; } catch (_) { return []; }
             })();
             BdApi.Data.save(this._publishSourcePluginName, this._publishKey, {
-                schemaVersion: "0.4.0",
+                schemaVersion: "0.4.1",
                 publishedAt: Date.now(),
                 discordBuildNumber: buildNumber,
                 usedProbeHintFor,
@@ -386,6 +455,16 @@ const _CLOSE_LABELS = [
     'Sulge', 'Luk', 'Stäng', 'Lukk', 'Sulje', 'Zavřít', 'Zatvoriť', 'Bezárás',
     'Închide', 'Затвори', 'Κλείσιμο', 'סגור', 'إغلاق', 'ปิด', 'Đóng'
 ];
+const _VOICE_CHANNEL_LABELS = [
+    'canal de voz', 'Canal de voz', 'voice channel', 'Voice channel', 'salon vocal',
+    'sprachkanal', 'canale vocale', 'canal de voz', 'ボイスチャンネル', '음성 채널',
+    'голосовой канал', '语音频道', '語音頻道', 'kanał głosowy', 'spraakkanaal',
+    'ses kanalı', 'голосовий канал', 'ช่องเสียง', 'kênh thoại', 'saluran suara',
+    'hlasový kanál', 'röstkanal', 'äänikanava', 'tale kanal', 'canal vocal',
+    'hangcsatorna', 'φωνητικό κανάλι', 'гласов канал', 'glasovni kanal',
+    'ערוץ קולי', 'قناة صوتية'
+];
+const _VOICE_CHANNEL_ARIA_LABEL_SEL = _VOICE_CHANNEL_LABELS.map(l => `[aria-label*="${l}"]`).join(',');
 function _findCloseButton(dialog) {
     if (!dialog) return null;
     try {
@@ -489,7 +568,7 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.5.0";
+    static VERSION="2.6.0";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -603,6 +682,33 @@ module.exports = class ByeBlocked {
             ACTIVITY: ["ChannelRTCStore", "ActivityStore", "EmbeddedActivityStore", "ActivityParticipantsStore", "ActivityManagerStore"],
         };
     }
+    static get SIMPLE_STORE_SPECS() {
+        return {
+            GuildMemberStore: this.STORE_NAMES.GUILD_MEMBER,
+            ReactionsStore: this.STORE_NAMES.REACTIONS,
+            SortedVoiceStateStore: this.STORE_NAMES.VOICE_STATE,
+            StageChannelParticipantStore: this.STORE_NAMES.STAGE_PARTICIPANT,
+            StageInstanceStore: this.STORE_NAMES.STAGE_INSTANCE,
+            ActivityStore: this.STORE_NAMES.ACTIVITY,
+            ChannelStore: ["ChannelStore", "ChannelsStore"],
+            UserStore: ["UserStore", "UsersStore", "CurrentUserStore"],
+            SelectedGuildStore: ["SelectedGuildStore", "SelectedGuildIdStore"],
+            SelectedChannelStore: ["SelectedChannelStore", "ChannelSelectedStore"],
+            CallStore: ["CallStore", "VoiceCallStore"],
+            VoiceStateStore: ["VoiceStateStore", "VoiceStatesStore"],
+            MediaEngineStore: ["MediaEngineStore", "MediaEngineManagerStore"],
+            ReadStateStore: ["ReadStateStore", "ChannelReadStateStore", "ReadStatesStore"],
+            GuildReadStateStore: ["GuildReadStateStore", "GuildUnreadStore", "GuildReadStatesStore"],
+            GuildChannelStore: ["GuildChannelStore", "GuildChannelsStore"],
+            GuildStore: ["GuildStore", "GuildsStore"],
+            NotificationSettingsStore: ["NotificationSettingsStore", "NotificationStore"],
+            ChannelPinsStore: ["ChannelPinsStore", "PinnedMessagesStore"],
+            ActiveJoinedThreadsStore: ["ActiveJoinedThreadsStore", "JoinedThreadsStore"],
+            ThreadStore: ["ActiveThreadsStore", "ThreadStore", "ForumChannelStore", "GuildThreadStore", "ThreadsStore"],
+            GuildScheduledEventStore: ["GuildScheduledEventStore", "ScheduledEventStore", "GuildEventsStore"],
+            ChannelStatusStore: ["ChannelStatusStore", "VoiceChannelStatusStore", "ChannelStatusesStore"],
+        };
+    }
     static get DEPENDENCY_MANIFEST() {
         return [
             { label: "RelationshipStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.RELATIONSHIP },
@@ -656,10 +762,17 @@ module.exports = class ByeBlocked {
               needles: ["autocomplete", "aria-selected", "user", "userId"], minHits: 3 },
             { label: "Forum post card component (patchForumPostComponent target)", kind: "sourceString",
               needles: ["mainCard_", "forumPostItem", "ForumPostCard", "forum-channel-list-"], minHits: 2 },
+            { label: "Member list row component (source-string heuristic, patchMemberListRow)", kind: "sourceString",
+              needles: [
+                  "guildId", "user",
+                  "isOwner", "isMobileOnline", "isVROnline", "premiumSince",
+                  "colorString", "avatarDecoration", "statusColor", "activity"
+              ], minHits: 3, requiresContext: "memberListOpen",
+            },
 
             { label: "Flux Dispatcher", kind: "sourceString", needles: ["dispatch", "subscribe"], minHits: 2,
               fuzzyFallback: { needles: ["dispatchAction", "connectStore"] },
-              note: "Resolvido via 4 estratégias em cascata em _resolveDispatcher(); este check cobre só 2 delas. fuzzyFallback cobre o layout observado onde o Flux Dispatcher passa por uma camada WASM (fluxapi)." },
+            },
         ];
     }
     static get RELATIONSHIP_METHOD_NAMES() {
@@ -687,6 +800,7 @@ module.exports = class ByeBlocked {
     constructor() {
         this.pluginName = 'ByeBlocked';
         this.isRunning = false;
+        this.logger = new Logger(this.pluginName);
         
         this._r = new ModuleResolver({ bridge: this.probeScannerBridge = new ProbeScannerBridge() });
         this.modules = {};
@@ -827,8 +941,42 @@ module.exports = class ByeBlocked {
         return null;
     }
     _wpGetModule(f, o, label) { return this._r ? this._r.get(f, o, label) : (() => { try { return BdApi.Webpack.getModule(f, o); } catch (_) { return null; } })(); }
+    _resolveSimpleStores() {
+        this._moduleResolutionLog = {};
+        for (const [key, names] of Object.entries(ByeBlocked.SIMPLE_STORE_SPECS)) {
+            let matchedName = null;
+            for (const n of names) {
+                try { if (BdApi.Webpack.getStore(n)) { matchedName = n; break; } } catch (_) {}
+            }
+            const resolved = this._wpGetStore(...names);
+            this.modules[key] = resolved;
+            this._moduleResolutionLog[key] = !resolved
+                ? { strategy: "missing", matchedName: null }
+                : matchedName
+                    ? { strategy: "exact", matchedName }
+                    : { strategy: "heuristic", matchedName: null };
+        }
+        const fellBackToHeuristic = Object.entries(this._moduleResolutionLog)
+            .filter(([, v]) => v.strategy === "heuristic").map(([k]) => k);
+        if (fellBackToHeuristic.length) {
+            this.logger.warn(`resolved via shape heuristic, not exact name (Discord likely renamed): ${fellBackToHeuristic.join(", ")}`);
+        }
+    }
     _wpGetBySource(s, o, label) { return this._r ? this._r.getBySource(s, o, label) : (() => { try { return BdApi.Webpack.getBySource(s, o); } catch (_) { return null; } })(); }
-    _wpGetModuleWithKey(f, label) { return this._r ? this._r.getWithKey(f, label) : (() => { try { return BdApi.Webpack.getWithKey(f); } catch (_) { return null; } })(); }
+    _wpGetModuleWithKey(f, label) {
+        if (this._r) return this._r.getWithKey(f, label);
+        try {
+            const raw = BdApi.Webpack.getWithKey(f);
+            if (raw) {
+                if (Array.isArray(raw)) return raw;
+                if (typeof raw[Symbol.iterator] === "function" || typeof raw.next === "function") {
+                    const pair = [...raw];
+                    if (pair.length && pair[0] !== undefined) return pair;
+                }
+            }
+        } catch (_) {}
+        return null;
+    }
     _wpGetModuleByKeys(...keys) { return this._r ? this._r.findByKeys(...keys) : this._wpGetModuleByKeysLegacy(...keys); }
     _wpGetModuleByKeysWithHint(label, ...keys) { return this._r ? this._r.findByKeysWithHint(label, ...keys) : this._wpGetModuleByKeysLegacy(...keys); }
     _wpGetModuleByKeysLegacy(...keys) {
@@ -915,16 +1063,36 @@ module.exports = class ByeBlocked {
                 return hits.length >= requiredMatches;
             } catch (_) { return false; }
         };
+        const doPatchDirect = getProps => {
+            try {
+                const found = this._wpGetModuleWithKey(srcFilter, label);
+                if (found?.[0] && found[1] != null) {
+                    return doPatch(found[0], found[1], getProps);
+                }
+            } catch (_) {}
+            return false;
+        };
         try {
-            const mod = this._wpGetModule(srcFilter, { searchExports: true });
+            const mod = this._wpGetModule(srcFilter, { searchExports: true }, label);
             if (mod) {
+                if (unwrapComponent(mod) && doPatchDirect((ctx, args) => args?.[0])) return true;
                 if (typeof mod === "function" && !mod.prototype?.render && mod.default === undefined) {
                     try {
-                        const found = this._wpGetModuleWithKey(srcFilter);
+                        const found = this._wpGetModuleWithKey(srcFilter, label);
                         if (found?.[0] && found[1] && typeof found[0] === "object") {
                             if (doPatch(found[0], found[1], (ctx, args) => args?.[0])) return true;
                         }
                     } catch (_) {}
+                } else if (typeof mod === "object") {
+                    let matchedKey = null;
+                    for (const key of Object.keys(mod)) {
+                        let val;
+                        try { val = mod[key]; } catch (_) { continue; }
+                        if (srcFilter(val)) { matchedKey = key; break; }
+                    }
+                    if (matchedKey && doPatch(mod, matchedKey, (ctx, args) => args?.[0])) return true;
+                    if (doPatch(mod.prototype, "render", () => null)) return true;
+                    if (doPatch(mod, "default", (ctx, args) => args?.[0])) return true;
                 } else {
                     if (doPatch(mod.prototype, "render", () => null)) return true;
                     if (doPatch(mod, "default", (ctx, args) => args?.[0])) return true;
@@ -932,7 +1100,7 @@ module.exports = class ByeBlocked {
             }
         } catch (_) {}
         try {
-            const found = this._wpGetModuleWithKey(srcFilter);
+            const found = this._wpGetModuleWithKey(srcFilter, label);
             if (found?.[0] && found[1] && typeof found[0] === "object") {
                 if (doPatch(found[0], found[1], (ctx, args) => args?.[0])) return true;
             }
@@ -954,7 +1122,7 @@ module.exports = class ByeBlocked {
             }
         } catch (_) {}
         if (label) {
-            console.warn(`[ByeBlocked] ${label}: source-heuristic lookup failed. Best candidate matched ${bestHitCount}/${requiredMatches} required strings (${bestHitStrings.join(", ") || "none"}) out of [${matchingStrings.join(", ")}]. Discord likely renamed something in this component - this diagnostic is meant to help pin down which term to update.`);
+            this.logger.warn(`${label}: source-heuristic lookup failed. Best candidate matched ${bestHitCount}/${requiredMatches} required strings (${bestHitStrings.join(", ") || "none"}) out of [${matchingStrings.join(", ")}]. Discord likely renamed something in this component - this diagnostic is meant to help pin down which term to update.`);
         }
         return false;
     }
@@ -2400,7 +2568,7 @@ module.exports = class ByeBlocked {
         if (!this.isRunning) return;
         const scroller = this._findMessagesScroller();
         if (!scroller) {
-            if (attempt < 20) setTimeout(() => this._watchForUserScrollInteractionWithRetry(attempt + 1), 500);
+            if (attempt < 20) setTimeout(() => this._watchForUserScrollInteractionWithRetry(attempt + 1), this._retryDelay(attempt, 500));
             return;
         }
         try { this._watchForUserScrollInteraction(); } catch (_) {}
@@ -2830,7 +2998,7 @@ module.exports = class ByeBlocked {
         const patchedRemoveChild = function(child) {
             if (child && child.parentNode !== this) {
                 if (self._isNmbTrackedNode(child)) {
-                    console.warn("[ByeBlocked] removeChild blocked: node tracked by ByeBlocked was no longer a child (avoiding NotFoundError).", { parent: this, child: child });
+                    self.logger?.warn("removeChild blocked: node tracked by ByeBlocked was no longer a child (avoiding NotFoundError).");
                     noteSwallow();
                     return child;
                 }
@@ -2840,7 +3008,7 @@ module.exports = class ByeBlocked {
                 return originalRemoveChild.call(this, child);
             } catch (err) {
                 if (err instanceof DOMException && err.name === "NotFoundError" && self._isNmbTrackedNode(child)) {
-                    console.warn("[ByeBlocked] removeChild threw NotFoundError on a node tracked by ByeBlocked - swallowed to avoid a crash.", { parent: this, child: child });
+                    self.logger?.warn("removeChild threw NotFoundError on a node tracked by ByeBlocked - swallowed to avoid a crash.");
                     noteSwallow();
                     return child;
                 }
@@ -2850,7 +3018,7 @@ module.exports = class ByeBlocked {
         const patchedInsertBefore = function(newNode, referenceNode) {
             if (referenceNode && referenceNode.parentNode !== this) {
                 if (self._isNmbTrackedNode(referenceNode)) {
-                    console.warn("[ByeBlocked] insertBefore blocked: reference node tracked by ByeBlocked was no longer a child (avoiding NotFoundError).", { parent: this, referenceNode: referenceNode });
+                    self.logger?.warn("insertBefore blocked: reference node tracked by ByeBlocked was no longer a child (avoiding NotFoundError).");
                     noteSwallow();
                     return originalInsertBefore.call(this, newNode, null);
                 }
@@ -2860,7 +3028,7 @@ module.exports = class ByeBlocked {
                 return originalInsertBefore.call(this, newNode, referenceNode);
             } catch (err) {
                 if (err instanceof DOMException && err.name === "NotFoundError" && self._isNmbTrackedNode(referenceNode)) {
-                    console.warn("[ByeBlocked] insertBefore threw NotFoundError on a node tracked by ByeBlocked - swallowed to avoid a crash.", { parent: this, referenceNode: referenceNode });
+                    self.logger?.warn("insertBefore threw NotFoundError on a node tracked by ByeBlocked - swallowed to avoid a crash.");
                     noteSwallow();
                     return originalInsertBefore.call(this, newNode, null);
                 }
@@ -2900,7 +3068,7 @@ module.exports = class ByeBlocked {
                 return count < SWALLOW_RATE_THRESHOLD;
             },
             () => {
-                console.warn(`[ByeBlocked] The DOM removal guard swallowed ${lastMeasuredCount} removeChild/insertBefore errors in the last check window (threshold: ${SWALLOW_RATE_THRESHOLD}). This can mean Discord changed how it reconciles the DOM - consider updating the plugin or reporting this.`);
+                this.logger.warn(`The DOM removal guard swallowed ${lastMeasuredCount} removeChild/insertBefore errors in the last check window (threshold: ${SWALLOW_RATE_THRESHOLD}). This can mean Discord changed how it reconciles the DOM - consider updating the plugin or reporting this.`);
             },
             1
         );
@@ -2962,9 +3130,15 @@ module.exports = class ByeBlocked {
                 return;
             }
             this.isRunning = false;
-            this.toast('ByeBlocked: nao foi possivel localizar o RelationshipStore do Discord apos varias tentativas. O Discord provavelmente mudou algo - verifique se ha uma atualizacao do plugin.', 'error');
+            if (!this._relStoreRetryToastShown) {
+                this._relStoreRetryToastShown = true;
+                this.toast('ByeBlocked: RelationshipStore nao localizado ainda. Continuarei tentando em segundo plano - se o Discord mudou algo, verifique se ha atualizacao do plugin.', 'warn');
+            }
+            clearTimeout(this._moduleRetryTimeout);
+            this._moduleRetryTimeout = setTimeout(() => this.start(0), 60000);
             return;
         }
+        this._relStoreRetryToastShown = false;
         clearTimeout(this._moduleRetryTimeout);
         const p = this._patcher;
         this._runEarlyPatches();
@@ -3290,7 +3464,7 @@ module.exports = class ByeBlocked {
                                     ch[key] = value;
                                 }
                             }
-                        } catch (e) { console.error(`[ByeBlocked] key=${key} falha ao migrar instâncias de volta durante stop()`, e); }
+                        } catch (e) { this.logger.error(`key=${key} falha ao migrar instâncias de volta durante stop()`, e); }
                     }
                 }
             }
@@ -3363,36 +3537,14 @@ module.exports = class ByeBlocked {
         this.modules.RelationshipStore = getStore(...ByeBlocked.STORE_NAMES.RELATIONSHIP);
         this._resolveRelationshipMethods();
         const relationshipStoreJustAppeared = !hadRelationshipStore && !!this._relIsBlockedFn;
-        this.modules.GuildMemberStore = getStore(...ByeBlocked.STORE_NAMES.GUILD_MEMBER);
-        this.modules.ReactionsStore = getStore(...ByeBlocked.STORE_NAMES.REACTIONS);
-        this.modules.SortedVoiceStateStore = getStore(...ByeBlocked.STORE_NAMES.VOICE_STATE);
-        this.modules.StageChannelParticipantStore = getStore(...ByeBlocked.STORE_NAMES.STAGE_PARTICIPANT);
-        this.modules.StageInstanceStore = getStore(...ByeBlocked.STORE_NAMES.STAGE_INSTANCE);
-        this.modules.ActivityStore = getStore(...ByeBlocked.STORE_NAMES.ACTIVITY);
-        this.modules.ChannelStore = getStore("ChannelStore", "ChannelsStore");
+        this._resolveSimpleStores();
         this.modules.MessageStore = getStore("MessageStore", "MessagesStore", "ChannelMessagesStore");
         this._resolveMessagesGet();
-        this.modules.UserStore = getStore("UserStore", "UsersStore", "CurrentUserStore");
-        this.modules.SelectedGuildStore = getStore("SelectedGuildStore", "SelectedGuildIdStore");
         this.modules.RelationshipUtils = getModule(m => m?.addRelationship && m?.removeRelationship, undefined, "RelationshipUtils");
-        this.modules.SelectedChannelStore = getStore("SelectedChannelStore", "ChannelSelectedStore");
-        this.modules.CallStore = getStore("CallStore", "VoiceCallStore");
-        this.modules.VoiceStateStore = getStore("VoiceStateStore", "VoiceStatesStore");
-        this.modules.MediaEngineStore = getStore("MediaEngineStore", "MediaEngineManagerStore");
-        this.modules.ReadStateStore = getStore("ReadStateStore", "ChannelReadStateStore", "ReadStatesStore");
-        this.modules.GuildReadStateStore = getStore("GuildReadStateStore", "GuildUnreadStore", "GuildReadStatesStore");
-        this.modules.GuildChannelStore = getStore("GuildChannelStore", "GuildChannelsStore");
-        this.modules.GuildStore = getStore("GuildStore", "GuildsStore");
         this.modules.PrivateChannelStore = getStore("PrivateChannelStore", "PrivateChannelsStore")
             || (["getPrivateChannels", "getPrivateChannelIds", "getMutablePrivateChannels"].some(k => typeof this.modules.ChannelStore?.[k] === "function")
                 ? this.modules.ChannelStore
                 : null);
-        this.modules.NotificationSettingsStore = getStore("NotificationSettingsStore", "NotificationStore");
-        this.modules.ChannelPinsStore = getStore("ChannelPinsStore", "PinnedMessagesStore");
-        this.modules.ActiveJoinedThreadsStore = getStore("ActiveJoinedThreadsStore", "JoinedThreadsStore");
-        this.modules.ThreadStore = getStore("ActiveThreadsStore", "ThreadStore", "ForumChannelStore", "GuildThreadStore", "ThreadsStore");
-        this.modules.GuildScheduledEventStore = getStore("GuildScheduledEventStore", "ScheduledEventStore", "GuildEventsStore");
-        this.modules.ChannelStatusStore = getStore("ChannelStatusStore", "VoiceChannelStatusStore", "ChannelStatusesStore");
         this._resolveDispatcher();
         this._resolveRtcModules();
         this._resolveMediaEngineActions();
@@ -3587,10 +3739,14 @@ module.exports = class ByeBlocked {
     }
     _resolveMessagesGet() {
         const store = this.modules.MessageStore;
+        if (store && this._rawGetMessagesSourceStore && this._rawGetMessagesSourceStore !== store) {
+            this._rawGetMessages = null;
+        }
         if (store && !this._rawGetMessages) {
             for (const method of ["getMessages", "getMessagesForChannel", "getMessagesForChannelId", "getChannelMessages"]) {
                 if (typeof store[method] === "function") {
                     this._rawGetMessages = store[method].bind(store);
+                    this._rawGetMessagesSourceStore = store;
                     break;
                 }
             }
@@ -3621,7 +3777,7 @@ module.exports = class ByeBlocked {
         this.modules.Dispatcher = null;
         if (!this._dispatcherResolveWarned) {
             this._dispatcherResolveWarned = true;
-            console.warn("[ByeBlocked] Could not resolve Discord's Flux Dispatcher through any of the 4 known lookup strategies. Features that rely on it (pin/message-load filtering, notification suppression, call/voice tracking) will be degraded until the plugin is updated.");
+            this.logger.warn("Could not resolve Discord's Flux Dispatcher through any of the 4 known lookup strategies. Features that rely on it (pin/message-load filtering, notification suppression, call/voice tracking) will be degraded until the plugin is updated.");
         }
     }
     _registerModuleRefresh() {
@@ -3664,7 +3820,7 @@ module.exports = class ByeBlocked {
         }
         this._nmbMissingCoreModules = missing;
         if (missing.length) {
-            console.warn(`[ByeBlocked] Essential modules not found: ${missing.join(", ")}. Discord likely changed something internally - related features may not work until the plugin is updated.`);
+            this.logger.warn(`Essential modules not found: ${missing.join(", ")}. Discord likely changed something internally - related features may not work until the plugin is updated.`);
             this._nmbMaybeWarnViaProbe(missing);
         }
         return missing;
@@ -3697,7 +3853,7 @@ module.exports = class ByeBlocked {
             } catch (_) {}
         }
         if (!pcs) {
-            if (attempt < 20) { setTimeout(() => this.patchPrivateChannelStore(attempt + 1), 2000); return; }
+            if (attempt < 20) { setTimeout(() => this.patchPrivateChannelStore(attempt + 1), this._retryDelay(attempt, 2000)); return; }
             this._patcher?._warn("patchPrivateChannelStore", new Error("PrivateChannelStore unavailable after several attempts"));
             this._retryGuardExit("patchPrivateChannelStore");
             return;
@@ -3761,7 +3917,7 @@ module.exports = class ByeBlocked {
             return;
         }
         if (attempt < 20) {
-            setTimeout(() => this.patchPrivateChannelStore(attempt + 1), 2000);
+            setTimeout(() => this.patchPrivateChannelStore(attempt + 1), this._retryDelay(attempt, 2000));
         } else {
             this._patcher?._warn("patchPrivateChannelStore", new Error("no expected method found on PrivateChannelStore after several attempts"));
             this._retryGuardExit("patchPrivateChannelStore");
@@ -3773,7 +3929,7 @@ module.exports = class ByeBlocked {
         if (!this._retryGuardEnter("patchGuildScheduledEventStore", attempt)) return;
         const store = this.modules.GuildScheduledEventStore;
         if (!store) {
-            if (attempt < 15) { setTimeout(() => this.patchGuildScheduledEventStore(attempt + 1), 2000); return; }
+            if (attempt < 15) { setTimeout(() => this.patchGuildScheduledEventStore(attempt + 1), this._retryDelay(attempt, 2000)); return; }
             this._patcher?._warn("patchGuildScheduledEventStore", new Error("GuildScheduledEventStore unavailable after several attempts"));
             this._retryGuardExit("patchGuildScheduledEventStore");
             return;
@@ -3865,7 +4021,7 @@ module.exports = class ByeBlocked {
             return;
         }
         if (attempt < 15) {
-            setTimeout(() => this.patchGuildScheduledEventStore(attempt + 1), 2000);
+            setTimeout(() => this.patchGuildScheduledEventStore(attempt + 1), this._retryDelay(attempt, 2000));
         } else {
             this._patcher?._warn("patchGuildScheduledEventStore", new Error("no expected method found on GuildScheduledEventStore after several attempts"));
             this._retryGuardExit("patchGuildScheduledEventStore");
@@ -3876,7 +4032,7 @@ module.exports = class ByeBlocked {
         if (!this._retryGuardEnter("patchEventsSidebarUnread", attempt)) return;
         const rs = this.modules.ReadStateStore;
         if (!rs) {
-            if (attempt < 15) { setTimeout(() => this.patchEventsSidebarUnread(attempt + 1), 2000); return; }
+            if (attempt < 15) { setTimeout(() => this.patchEventsSidebarUnread(attempt + 1), this._retryDelay(attempt, 2000)); return; }
             this._patcher?._warn("patchEventsSidebarUnread", new Error("ReadStateStore unavailable after several attempts"));
             this._retryGuardExit("patchEventsSidebarUnread");
             return;
@@ -3979,7 +4135,7 @@ module.exports = class ByeBlocked {
             return;
         }
         if (attempt < 15) {
-            setTimeout(() => this.patchEventsSidebarUnread(attempt + 1), 2000);
+            setTimeout(() => this.patchEventsSidebarUnread(attempt + 1), this._retryDelay(attempt, 2000));
         } else {
             this._patcher?._warn("patchEventsSidebarUnread", new Error("no expected method found on ReadStateStore after several attempts"));
             this._retryGuardExit("patchEventsSidebarUnread");
@@ -4005,6 +4161,7 @@ module.exports = class ByeBlocked {
                 if (mod && key == null) key = this._wpFindFnKeyFuzzy(mod, ...AUTOCOMPLETE_TERMS);
                 if (mod && key) {
                 this.patchInstead(mod, key, function(ctx, args, orig) {
+                    self._health?.heartbeat("autocompleteRowPatch");
                     try {
                         if (!self.settings.places.autocomplete) return orig.apply(ctx, args);
                         const props = args?.[0] || ctx?.props;
@@ -4019,7 +4176,7 @@ module.exports = class ByeBlocked {
             }
         } catch (err) { this._patcher?._warn("patchAutocompleteRowComponent", err); }
         if (!this._autocompleteRowPatched && attempt < 6) {
-            setTimeout(() => this.patchAutocompleteRowComponent(attempt + 1), 5000);
+            setTimeout(() => this.patchAutocompleteRowComponent(attempt + 1), this._retryDelay(attempt, 5000));
         } else if (!this._autocompleteRowPatched) {
             this._patcher?._warn("patchAutocompleteRowComponent", new Error("ran out of attempts - no module matched the autocomplete-row term set; Discord likely renamed something in this component"));
         }
@@ -4029,18 +4186,27 @@ module.exports = class ByeBlocked {
         if (this._voiceUserComponentPatched) return;
         const self = this;
         try {
-            const VOICE_USER_TERMS = ["voiceUser", "voiceStates", "user", "speaking"];
+            const VOICE_USER_TERMS = ["userId", "speaking", "muted", "deafen", "ringing"];
             const VOICE_USER_REQUIRED = 3;
-            const result = BdApi.Webpack.getWithKey(m => {
+            const raw = BdApi.Webpack.getWithKey(m => {
                 if (typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
                     return VOICE_USER_TERMS.filter(t => src.includes(t)).length >= VOICE_USER_REQUIRED;
                 } catch (_) { return false; }
             });
+            let result = null;
+            if (raw) {
+                if (Array.isArray(raw)) result = raw;
+                else if (typeof raw[Symbol.iterator] === "function" || typeof raw.next === "function") {
+                    const pair = [...raw];
+                    if (pair.length && pair[0] !== undefined) result = pair;
+                }
+            }
             if (result) {
                 const [mod, key] = result;
                 this.patchInstead(mod, key, function(ctx, args, orig) {
+                    self._health?.heartbeat("voiceUserComponentPatch");
                     try {
                         const props = args?.[0] || ctx?.props;
                         const uid = props?.user?.id || props?.userId || self.extractUserId(props);
@@ -4053,7 +4219,7 @@ module.exports = class ByeBlocked {
             }
         } catch (err) { this._patcher?._warn("patchVoiceUserComponent", err); }
         if (!this._voiceUserComponentPatched && attempt < 6) {
-            setTimeout(() => this.patchVoiceUserComponent(attempt + 1), 5000);
+            setTimeout(() => this.patchVoiceUserComponent(attempt + 1), this._retryDelay(attempt, 5000));
         } else if (!this._voiceUserComponentPatched) {
             this._patcher?._warn("patchVoiceUserComponent", new Error("ran out of attempts - no module matched the voice-user term set; Discord likely renamed something in this component"));
         }
@@ -4066,7 +4232,7 @@ module.exports = class ByeBlocked {
         if (!this._retryGuardEnter("patchGuildMemberStore", attempt)) return;
         const gms = this.modules.GuildMemberStore;
         if (!gms) {
-            if (attempt < 15) { setTimeout(() => this.patchGuildMemberStore(attempt + 1), 2000); return; }
+            if (attempt < 15) { setTimeout(() => this.patchGuildMemberStore(attempt + 1), this._retryDelay(attempt, 2000)); return; }
             this._patcher?._warn("patchGuildMemberStore", new Error("GuildMemberStore unavailable after several attempts"));
             this._retryGuardExit("patchGuildMemberStore");
             return;
@@ -4118,7 +4284,7 @@ module.exports = class ByeBlocked {
         this._guildMemberStorePatched = patchedAny;
         if (!patchedAny) {
             if (attempt < 15) {
-                setTimeout(() => this.patchGuildMemberStore(attempt + 1), 2000);
+                setTimeout(() => this.patchGuildMemberStore(attempt + 1), this._retryDelay(attempt, 2000));
             } else {
                 this._patcher?._warn("patchGuildMemberStore", new Error("no expected method found on GuildMemberStore after several attempts"));
                 this._retryGuardExit("patchGuildMemberStore");
@@ -4167,7 +4333,7 @@ module.exports = class ByeBlocked {
             }
         }
         if (!mod || !key || typeof mod[key] !== "function") {
-            if (attempt < 20) setTimeout(() => this.patchMentionAutocomplete(attempt + 1), 3e3);
+            if (attempt < 20) setTimeout(() => this.patchMentionAutocomplete(attempt + 1), this._retryDelay(attempt, 3e3));
             else this._patcher._logFail("patchMentionAutocomplete", new Error("ran out of attempts - indicators did not find the module; see maintenance notes"));
             return;
         }
@@ -4210,7 +4376,7 @@ return false;
             return;
         }
         if (attempt < 6) {
-            setTimeout(() => this.patchActivePostsPopoverComponent(attempt + 1), 5000);
+            setTimeout(() => this.patchActivePostsPopoverComponent(attempt + 1), this._retryDelay(attempt, 5000));
         } else {
             this._patcher?._warn("patchActivePostsPopoverComponent", new Error("ran out of attempts to locate the active posts popover module"));
             this._retryGuardExit("patchActivePostsPopoverComponent");
@@ -4232,7 +4398,7 @@ return false;
         if (patched) {
             this._guildMembersPagePatched = true;
         } else if (attempt < 20) {
-            setTimeout(() => this.patchGuildMembersPageRow(attempt + 1), 2500);
+            setTimeout(() => this.patchGuildMembersPageRow(attempt + 1), this._retryDelay(attempt, 2500));
         } else {
             this._patcher._logFail("patchGuildMembersPageRow", new Error("ran out of attempts - indicators did not find the module; see maintenance notes"));
         }
@@ -4240,17 +4406,95 @@ return false;
     patchMemberListRow(attempt = 0) {
         if (!this.settings.places.memberList || this._memberListRowPatched) return;
         const self = this;
-        const patched = this._wpPatchRenderBySourceHeuristic(props => {
+        const suppressByProps = props => {
             if (!self.settings.places.memberList) return false;
+            if (!props || typeof props !== "object" || !props.guildId) return false;
             const userId = props?.user?.id || self.extractUserId(props);
             return !!(userId && self.shouldHide(userId));
-        }, ["nameplate", "hideClanTag", "colorRoleName", "shouldAnimateStatus", "premiumType", "isOwner", "statusColor"], 3, "patchMemberListRow");
+        };
+        const patchedViaHeuristic = this._wpPatchRenderBySourceHeuristic(
+            suppressByProps,
+            [
+                "guildId", "user",
+                "isOwner", "isMobileOnline", "isVROnline", "premiumSince",
+                "colorString", "avatarDecoration", "statusColor", "activity"
+            ],
+            3,
+            "patchMemberListRow:heuristic"
+        );
+        if (patchedViaHeuristic) {
+            this._memberListRowPatched = true;
+            return;
+        }
+        const rowSelector = '[data-list-item-id^="members-"], ul[aria-label] > li, [role="listitem"]';
+        const findMemberListRowComponent = () => {
+            const candidates = document.querySelectorAll(rowSelector);
+            for (const el of candidates) {
+                const match = self.findComponentViaFiber(el, (type, props) => {
+                    if (!props || typeof props !== "object") return false;
+                    const uid = props.user?.id || self.extractUserId(props.user) || self.extractUserId(props);
+                    return !!(props.guildId && uid);
+                }, 20, "patchMemberListRow:fiberWalk");
+                if (match) return match;
+            }
+            return null;
+        };
+        const patchExactComponent = Comp => {
+            if (!Comp || Comp.__byeblockedMemberRowPatched) return !!Comp?.__byeblockedMemberRowPatched;
+            const suppress = suppressByProps;
+            try {
+                const found = self._wpGetModuleWithKey(m => m === Comp);
+                if (found?.[0] && found[1]) {
+                    self.patchInstead(found[0], found[1], function(ctx, args, orig) {
+                        try {
+                            const props = args?.[0] || ctx?.props;
+                            if (suppress(props)) return null;
+                        } catch (_) {}
+                        return orig.apply(ctx, args);
+                    });
+                    Comp.__byeblockedMemberRowPatched = true;
+                    return true;
+                }
+            } catch (_) {}
+            try {
+                const wrapper = new Proxy(Comp, {
+                    apply(target, thisArg, args) {
+                        try {
+                            const props = args?.[0];
+                            if (suppress(props)) return null;
+                        } catch (_) {}
+                        return Reflect.apply(target, thisArg, args);
+                    }
+                });
+                const container = { Comp };
+                self.patchInstead(container, "Comp", () => wrapper);
+                Comp.__byeblockedMemberRowPatched = true;
+                return true;
+            } catch (_) {}
+            return false;
+        };
+        const hadCandidateRows = document.querySelector(rowSelector) !== null;
+        const RowComponent = hadCandidateRows ? findMemberListRowComponent() : null;
+        const patched = RowComponent ? patchExactComponent(RowComponent) : false;
         if (patched) {
             this._memberListRowPatched = true;
-        } else if (attempt < 20) {
-            setTimeout(() => this.patchMemberListRow(attempt + 1), 2500);
+            return;
+        }
+        if (!hadCandidateRows) {
+            if (this._memberListRowWaitCycles === undefined) this._memberListRowWaitCycles = 0;
+            this._memberListRowWaitCycles++;
+            if (this._memberListRowWaitCycles < 750) {
+                setTimeout(() => this.patchMemberListRow(attempt), 400);
+                return;
+            }
+            this._patcher._logFail("patchMemberListRow", new Error("gave up waiting for the member list to appear on screen after ~5 minutes"));
+            return;
+        }
+        this._memberListRowWaitCycles = 0;
+        if (attempt < 20) {
+            setTimeout(() => this.patchMemberListRow(attempt + 1), this._retryDelay(attempt, 2500));
         } else {
-            this._patcher._logFail("patchMemberListRow", new Error("ran out of attempts - indicators did not find the module; see maintenance notes"));
+            this._patcher._logFail("patchMemberListRow", new Error("ran out of attempts - could not locate a member-list row with both guildId and a resolvable user id in its DOM/Fiber tree; the member list may not have been open/rendered during any attempt. See maintenance notes."));
         }
     }
     patchGroupDMChannelPrototype(attempt = 0) {
@@ -4289,7 +4533,7 @@ return false;
                 proto = Object.getPrototypeOf(sampleChannel);
             }
             if (!proto || proto === Object.prototype) {
-                if (attempt < 20) { setTimeout(() => this.patchGroupDMChannelPrototype(attempt + 1), 2500); return; }
+                if (attempt < 20) { setTimeout(() => this.patchGroupDMChannelPrototype(attempt + 1), this._retryDelay(attempt, 2500)); return; }
                 this._patcher._logFail("patchGroupDMChannelPrototype", new Error("invalid Channel prototype - see maintenance notes"));
                 this._retryGuardExit("patchGroupDMChannelPrototype");
                 return;
@@ -4379,16 +4623,17 @@ return false;
             try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
             try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
         } catch (e) {
-            if (attempt < 20) { setTimeout(() => this.patchGroupDMChannelPrototype(attempt + 1), 2500); return; }
+            if (attempt < 20) { setTimeout(() => this.patchGroupDMChannelPrototype(attempt + 1), this._retryDelay(attempt, 2500)); return; }
             this._patcher._logFail("patchGroupDMChannelPrototype", e);
             this._retryGuardExit("patchGroupDMChannelPrototype");
         }
     }
     _scheduleGroupDMPrototypeRetryOnDataReady(attempt) {
-        if (attempt >= 20) {
-            this._patcher._logFail("patchGroupDMChannelPrototype", new Error("no Group DM found to locate the prototype - see maintenance notes"));
-            this._retryGuardExit("patchGroupDMChannelPrototype");
-            return;
+        const FAST_RETRY_ATTEMPTS = 20;
+        const isSlowPhase = attempt >= FAST_RETRY_ATTEMPTS;
+        if (isSlowPhase && !this._groupDMPrototypeSlowRetryWarned) {
+            this._groupDMPrototypeSlowRetryWarned = true;
+            this.logger?.warn(`patchGroupDMChannelPrototype: no Group DM found after ${FAST_RETRY_ATTEMPTS} attempts - will keep watching for one in the background instead of giving up.`);
         }
         let done = false;
         const stores = [this.modules.PrivateChannelStore, this.modules.ChannelStore].filter(s => s?.addChangeListener && s?.removeChangeListener);
@@ -4404,11 +4649,12 @@ return false;
             this.patchGroupDMChannelPrototype(attempt + 1);
         };
         for (const s of stores) { try { s.addChangeListener(onChange); } catch (_) {} }
+        const backstopDelay = isSlowPhase ? 15000 : 2500;
         const timer = setTimeout(() => {
             if (done || this._groupDMPrototypePatched) return;
             cleanup();
-            this.patchGroupDMChannelPrototype(attempt + 1);
-        }, 2500);
+            this.patchGroupDMChannelPrototype(isSlowPhase ? attempt : attempt + 1);
+        }, backstopDelay);
     }
     getGroupDMRawRecipientIds(channel) {
         if (!channel) return [];
@@ -4457,7 +4703,7 @@ return false;
             });
             this._registerVoiceStatesAltHealthCheck(voiceStore, altMethodName);
         } else {
-            console.warn("[ByeBlocked] Could not locate the voice states method used by the profile popout (getVoiceStatesForChannelAlt or equivalent). The avatar of blocked users may reappear in this specific card until the plugin is updated.");
+            this.logger.warn("Could not locate the voice states method used by the profile popout (getVoiceStatesForChannelAlt or equivalent). The avatar of blocked users may reappear in this specific card until the plugin is updated.");
         }
         const stageStore = this.modules.StageChannelParticipantStore;
         if (!this.originalStageMethods) this.originalStageMethods = {};
@@ -4636,7 +4882,7 @@ return false;
             }
         } catch (_) {}
         if (!this._stageRenderComponentPatched && attempt < 20) {
-            setTimeout(() => this.patchStageRenderComponent(attempt + 1), 3000);
+            setTimeout(() => this.patchStageRenderComponent(attempt + 1), this._retryDelay(attempt, 3000));
         } else if (!this._stageRenderComponentPatched) {
             this._patcher._logFail("patchStageRenderComponent", new Error("ran out of attempts - weak indicators did not find the module; see maintenance notes"));
         }
@@ -4704,7 +4950,7 @@ return false;
             }
         } catch (_) {}
         if (!this._activityPanelComponentPatched && attempt < 20) {
-            setTimeout(() => this.patchActivityPanelComponent(attempt + 1), 3000);
+            setTimeout(() => this.patchActivityPanelComponent(attempt + 1), this._retryDelay(attempt, 3000));
         } else if (!this._activityPanelComponentPatched) {
             this._patcher._logFail("patchActivityPanelComponent", new Error("ran out of attempts - weak indicators did not find the module; see maintenance notes"));
         }
@@ -4764,7 +5010,7 @@ return false;
             return;
         }
         if (attempt < 20) {
-            setTimeout(() => this.patchRelationshipUpdates(attempt + 1), 2000);
+            setTimeout(() => this.patchRelationshipUpdates(attempt + 1), this._retryDelay(attempt, 2000));
             return;
         }
         this._patcher?._warn("patchRelationshipUpdates", new Error("RelationshipStore.addChangeListener unavailable after several attempts"));
@@ -4775,175 +5021,228 @@ return false;
         if (this._forumPostComponentPatched) return;
         if (!this._retryGuardEnter("patchForumPostComponent", attempt)) return;
         const self = this;
-        const FORUM_CARD_STRINGS = [ "mainCard_", "forumPostItem", "ForumPostCard", "forum-channel-list-" ];
-        const looksLikeForumCardFn = fn => {
-            if (typeof fn !== "function") return false;
+        const authorIdFromThreadId = threadId => {
+            if (!threadId) return null;
             try {
-                const src = Function.prototype.toString.call(fn);
-                const matches = FORUM_CARD_STRINGS.filter(s => src.includes(s));
-                return matches.length >= 2;
-            } catch (_) {
-                return false;
-            }
+                const ch = self.modules.ChannelStore?.getChannel?.(threadId);
+                const ownerId = ch?.ownerId || ch?.owner_id;
+                if (ownerId) return ownerId;
+            } catch (_) {}
+            return null;
         };
-        const authorIdFromProps = props => {
-            if (!props) return null;
-            const threadIdCandidates = [ props.thread?.id, props.post?.id, props.channel?.id, props.item?.id, props.data?.id, props.id ];
-            for (const threadId of threadIdCandidates) {
-                if (!threadId) continue;
-                try {
-                    const ch = self.modules.ChannelStore?.getChannel?.(threadId);
-                    const ownerId = ch?.ownerId || ch?.owner_id;
-                    if (ownerId) return ownerId;
-                } catch (_) {}
-            }
-            const direct = self.extractUserId(props);
-            if (direct) return direct;
-            const candidates = [ props.thread, props.post, props.channel, props.item, props.data ];
-            for (const c of candidates) {
-                const found = self.extractUserId(c);
-                if (found) return found;
+        const extractThreadId = row => {
+            if (row == null) return null;
+            if (typeof row === "string" || typeof row === "number") return row;
+            if (typeof row === "object") {
+                return row.threadId || row.id || row.channelId || null;
             }
             return null;
         };
-        const beforeRender = (thisArg, args) => {
-            try {
-                const props = args?.[0] || thisArg?.props;
-                const authorId = authorIdFromProps(props);
-                if (authorId && self.shouldHide(authorId)) {
-                    return null;
-                }
-            } catch (_) {}
-            return undefined;
+        const wrapRenderRow = originalRenderRow => {
+            if (typeof originalRenderRow !== "function" || originalRenderRow.__byeblockedWrapped) return originalRenderRow;
+            const wrapped = function(...args) {
+                self._health?.heartbeat("forumPostPatch");
+                try {
+                    if (self.settings.places.messages) {
+                        const rowArg = args?.[0];
+                        const row = (rowArg && typeof rowArg === "object" && "row" in rowArg) ? rowArg.row : rowArg;
+                        const threadId = extractThreadId(row) || extractThreadId(rowArg);
+                        const authorId = authorIdFromThreadId(threadId);
+                        if (authorId && self.shouldHide(authorId)) return null;
+                    }
+                } catch (_) {}
+                return originalRenderRow.apply(this, args);
+            };
+            wrapped.__byeblockedWrapped = true;
+            return wrapped;
+        };
+        const isForumRowListProps = props => {
+            return !!(props && typeof props === "object"
+                && typeof props.renderRow === "function"
+                && ("rowHeight" in props || "chunkSize" in props)
+                && !props.renderRow.__byeblockedWrapped);
         };
         let patchedAny = false;
+        const hadCandidateEl = !!(
+            document.querySelector('[class*="card_"][data-item-role="item"]')
+            || document.querySelector('[data-item-role="item"]')
+            || document.querySelector('[data-list-id^="forum-channel-list-"]')
+            || document.querySelector('[class*="mainCard"]')
+            || document.querySelector('[class*="card"]')
+        );
+        if (hadCandidateEl) {
         try {
-            const CardModule = this._wpGetModule(m => looksLikeForumCardFn(m) || looksLikeForumCardFn(m?.default) || looksLikeForumCardFn(m?.prototype?.render), {
-                searchExports: true
-            }, "Forum post card component (patchForumPostComponent target)");
-            if (CardModule?.prototype?.render && looksLikeForumCardFn(CardModule.prototype.render)) {
-                this.patchInstead(CardModule.prototype, "render", function(context, args, original) {
-                    const result = beforeRender(context, [ context.props ]);
-                    return result === null ? null : original.apply(context, args);
-                });
-                patchedAny = true;
-            } else if (CardModule?.default && looksLikeForumCardFn(CardModule.default)) {
-                this.patchInstead(CardModule, "default", function(context, args, original) {
-                    const result = beforeRender(context, args);
-                    return result === null ? null : original.apply(context, args);
-                });
-                patchedAny = true;
+            const candidateEl = document.querySelector('[class*="card_"][data-item-role="item"]')
+                || document.querySelector('[data-item-role="item"]')
+                || document.querySelector('[data-list-id^="forum-channel-list-"]')
+                || document.querySelector('[class*="mainCard"]')
+                || document.querySelector('[class*="card"]');
+            if (candidateEl) {
+                const rowListComponent = this.findComponentViaFiber(
+                    candidateEl,
+                    (type, props) => isForumRowListProps(props),
+                    30,
+                    "patchForumPostComponent:findRowList"
+                );
+                if (rowListComponent) {
+                    this.patchBefore(rowListComponent, "prototype" in rowListComponent && rowListComponent.prototype?.render ? undefined : undefined, () => {});
+                }
             }
         } catch (_) {}
-        if (!patchedAny) {
-            try {
-                const result = this._wpGetModuleWithKey(m => {
-                    if (!m || typeof m !== "function") return false;
-                    return looksLikeForumCardFn(m);
-                }, "Forum post card component (patchForumPostComponent target)");
-                if (result && result[1] != null) {
-                    const [moduleObj, key] = result;
-                    this.patchInstead(moduleObj, key, function(context, args, original) {
-                        const result = beforeRender(context, args);
-                        return result === null ? null : original.apply(context, args);
-                    });
-                    patchedAny = true;
+        try {
+            const candidateEl = document.querySelector('[data-item-role="item"]')
+                || document.querySelector('[data-list-id^="forum-channel-list-"]');
+            if (candidateEl) {
+                let fiber = null;
+                try { fiber = BdApi.ReactUtils.getInternalInstance(candidateEl); } catch (_) {}
+                for (let hop = 0; hop < 30 && fiber && !patchedAny; hop++, fiber = fiber.return) {
+                    const props = fiber.memoizedProps || fiber.pendingProps;
+                    if (!isForumRowListProps(props)) continue;
+                    const compType = fiber.type;
+                    if (typeof compType !== "function") continue;
+                    try {
+                        const key = this._r.findFnKey({ [compType.name || "comp"]: compType }, "renderRow");
+                    } catch (_) {}
+                    if (compType.prototype && typeof compType.prototype.render === "function") {
+                        this.patchBefore(compType.prototype, "render", ctx => {
+                            try {
+                                if (ctx?.props && typeof ctx.props.renderRow === "function" && !ctx.props.renderRow.__byeblockedWrapped) {
+                                    ctx.props.renderRow = wrapRenderRow(ctx.props.renderRow);
+                                }
+                            } catch (_) {}
+                        });
+                        patchedAny = true;
+                    } else {
+                        try {
+                            const found = this._wpGetModuleWithKey(m => m === compType, "Forum row-list functional component");
+                            if (found?.[0] && found[1] != null) {
+                                const [moduleObj, key] = found;
+                                this.patchBefore(moduleObj, key, (_, args) => {
+                                    try {
+                                        const p = args?.[0];
+                                        if (p && typeof p.renderRow === "function" && !p.renderRow.__byeblockedWrapped) {
+                                            p.renderRow = wrapRenderRow(p.renderRow);
+                                        }
+                                    } catch (_) {}
+                                });
+                                patchedAny = true;
+                            }
+                        } catch (_) {}
+                    }
                 }
-            } catch (_) {}
+            }
+        } catch (_) {}
         }
         if (patchedAny) {
             this._forumPostComponentPatched = true;
             this._retryGuardExit("patchForumPostComponent");
             return;
         }
-        if (attempt < 6) {
-            setTimeout(() => this.patchForumPostComponent(attempt + 1), 5000);
+        if (!hadCandidateEl) {
+            if (this._forumPostWaitCycles === undefined) this._forumPostWaitCycles = 0;
+            this._forumPostWaitCycles++;
+            if (this._forumPostWaitCycles < 750) {
+                setTimeout(() => this.patchForumPostComponent(attempt), 400);
+                return;
+            }
+            this._patcher?._warn("patchForumPostComponent", new Error("gave up waiting for a forum channel's post list to be opened after ~5 minutes"));
+            this._retryGuardExit("patchForumPostComponent");
             return;
         }
-        this._patcher?._warn("patchForumPostComponent", new Error("ran out of attempts to locate the forum card module"));
+        this._forumPostWaitCycles = 0;
+        if (attempt < 10) {
+            setTimeout(() => this.patchForumPostComponent(attempt + 1), this._retryDelay(attempt, 5000));
+            return;
+        }
+        this._patcher?._warn("patchForumPostComponent", new Error("ran out of attempts to locate the forum row-list component - this patch only works while a forum channel's post list is open, so it may simply not have been mounted yet during any attempt"));
         this._retryGuardExit("patchForumPostComponent");
     }
     patchBlockedMessageGroup(attempt = 0) {
         if (!this.settings.places.messages) return;
         if (this._blockedMsgGroupPatched) return;
         if (!this._retryGuardEnter("patchBlockedMessageGroup", attempt)) return;
-        const BLOCKED_STRINGS = [ "MESSAGE_GROUP_BLOCKED", "blockedMessageGroup", "BlockedMessages", "blockedMessages", "messageGroupSpacing", "isBlockedMessage", "BLOCKED_MESSAGE" ];
-        const BLOCKED_REQUIRED = 2;
-        let bestHitCount = 0, bestHitStrings = [];
-        const countHits = src => {
-            const hits = BLOCKED_STRINGS.filter(s => src.includes(s));
-            if (hits.length > bestHitCount) { bestHitCount = hits.length; bestHitStrings = hits; }
-            return hits.length;
+        const BLOCKED_STRINGS = ["filterAfterTimestamp", "messageGroupSpacing", "showNewMessagesBar", "messageDisplayCompact", "channelStream", "permissionVersion", "editingMessageId", "keyboardModeEnabled", "showingQuarantineBanner", "hideSummaries", "typingGradient", "isGameInvitesPost"];
+        const BLOCKED_REQUIRED = 3;
+        const extractMessages = props => {
+            const out = [];
+            try {
+                const coll = props?.messages;
+                let list = null;
+                if (Array.isArray(coll)) {
+                    list = coll;
+                } else if (coll && typeof coll.toArray === "function") {
+                    list = coll.toArray();
+                } else if (coll && Array.isArray(coll.content)) {
+                    list = coll.content.map(item => (item && typeof item === "object" && "content" in item && "author" in (item.content || {})) ? item.content : item);
+                }
+                if (Array.isArray(list)) {
+                    for (const msg of list) {
+                        if (msg && typeof msg === "object" && ("author" in msg)) out.push(msg);
+                    }
+                }
+            } catch (_) {}
+            return out;
+        };
+        const shouldSuppressBlockedGroup = props => {
+            const messages = extractMessages(props);
+            if (!messages.length) return false;
+            return messages.every(msg => this.isBlockedMessageData(msg));
         };
         try {
-            const BlockedMessageGroup = this._wpGetModule(m => {
-                try {
-                    if (m?.displayName === "BlockedMessageGroup" || m?.name === "BlockedMessageGroup") return true;
-                    const renderSrc = m?.prototype?.render?.toString?.();
-                    if (renderSrc && countHits(renderSrc) >= BLOCKED_REQUIRED) return true;
-                    if (typeof m === "function") {
-                        const src = m.toString();
-                        if (countHits(src) >= BLOCKED_REQUIRED) return true;
-                    }
-                } catch (_) {}
-                return false;
-            }, undefined, "BlockedMessageGroup render");
-            if (BlockedMessageGroup?.prototype?.render) {
-                this.patchInstead(BlockedMessageGroup.prototype, "render", () => null);
-                this._blockedMsgGroupPatched = true;
-                this._retryGuardExit("patchBlockedMessageGroup");
-                return;
-            }
-        } catch (_) {}
-        try {
-            const result = this._wpGetModuleWithKey(m => {
-                if (!m || typeof m !== "function") return false;
-                try {
-                    const src = Function.prototype.toString.call(m);
-                    return countHits(src) >= BLOCKED_REQUIRED;
-                } catch (_) {
-                    return false;
-                }
-            }, "BlockedMessageGroup render");
-            if (result && result[1] != null) {
-                const [moduleObj, key] = result;
-                this.patchInstead(moduleObj, key, () => null);
-                this._blockedMsgGroupPatched = true;
-                this._retryGuardExit("patchBlockedMessageGroup");
-                return;
-            }
-        } catch (_) {}
-        try {
-            let patched = false;
-            BdApi.Webpack.getModule(m => {
-                if (patched || !m || typeof m !== "object") return false;
-                for (const key of Object.keys(m)) {
-                    if (patched) break;
-                    const val = m[key];
-                    if (typeof val !== "function") continue;
+            const msgEl = document.querySelector('[class*="message_"]');
+            if (msgEl) {
+                const Comp = this.findComponentViaFiber(msgEl, (type, props) => {
+                    if (!props || typeof props !== "object") return false;
+                    if (!("messages" in props) || !("showingQuarantineBanner" in props)) return false;
                     try {
-                        const src = Function.prototype.toString.call(val);
-                        if (countHits(src) >= BLOCKED_REQUIRED) {
-                            this.patchInstead(m, key, () => null);
-                            patched = true;
+                        const src = Function.prototype.toString.call(type);
+                        return BLOCKED_STRINGS.filter(s => src.includes(s)).length >= BLOCKED_REQUIRED;
+                    } catch (_) { return false; }
+                }, 30, "patchBlockedMessageGroup:fiberWalk");
+                if (Comp && !Comp.__byeblockedGroupPatched) {
+                    let didPatch = false;
+                    try {
+                        const found = this._wpGetModuleWithKey(m => m === Comp, "BlockedMessageGroup render");
+                        if (found?.[0] && found[1] != null) {
+                            this.patchInstead(found[0], found[1], function(ctx, args, orig) {
+                                try {
+                                    const props = args?.[0] || ctx?.props;
+                                    if (shouldSuppressBlockedGroup(props)) return null;
+                                } catch (_) {}
+                                return orig.apply(ctx, args);
+                            });
+                            didPatch = true;
                         }
                     } catch (_) {}
+                    if (!didPatch) {
+                        try {
+                            const wrapper = new Proxy(Comp, {
+                                apply(target, thisArg, args) {
+                                    try {
+                                        const props = args?.[0];
+                                        if (shouldSuppressBlockedGroup(props)) return null;
+                                    } catch (_) {}
+                                    return Reflect.apply(target, thisArg, args);
+                                }
+                            });
+                            const container = { Comp };
+                            this.patchInstead(container, "Comp", () => wrapper);
+                            didPatch = true;
+                        } catch (_) {}
+                    }
+                    if (didPatch) {
+                        Comp.__byeblockedGroupPatched = true;
+                        this._blockedMsgGroupPatched = true;
+                        this._retryGuardExit("patchBlockedMessageGroup");
+                        return;
+                    }
                 }
-                return false;
-            }, {
-                searchExports: true
-            });
-            if (patched) this._blockedMsgGroupPatched = true;
+            }
         } catch (_) {}
-        if (this._blockedMsgGroupPatched) {
-            this._retryGuardExit("patchBlockedMessageGroup");
-            return;
-        }
         if (attempt < 6) {
-            setTimeout(() => this.patchBlockedMessageGroup(attempt + 1), 5000);
+            setTimeout(() => this.patchBlockedMessageGroup(attempt + 1), this._retryDelay(attempt, 5000));
             return;
         }
-        this._patcher?._warn("patchBlockedMessageGroup", new Error(`ran out of attempts to locate the BlockedMessageGroup module - best candidate matched ${bestHitCount}/${BLOCKED_REQUIRED} required strings (${bestHitStrings.join(", ") || "none"})`));
         this._retryGuardExit("patchBlockedMessageGroup");
     }
     isBlockedMessageData(message, referencedMessage = null) {
@@ -5012,7 +5311,8 @@ return false;
                         return new value.constructor(filtered);
                     } catch (_) {}
                 }
-                return filtered;
+                this._logThrottled("filterMessagesCollection", "não foi possível clonar a collection filtrada; mantendo original", "warn");
+                return value;
             } catch (_) {
                 return value;
             }
@@ -5025,51 +5325,110 @@ return false;
         if (!this._retryGuardEnter("patchMessagesWrapComponent", attempt)) return;
         const self = this;
         const applyFilterToProps = props => {
+            self._health?.heartbeat("messages");
             if (!props || typeof props !== "object") return;
             try {
-                if (props.messages) {
-                    if (Array.isArray(props.messages)) {
-                        props.messages = self.filterMessagesCollection(props.messages);
-                    } else if (props.messages._array && Array.isArray(props.messages._array)) {
-                        const filtered = self.filterMessagesCollection(props.messages._array);
-                        if (filtered !== props.messages._array) props.messages._array = filtered;
+                const msgs = props.messages;
+                if (!msgs) return;
+                if (Array.isArray(msgs)) {
+                    props.messages = self.filterMessagesCollection(msgs);
+                    return;
+                }
+                if (typeof msgs.toArray === "function" && typeof msgs.removeMany === "function") {
+                    let list;
+                    try { list = msgs.toArray(); } catch (_) { return; }
+                    if (!Array.isArray(list) || !list.length) return;
+                    const blockedIds = [];
+                    for (const msg of list) {
+                        if (msg && self.isBlockedMessageData(msg)) blockedIds.push(msg.id);
                     }
+                    if (blockedIds.length) {
+                        try { props.messages = msgs.removeMany(blockedIds); } catch (_) {}
+                    }
+                    return;
+                }
+                if (msgs._array && Array.isArray(msgs._array)) {
+                    const filtered = self.filterMessagesCollection(msgs._array);
+                    if (filtered !== msgs._array) msgs._array = filtered;
                 }
             } catch (_) {}
         };
-        try {
-            const MessagesWrap = this._wpGetModule(m => m?.displayName === "MessagesWrap" || m?.name === "MessagesWrap" || m?.prototype?.render?.toString?.().includes("MessagesWrap"), undefined, "MessagesWrap component");
-            if (MessagesWrap?.prototype?.render) {
-                this.patchBefore(MessagesWrap.prototype, "render", context => applyFilterToProps(context?.props));
-                this._messagesWrapPatched = true;
-                this._retryGuardExit("patchMessagesWrapComponent");
-                return;
+        const WRAP_PROP_KEYS = ["messageGroupSpacing", "scrollerClassName", "showNewMessagesBar", "messageDisplayCompact", "channelStream", "filterAfterTimestamp", "showingQuarantineBanner", "keyboardModeEnabled"];
+        const WRAP_REQUIRED = 4;
+        let bestKeyHits = [];
+        const looksLikeWrapProps = props => {
+            if (!props || typeof props !== "object" || !("messages" in props)) return false;
+            const hits = WRAP_PROP_KEYS.filter(k => k in props);
+            if (hits.length > bestKeyHits.length) bestKeyHits = hits;
+            return hits.length >= WRAP_REQUIRED;
+        };
+        const findWrapComponentFromEl = el => {
+            return this.findComponentViaFiber(el, (type, props) => looksLikeWrapProps(props), 25, "patchMessagesWrapComponent:fiberWalk");
+        };
+        const findModuleHolding = targetFn => {
+            try {
+                const mod = BdApi.Webpack.getModule(m => m && typeof m === "object" && Object.values(m).includes(targetFn), { searchExports: true });
+                if (!mod) return null;
+                const key = Object.keys(mod).find(k => mod[k] === targetFn);
+                return key ? [mod, key] : null;
+            } catch (_) {
+                return null;
             }
-        } catch (_) {}
-        const WRAP_STRINGS = [ "messages._array", "scrollToMessage", "MessagesWrap", "renderMessages" ];
+        };
+        let msgElPresent = false;
         try {
-            const result = this._wpGetModuleWithKey(m => {
-                if (!m || typeof m !== "function") return false;
-                try {
-                    const src = Function.prototype.toString.call(m);
-                    return WRAP_STRINGS.some(s => src.includes(s));
-                } catch (_) {
-                    return false;
+            const msgEl = document.querySelector('li[class*="messageListItem"]');
+            if (msgEl) {
+                msgElPresent = true;
+                const Comp = findWrapComponentFromEl(msgEl);
+                if (Comp) {
+                    let patched = false;
+                    if (Comp.prototype && typeof Comp.prototype.render === "function") {
+                        this.patchBefore(Comp.prototype, "render", context => applyFilterToProps(context?.props));
+                        patched = true;
+                    } else {
+                        const found = findModuleHolding(Comp);
+                        if (found) {
+                            const [moduleObj, key] = found;
+                            this.patchBefore(moduleObj, key, (_, args) => applyFilterToProps(args?.[0]));
+                            patched = true;
+                        } else {
+                            const inner = Comp.type || Comp.render;
+                            if (typeof inner === "function") {
+                                const innerFound = findModuleHolding(inner);
+                                if (innerFound) {
+                                    const [moduleObj, key] = innerFound;
+                                    this.patchBefore(moduleObj, key, (_, args) => applyFilterToProps(args?.[0]));
+                                    patched = true;
+                                }
+                            }
+                        }
+                    }
+                    if (patched) {
+                        this._messagesWrapPatched = true;
+                        this._retryGuardExit("patchMessagesWrapComponent");
+                        return;
+                    }
                 }
-            }, "MessagesWrap component");
-            if (result && result[1] != null) {
-                const [moduleObj, key] = result;
-                this.patchBefore(moduleObj, key, (_, args) => applyFilterToProps(args?.[0]));
-                this._messagesWrapPatched = true;
-                this._retryGuardExit("patchMessagesWrapComponent");
-                return;
             }
         } catch (_) {}
-        if (attempt < 6) {
-            setTimeout(() => this.patchMessagesWrapComponent(attempt + 1), 5000);
+        if (!msgElPresent) {
+            if (this._messagesWrapWaitCycles === undefined) this._messagesWrapWaitCycles = 0;
+            this._messagesWrapWaitCycles++;
+            if (this._messagesWrapWaitCycles < 750) {
+                setTimeout(() => this.patchMessagesWrapComponent(attempt), 400);
+                return;
+            }
+            this._patcher?._warn("patchMessagesWrapComponent", new Error("gave up waiting for any message list to appear on screen after ~5 minutes"));
+            this._retryGuardExit("patchMessagesWrapComponent");
             return;
         }
-        this._patcher?._warn("patchMessagesWrapComponent", new Error("ran out of attempts to locate the MessagesWrap module"));
+        this._messagesWrapWaitCycles = 0;
+        if (attempt < 20) {
+            setTimeout(() => this.patchMessagesWrapComponent(attempt + 1), this._retryDelay(attempt, 3000));
+            return;
+        }
+        this._patcher?._warn("patchMessagesWrapComponent", new Error(`ran out of attempts to locate the MessagesWrap module via fiber walk - best candidate matched ${bestKeyHits.length}/${WRAP_REQUIRED} required prop keys (${bestKeyHits.join(", ") || "none"}). This patch requires a message list to be visible on screen during at least one attempt.`));
         this._retryGuardExit("patchMessagesWrapComponent");
     }
     patchPrivateChannelRowComponent(attempt = 0) {
@@ -5115,20 +5474,9 @@ return false;
         const ROW_SELECTOR = '[data-list-item-id*="private-channels"][data-list-item-id*="___"]';
         const looksLikeGroupDmChannel = ch => !!ch && typeof ch === "object" && typeof ch.isGroupDM === "function";
         const findRowComponentFromEl = el => {
-            try {
-                let fiber = BdApi.ReactUtils.getInternalInstance(el);
-                for (let i = 0; i < 40 && fiber; i++, fiber = fiber.return) {
-                    const type = fiber.type;
-                    if (typeof type !== "function") continue;
-                    const props = fiber.memoizedProps || fiber.pendingProps;
-                    if (looksLikeGroupDmChannel(props?.channel)) {
-                        return type;
-                    }
-                }
-            } catch (err) {
-                this._patcher._logFail("patchPrivateChannelRowComponent:fiberWalk", err);
-            }
-            return null;
+            return this.findComponentViaFiber(el, (type, props) => {
+                return looksLikeGroupDmChannel(props?.channel);
+            }, 40, "patchPrivateChannelRowComponent:fiberWalk");
         };
         const findModuleHolding = targetFn => {
             try {
@@ -5144,7 +5492,7 @@ return false;
             const Comp = findRowComponentFromEl(el);
             if (!Comp) return false;
             if (Comp.prototype && typeof Comp.prototype.render === "function") {
-                console.info("[ByeBlocked] patchPrivateChannelRowComponent: found via Fiber (class component)", Comp.displayName || Comp.name);
+                this.logger.info("patchPrivateChannelRowComponent: found via Fiber (class component)", Comp.displayName || Comp.name);
                 this.patchBefore(Comp.prototype, "render", context => { applyToProps(context?.props); });
                 this._privateChannelRowPatched = true;
                 return true;
@@ -5152,7 +5500,7 @@ return false;
             const found = findModuleHolding(Comp);
             if (found) {
                 const [moduleObj, key] = found;
-                console.info("[ByeBlocked] patchPrivateChannelRowComponent: found via Fiber (functional component, module located by identity)", key);
+                this.logger.info("patchPrivateChannelRowComponent: found via Fiber (functional component, module located by identity)", key);
                 this.patchBefore(moduleObj, key, (_, args) => { applyToProps(args?.[0]); });
                 this._privateChannelRowPatched = true;
                 return true;
@@ -5162,7 +5510,7 @@ return false;
                 const innerFound = findModuleHolding(inner);
                 if (innerFound) {
                     const [moduleObj, key] = innerFound;
-                    console.info("[ByeBlocked] patchPrivateChannelRowComponent: found via Fiber (memo/forwardRef, module located by identity)", key);
+                    this.logger.info("patchPrivateChannelRowComponent: found via Fiber (memo/forwardRef, module located by identity)", key);
                     this.patchBefore(moduleObj, key, (_, args) => { applyToProps(args?.[0]); });
                     this._privateChannelRowPatched = true;
                     return true;
@@ -5170,8 +5518,10 @@ return false;
             }
             return false;
         };
+        let hadCandidateRows = false;
         try {
             const rows = document.querySelectorAll(ROW_SELECTOR);
+            hadCandidateRows = rows.length > 0;
             for (const row of rows) {
                 if (tryPatchFromEl(row)) {
                     this._rowPatchInFlight = false;
@@ -5181,9 +5531,22 @@ return false;
         } catch (err) {
             this._patcher._logFail("patchPrivateChannelRowComponent:domScan", err);
         }
+        if (!hadCandidateRows) {
+            if (this._rowPatchWaitCycles === undefined) this._rowPatchWaitCycles = 0;
+            this._rowPatchWaitCycles++;
+            if (this._rowPatchWaitCycles < 750) {
+                clearTimeout(this._rowPatchRetryTimeout);
+                this._rowPatchRetryTimeout = setTimeout(() => this.patchPrivateChannelRowComponent(attempt), 400);
+                return;
+            }
+            this._rowPatchInFlight = false;
+            this._patcher._logFail("patchPrivateChannelRowComponent", new Error("gave up waiting for a Group DM row to appear in the sidebar after ~5 minutes"));
+            return;
+        }
+        this._rowPatchWaitCycles = 0;
         if (attempt < 20) {
             clearTimeout(this._rowPatchRetryTimeout);
-            this._rowPatchRetryTimeout = setTimeout(() => this.patchPrivateChannelRowComponent(attempt + 1), 1500);
+            this._rowPatchRetryTimeout = setTimeout(() => this.patchPrivateChannelRowComponent(attempt + 1), this._retryDelay(attempt, 1500));
         } else {
             this._rowPatchInFlight = false;
             this._patcher._logFail("patchPrivateChannelRowComponent", new Error("no group DM row found in the DOM after several attempts - see maintenance notes"));
@@ -5258,17 +5621,14 @@ return false;
         const findLiveGridClass = () => {
             const els = document.querySelectorAll(gridSelector);
             for (const el of els) {
-                try {
-                    let fiber = BdApi.ReactUtils.getInternalInstance(el);
-                    for (let hop = 0; hop < 25 && fiber; hop++, fiber = fiber.return) {
-                        const props = fiber.memoizedProps;
-                        if (!props || typeof fiber.type !== "function") continue;
-                        const matchedKeys = PARTICIPANT_ARRAY_KEYS.filter(k => looksLikeParticipantArray(props[k]));
-                        if (matchedKeys.length > bestPropKeysSeen.length) bestPropKeysSeen = matchedKeys;
-                        if (Array.isArray(props.participants) && Array.isArray(props.filteredParticipants)) return fiber.type;
-                        if (matchedKeys.length >= 1) return fiber.type;
-                    }
-                } catch (_) {}
+                const match = self.findComponentViaFiber(el, (type, props) => {
+                    if (!props) return false;
+                    const matchedKeys = PARTICIPANT_ARRAY_KEYS.filter(k => looksLikeParticipantArray(props[k]));
+                    if (matchedKeys.length > bestPropKeysSeen.length) bestPropKeysSeen = matchedKeys;
+                    if (Array.isArray(props.participants) && Array.isArray(props.filteredParticipants)) return true;
+                    return matchedKeys.length >= 1;
+                }, 25, "patchCallGridParticipants:fiberWalk");
+                if (match) return match;
             }
             return null;
         };
@@ -5317,7 +5677,7 @@ return false;
         }
 
         if (attempt < 40) {
-            setTimeout(() => this.patchCallGridParticipants(attempt + 1), 3000);
+            setTimeout(() => this.patchCallGridParticipants(attempt + 1), this._retryDelay(attempt, 3000));
         } else {
             this._callGridPatchInFlight = false;
             this._patcher._logFail("patchCallGridParticipants", new Error(`ran out of attempts - no grid-like element (matching ${gridSelector}) had a participant-shaped prop, and the per-participant source-heuristic lookup also failed. Closest array-shape candidate exposed: [${bestPropKeysSeen.join(", ") || "none"}]. Discord likely restructured the call grid further.`));
@@ -5350,7 +5710,7 @@ return false;
         if (!this._retryGuardEnter("patchMessageStore", attempt)) return;
         const store = this.modules.MessageStore;
         if (!store) {
-            if (attempt < 10) { setTimeout(() => this.patchMessageStore(attempt + 1), 3000); return; }
+            if (attempt < 40) { setTimeout(() => this.patchMessageStore(attempt + 1), this._retryDelay(attempt, 3000)); return; }
             this._patcher?._warn("patchMessageStore", new Error("MessageStore not resolved after several attempts"));
             this._retryGuardExit("patchMessageStore");
             return;
@@ -5375,11 +5735,12 @@ return false;
         }
         if (patchedAny) {
             this._storePatched = true;
+            this._registerMessageFilterEffectivenessHealthCheck();
             this._retryGuardExit("patchMessageStore");
             return;
         }
         if (attempt < 10) {
-            setTimeout(() => this.patchMessageStore(attempt + 1), 3000);
+            setTimeout(() => this.patchMessageStore(attempt + 1), this._retryDelay(attempt, 3000));
         } else {
             this._patcher?._warn("patchMessageStore", new Error("no expected method found on MessageStore after several attempts"));
             this._retryGuardExit("patchMessageStore");
@@ -5398,7 +5759,7 @@ return false;
         }
         const Dispatcher = this.modules.Dispatcher;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") {
-            if (attempt < 15) { setTimeout(() => this.patchMessageLoadDispatch(attempt + 1), 2000); return; }
+            if (attempt < 15) { setTimeout(() => this.patchMessageLoadDispatch(attempt + 1), this._retryDelay(attempt, 2000)); return; }
             this._patcher?._warn("patchMessageLoadDispatch", new Error("Dispatcher unavailable after several attempts"));
             this._retryGuardExit("patchMessageLoadDispatch");
             return;
@@ -5427,7 +5788,7 @@ return false;
         if (!this._retryGuardEnter("patchChannelPinsStore", attempt)) return;
         const store = this.modules.ChannelPinsStore;
         if (!store || typeof store.getPins !== "function") {
-            if (attempt < 15) { setTimeout(() => this.patchChannelPinsStore(attempt + 1), 2000); return; }
+            if (attempt < 15) { setTimeout(() => this.patchChannelPinsStore(attempt + 1), this._retryDelay(attempt, 2000)); return; }
             this._patcher?._warn("patchChannelPinsStore", new Error("ChannelPinsStore.getPins unavailable after several attempts"));
             this._retryGuardExit("patchChannelPinsStore");
             return;
@@ -5457,42 +5818,46 @@ return false;
         }
         const Dispatcher = this.modules.Dispatcher;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") {
-            if (attempt < 15) { setTimeout(() => this.patchPinFlux(attempt + 1), 2000); return; }
+            if (attempt < 15) { setTimeout(() => this.patchPinFlux(attempt + 1), this._retryDelay(attempt, 2000)); return; }
             this._patcher?._warn("patchPinFlux", new Error("Dispatcher unavailable after several attempts"));
             this._retryGuardExit("patchPinFlux");
             return;
         }
         const self = this;
         this.patchBefore(Dispatcher, "dispatch", function(_, args) {
-            const action = args?.[0];
-            if (!action || typeof action !== "object") return;
-            if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && action.message?.type === 1) {
-                self._handleGroupRecipientAdd(action.message);
-                return;
-            }
-            if (!self.settings.places?.messages) return;
-            if (action.type === self.constructor.ACTIONS.MESSAGE_PIN_ADD) {
-                self._handlePinAdd(action);
-                return;
-            }
-            if (action.type === self.constructor.ACTIONS.MESSAGE_PIN_REMOVE) {
-                self._unmarkMessageUnpinned(action.messageId);
-                return;
-            }
-            if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && action.message?.type === 6) {
-                self._handlePinSystemMessage(action.message);
-                return;
-            }
-            if (action.type === self.constructor.ACTIONS.MESSAGE_UPDATE && action.message) {
-                self.queueScan();
-                return;
-            }
-            const channelId = action.channelId || action.channel_id;
-            if (channelId && (action.type === self.constructor.ACTIONS.CHANNEL_PINS_UPDATE || action.type === self.constructor.ACTIONS.LOAD_PINNED_MESSAGES_SUCCESS || action.type === self.constructor.ACTIONS.FETCH_PINNED_MESSAGES_SUCCESS)) {
-                self._scanExistingPinsForChannel(channelId);
-                self._processPinStoreItems(channelId, action.items || action.pins?.items);
-                self._forceReadStateRecheck(true);
-                self.queueScan();
+            try {
+                const action = args?.[0];
+                if (!action || typeof action !== "object") return;
+                if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && action.message?.type === 1) {
+                    self._handleGroupRecipientAdd(action.message);
+                    return;
+                }
+                if (!self.settings.places?.messages) return;
+                if (action.type === self.constructor.ACTIONS.MESSAGE_PIN_ADD) {
+                    self._handlePinAdd(action);
+                    return;
+                }
+                if (action.type === self.constructor.ACTIONS.MESSAGE_PIN_REMOVE) {
+                    self._unmarkMessageUnpinned(action.messageId);
+                    return;
+                }
+                if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && action.message?.type === 6) {
+                    self._handlePinSystemMessage(action.message);
+                    return;
+                }
+                if (action.type === self.constructor.ACTIONS.MESSAGE_UPDATE && action.message) {
+                    self.queueScan();
+                    return;
+                }
+                const channelId = action.channelId || action.channel_id;
+                if (channelId && (action.type === self.constructor.ACTIONS.CHANNEL_PINS_UPDATE || action.type === self.constructor.ACTIONS.LOAD_PINNED_MESSAGES_SUCCESS || action.type === self.constructor.ACTIONS.FETCH_PINNED_MESSAGES_SUCCESS)) {
+                    self._scanExistingPinsForChannel(channelId);
+                    self._processPinStoreItems(channelId, action.items || action.pins?.items);
+                    self._forceReadStateRecheck(true);
+                    self.queueScan();
+                }
+            } catch (e) {
+                self._patcher?._warn("patchPinFlux", e);
             }
         });
         this._pinFluxPatched = true;
@@ -5950,6 +6315,13 @@ return false;
         if (!this._retryInFlight) return;
         this._retryInFlight[name] = false;
     }
+    _retryDelay(attempt, steadyDelayMs = 2000) {
+        const fastSteps = [100, 300, 600, 1000];
+        if (attempt < fastSteps.length) {
+            return Math.min(fastSteps[attempt], steadyDelayMs);
+        }
+        return steadyDelayMs;
+    }
     _patchStoreMethodOnce(store, method, callback, kind = "after") {
         if (!store || typeof store[method] !== "function") return;
         let methodSet = this._patchedStoreMethods.get(store);
@@ -6055,6 +6427,7 @@ return false;
         const Dispatcher = self.modules.Dispatcher;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") return false;
         self.patchBefore(Dispatcher, "dispatch", (_, args) => {
+            self._health?.heartbeat("dispatcherPatch");
             if (!self.settings.places?.messages) return;
             const action = args?.[0];
             if (!action || typeof action !== "object") return;
@@ -6122,7 +6495,39 @@ return false;
                 }
             },
             () => {
-                console.warn("[ByeBlocked] The message dispatcher patch (blocked-user badge/notification suppression) appears to be inactive - Discord may have changed something internally. Consider updating the plugin.");
+                this.logger.warn("The message dispatcher patch (blocked-user badge/notification suppression) appears to be inactive - Discord may have changed something internally. Consider updating the plugin.");
+            },
+            2
+        );
+    }
+    _registerMessageFilterEffectivenessHealthCheck() {
+        if (!this._health || this._messageFilterEffectivenessRegistered) return;
+        this._messageFilterEffectivenessRegistered = true;
+        this._health.register(
+            "messageFilterEffectiveness",
+            () => {
+                try {
+                    if (!this.settings.places.messages) return true;
+                    if (!this._relIsBlockedFn) return true;
+                    const channelId = this._getCurrentChannelIdRobust();
+                    if (!channelId) return true;
+                    const raw = this._getChannelMessagesList(channelId);
+                    if (!raw.length) return true;
+                    const rawBlockedCount = raw.filter(msg => this.isBlockedMessageData(msg)).length;
+                    if (rawBlockedCount === 0) return true;
+                    const filtered = this._filterMessagesCollectionUncached(raw);
+                    const filteredArray = Array.isArray(filtered) ? filtered
+                        : (typeof filtered?.toArray === "function" ? filtered.toArray() : filtered);
+                    if (!Array.isArray(filteredArray)) return false;
+                    const stillBlockedAfterFilter = filteredArray.some(msg => this.isBlockedMessageData(msg));
+                    return !stillBlockedAfterFilter;
+                } catch (_) {
+                    return false;
+                }
+            },
+            () => {
+                this.logger.warn("O filtro de mensagens não está removendo mensagens de usuários bloqueados apesar de encontrá-las - o formato de dados do MessageStore pode ter mudado. Considere atualizar o plugin.");
+                try { this._storePatched = false; this.patchMessageStore(); } catch (_) {}
             },
             2
         );
@@ -6146,7 +6551,7 @@ return false;
                 }
             },
             () => {
-                console.warn("[ByeBlocked] The profile popout filter (voice states) appears to have stopped recognizing blocked users - Discord may have changed the data format. Consider updating the plugin.");
+                this.logger.warn("The profile popout filter (voice states) appears to have stopped recognizing blocked users - Discord may have changed the data format. Consider updating the plugin.");
             },
             2
         );
@@ -6304,8 +6709,7 @@ return false;
                 if (!this.settings.places?.voiceChannels) return true;
                 const els = document.querySelectorAll([
                     '[class*="voiceUser"]',
-                    '[aria-label*="canal de voz"] [data-list-item-id]',
-                    '[aria-label*="voice channel"] [data-list-item-id]',
+                    _VOICE_CHANNEL_ARIA_LABEL_SEL.split(',').map(s => `${s} [data-list-item-id]`).join(','),
                     '[data-list-item-id*="voice"]',
                     '[class*="voiceUsers"] [data-list-item-id]'
                 ].join(':not([data-hidden-blocked="true"]),') + ':not([data-hidden-blocked="true"])');
@@ -6420,7 +6824,7 @@ return false;
                 return !!this._autocompleteRowPatched;
             },
             () => {
-                console.warn("[ByeBlocked] The autocomplete row patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
+                this.logger.warn("The autocomplete row patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
                 try { this.patchAutocompleteRowComponent(); } catch (_) {}
             }
         );
@@ -6432,7 +6836,7 @@ return false;
                 return !!this._voiceUserComponentPatched;
             },
             () => {
-                console.warn("[ByeBlocked] The voice user component patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
+                this.logger.warn("The voice user component patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
                 try { this.patchVoiceUserComponent(); } catch (_) {}
             }
         );
@@ -6444,7 +6848,7 @@ return false;
                 return !!(this._inviteSuggestionsPatched || (this.modules.InviteQueryModule && this.modules.InviteQueryComposeKey));
             },
             () => {
-                console.warn("[ByeBlocked] The invite suggestions patch appears inactive - Discord may have changed the invite query module. Consider updating the plugin.");
+                this.logger.warn("The invite suggestions patch appears inactive - Discord may have changed the invite query module. Consider updating the plugin.");
                 try { this.patchInviteSuggestions(); } catch (_) {}
             }
         );
@@ -6461,7 +6865,7 @@ return false;
                 return false;
             },
             () => {
-                console.warn("[ByeBlocked] The forum post card patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
+                this.logger.warn("The forum post card patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
                 try { this.patchForumPostComponent(); } catch (_) {}
             }
         );
@@ -6526,20 +6930,81 @@ return false;
             const dispatcherBroken = !this.modules.Dispatcher || typeof this.modules.Dispatcher.dispatch !== "function";
             const notificationPatchMissing = !this._notificationDispatcherPatched && !dispatcherBroken;
             const msgStoreBroken = !this._rawGetMessages && (!this.modules.MessageStore || typeof this.modules.MessageStore.getMessages !== "function");
+            const msgStoreInstanceDrifted = !!this.modules.MessageStore
+                && !!this._rawGetMessagesSourceStore
+                && this._rawGetMessagesSourceStore !== this.modules.MessageStore;
+            const relationshipListenerMissing = !storeBroken && !this._relationshipUpdatesPatched;
             const voiceStoreBroken = !this.modules.SortedVoiceStateStore || typeof this.modules.SortedVoiceStateStore.getVoiceStatesForChannel !== "function";
             const mediaEngineBroken = !this.modules.MediaEngineActions || (!this._localVolumeKey && !this._localMuteKey);
             const rtcModulesBroken = !this.modules.RTCConnectionUtils || !this.modules.RTCParticipantsModule;
-            if (storeBroken || observerBroken || dispatcherBroken || msgStoreBroken || voiceStoreBroken || mediaEngineBroken || rtcModulesBroken || notificationPatchMissing) {
+            if (storeBroken || observerBroken || dispatcherBroken || msgStoreBroken || msgStoreInstanceDrifted || voiceStoreBroken || mediaEngineBroken || rtcModulesBroken || notificationPatchMissing || relationshipListenerMissing) {
                 if (storeBroken) { this._patcher.safe("watchdog:resolveModules", () => this.resolveModules()); }
                 if (dispatcherBroken) { this._patcher.safe("watchdog:resolveDispatcher", () => this._resolveDispatcher()); }
                 if (notificationPatchMissing) { this._patcher.safe("watchdog:patchNotificationDispatcher", () => this._patchNotificationDispatcher()); }
                 if (msgStoreBroken) { this._patcher.safe("watchdog:resolveMessagesGet", () => this._resolveMessagesGet()); }
+                if (msgStoreInstanceDrifted) {
+                    this._patcher.safe("watchdog:msgStoreInstanceDrift", () => {
+                        this._storePatched = false;
+                        this._rawGetMessages = null;
+                        this._rawGetMessagesSourceStore = null;
+                        this._resolveMessagesGet();
+                        this.patchMessageStore();
+                    });
+                }
                 if (observerBroken || storeBroken) { this._patcher.safe("watchdog:restartObserver", () => this._restartObserver()); }
                 if (voiceStoreBroken) { this._patcher.safe("watchdog:resolveVoiceStores", () => { this.resolveModules(); this.patchStores(); }); }
                 if (mediaEngineBroken) { this._patcher.safe("watchdog:resolveMediaEngine", () => this._resolveMediaEngineActions()); }
                 if (rtcModulesBroken && !storeBroken && !voiceStoreBroken) { this._patcher.safe("watchdog:resolveRtcModules", () => this._resolveRtcModules()); }
+                if (relationshipListenerMissing) {
+                    const lastAttempt = this._relationshipListenerRevivalAttemptAt || 0;
+                    if (now - lastAttempt >= 5 * 60 * 1000) {
+                        this._relationshipListenerRevivalAttemptAt = now;
+                        this._patcher.safe("watchdog:patchRelationshipUpdates", () => this.patchRelationshipUpdates());
+                    }
+                }
             }
-        } catch (_) {}
+            this._trackCriticalDegradation({ storeBroken, msgStoreBroken });
+        } catch (e) {
+            this._logThrottled("watchdog", e);
+        }
+    }
+    _trackCriticalDegradation({ storeBroken, msgStoreBroken }) {
+        if (!this._criticalDegradation) {
+            this._criticalDegradation = {
+                storeBroken: { streak: 0, notified: false, lastNoticeAt: 0 },
+                msgStoreBroken: { streak: 0, notified: false, lastNoticeAt: 0 }
+            };
+        }
+        const state = this._criticalDegradation;
+        const CONSECUTIVE_FAILS_BEFORE_NOTICE = 3;
+        const NOTICE_COOLDOWN_MS = 10 * 60 * 1000;
+
+        const evaluate = (key, isBroken, label) => {
+            const entry = state[key];
+            if (isBroken) {
+                entry.streak++;
+                if (entry.streak >= CONSECUTIVE_FAILS_BEFORE_NOTICE) {
+                    const now = Date.now();
+                    if (!entry.notified || (now - entry.lastNoticeAt) >= NOTICE_COOLDOWN_MS) {
+                        entry.notified = true;
+                        entry.lastNoticeAt = now;
+                        try {
+                            this.toast(`ByeBlocked: ${label} parou de responder. A proteção pode estar incompleta até o Discord recarregar ou o plugin ser atualizado.`, "error");
+                        } catch (_) {}
+                        try { this.logger?.error(`Degradação crítica sustentada: ${label} (streak=${entry.streak})`); } catch (_) {}
+                    }
+                }
+            } else {
+                if (entry.notified) {
+                    try { this.toast(`ByeBlocked: ${label} voltou ao normal.`, "success"); } catch (_) {}
+                }
+                entry.streak = 0;
+                entry.notified = false;
+            }
+        };
+
+        evaluate("storeBroken", storeBroken, "detecção de usuários bloqueados (RelationshipStore)");
+        evaluate("msgStoreBroken", msgStoreBroken, "filtro de mensagens (MessageStore)");
     }
     _startReactionClickWatcher() {
         if (this._reactionClickHandler) return;
@@ -7846,7 +8311,7 @@ return false;
                 }
                 if (places.voiceChannels) {
                     const voiceSel = '[class*="voiceUser"],[class*="stageUser_"],[class*="stageSection_"],[class*="activityPanel_"],[class*="activityPanel"],[class*="streamPreview_"],[class*="streamTile_"],[class*="tile_"],[class*="tileSizer_"],[class*="videoWrapper_"],[class*="participantWrapper_"],[class*="gridLayout_"],[class*="callContainer_"],[class*="audienceContainer__"],[class*="raisedHandCount__"],[class*="toolbar__"],[class*="details_"],[class*="speakerCount__"],[class*="text__9aed4"],[class*="blockedNotice__"],[class*="channelNotice__"],[class*="subtitle__"]';
-                    const voiceAriaSel = '[aria-label*="canal de voz"],[aria-label*="voice channel"],[aria-label*="Canal de voz"]';
+                    const voiceAriaSel = _VOICE_CHANNEL_ARIA_LABEL_SEL;
                     if (node.matches?.(voiceSel) || node.querySelector?.(voiceSel) || node.matches?.(voiceAriaSel) || node.querySelector?.(voiceAriaSel)) {
                         try { this.hideVoiceUsers(); } catch (_) {}
                     }
@@ -8147,7 +8612,9 @@ return false;
             this.hideOrphanedDividers();
             this.collapseGhostSlots();
             this.promoteOrphanedMessages();
-        } catch (_) {}
+        } catch (e) {
+            this._logThrottled("scanDom", e);
+        }
         finally {
             if (scrollState) this._restoreMessageScrollState(scrollState);
         }
@@ -8540,8 +9007,7 @@ return false;
     hideVoiceUsers() {
         const voiceCandidates = document.querySelectorAll([
             '[class*="voiceUser"]',
-            '[aria-label*="canal de voz"] [data-list-item-id]',
-            '[aria-label*="voice channel"] [data-list-item-id]',
+            _VOICE_CHANNEL_ARIA_LABEL_SEL.split(',').map(s => `${s} [data-list-item-id]`).join(','),
             '[data-list-item-id*="voice"]',
             '[class*="voiceUsers"] [data-list-item-id]',
             '[class*="listItem"][data-list-item-id]'
@@ -10539,7 +11005,7 @@ return false;
                         }
                     } catch (_) {}
                     if (currentlyMuted === null || currentlyMuted === undefined) {
-                        console.warn("[ByeBlocked] isLocalMute unavailable; mute toggle skipped to avoid incorrect state. userId=" + userId);
+                        this.logger.warn("isLocalMute unavailable; mute toggle skipped to avoid incorrect state.", { userId });
                     } else if (currentlyMuted !== mute) {
                         actions[this._localMuteKey](userId, context);
                         applied = true;
@@ -10612,7 +11078,7 @@ return false;
         if (!this._retryGuardEnter("patchVoiceMute", attempt)) return;
         const Dispatcher = this.modules.Dispatcher;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") {
-            if (attempt < 20) { setTimeout(() => this.patchVoiceMute(attempt + 1), 2000); return; }
+            if (attempt < 20) { setTimeout(() => this.patchVoiceMute(attempt + 1), this._retryDelay(attempt, 2000)); return; }
             this._patcher?._warn("patchVoiceMute", new Error("Dispatcher unavailable after several attempts - audio mute for blocked users may not react to real-time call joins/leaves"));
             this._retryGuardExit("patchVoiceMute");
             return;
@@ -10657,7 +11123,7 @@ return false;
             }
         } catch (_) {}
         if (attempt < 10) {
-            setTimeout(() => this._syncVoiceStateOnLoad(attempt + 1), 500);
+            setTimeout(() => this._syncVoiceStateOnLoad(attempt + 1), this._retryDelay(attempt, 500));
         }
     }
     _handleVoiceStateUpdatesForMute(voiceStates) {
@@ -10734,7 +11200,7 @@ return false;
         if (!this._retryGuardEnter("patchBlockedCallRinging", attempt)) return;
         const Dispatcher = this.modules.Dispatcher;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") {
-            if (attempt < 15) { setTimeout(() => this.patchBlockedCallRinging(attempt + 1), 2000); return; }
+            if (attempt < 15) { setTimeout(() => this.patchBlockedCallRinging(attempt + 1), this._retryDelay(attempt, 2000)); return; }
             this._patcher?._warn("patchBlockedCallRinging", new Error("Dispatcher unavailable after several attempts"));
             this._retryGuardExit("patchBlockedCallRinging");
             return;
@@ -10779,12 +11245,12 @@ return false;
         });
     }
     static get CALL_BUTTONS_STRINGS() {
-        return [ "renderCall", "shouldRenderCall", "maybePreloadChannelCall", "showCall", "inCall", "hasVideo", "callActive", "isRinging", "selectedParticipant", "renderVoiceCallButton", "renderVideoCallButton", "renderCallButton" ];
+        return [ "chatOpen", "maxSidebarWidth", "_callContainerRef", "_channelChatRef", "_wrapperRef", "inCall", "channel", "guild" ];
     }
-    static get CALL_BUTTONS_REQUIRED() { return 2; }
+    static get CALL_BUTTONS_REQUIRED() { return 3; }
     _findCallButtonsClassByFiber() {
         try {
-            const candidates = document.querySelectorAll('[class*="toolbar_"], [class*="titleWrapper_"], [class*="container_"], [class*="callContainer_"]');
+            const candidates = document.querySelectorAll('[class*="toolbar_"], [class*="titleWrapper_"], [class*="container_"], [class*="callContainer_"], [class*="voiceCallWrapper_"]');
             for (const el of candidates) {
                 try {
                     let fiber = BdApi.ReactUtils.getInternalInstance(el);
@@ -10794,6 +11260,7 @@ return false;
                         if (typeof props.callActive === "boolean") return fiber.type;
                         if (typeof props.showCall === "boolean" || typeof props.inCall === "boolean") return fiber.type;
                         if (typeof props.hasVideo === "boolean" && ("selectedParticipant" in props || "voiceChannel" in props)) return fiber.type;
+                        if (typeof props.inCall === "boolean" && "chatOpen" in props) return fiber.type;
                     }
                 } catch (_) {}
             }
@@ -10855,7 +11322,7 @@ return false;
         }
         if (!CallButtons || !CallButtons.prototype || typeof CallButtons.prototype.render !== "function") {
             if (attempt < 15) {
-                setTimeout(() => this.patchHideBlockedCallUI(attempt + 1), 2000);
+                setTimeout(() => this.patchHideBlockedCallUI(attempt + 1), this._retryDelay(attempt, 2000));
                 return;
             }
             this._patcher?._warn("patchHideBlockedCallUI", new Error(`ran out of attempts to locate the call buttons component - exact-name lookup, source-heuristic (best candidate matched ${bestHitCount}/${REQUIRED} required strings: ${bestHitStrings.join(", ") || "none"}), and structural Fiber lookup all failed; Discord likely renamed or restructured this component`));
@@ -10955,7 +11422,7 @@ return false;
             if (proto.play && proto.play.__byeBlockedPatchedPlay) {
                 proto.play = this._origMediaPlay;
             } else if (proto.play !== this._origMediaPlay) {
-                try { console.warn("[ByeBlocked] Skipped restoring HTMLMediaElement.prototype.play - another patch is layered on top of ours."); } catch (_) {}
+                try { this.logger.warn("Skipped restoring HTMLMediaElement.prototype.play - another patch is layered on top of ours."); } catch (_) {}
             }
             this._origMediaPlay = null;
         }
@@ -11594,6 +12061,19 @@ return false;
         } catch (err) {
             this._patcher._logFail("walkFiberProps", err);
         }
+    }
+    findComponentViaFiber(el, predicate, maxHops = 20, label = "findComponentViaFiber") {
+        try {
+            let fiber = BdApi.ReactUtils.getInternalInstance(el);
+            for (let hop = 0; hop < maxHops && fiber; hop++, fiber = fiber.return) {
+                if (typeof fiber.type !== "function") continue;
+                const result = predicate(fiber.type, fiber.memoizedProps || fiber.pendingProps, fiber);
+                if (result) return fiber.type;
+            }
+        } catch (err) {
+            this._patcher._logFail(label, err);
+        }
+        return null;
     }
     findChannelId(el) {
         if (!el) return null;
@@ -12426,6 +12906,7 @@ return false;
                 patchKey = (typeof raw.type === "function") ? "type" : "render";
             }
             self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
+                self._health?.heartbeat("inviteQueryModule");
                 try {
                     const props = args?.[0] || ctx?.props;
                     if (!props || !self.settings.places.autocomplete) return orig.apply(ctx, args);
@@ -12473,6 +12954,7 @@ return false;
             }
             if (!this._inviteSuggestionsPatched && mod && key && typeof mod[key] === "function") {
                 this.patchAfter(mod, key, function(context, args, result) {
+                    self._health?.heartbeat("inviteQueryModule");
                     if (!self.settings.places.autocomplete) return result;
                     if (!result || !Array.isArray(result.rows)) return result;
                     result.rows = result.rows.filter(row => {
@@ -12499,7 +12981,7 @@ return false;
             }
         } catch (_) {}
         if (!this._inviteSuggestionsPatched && attempt < 30) {
-            setTimeout(() => this.patchInviteSuggestions(attempt + 1), 5e3);
+            setTimeout(() => this.patchInviteSuggestions(attempt + 1), this._retryDelay(attempt, 5e3));
             this._startInviteClickListener();
         } else if (!this._inviteSuggestionsPatched) {
             this._patcher._logFail("patchInviteSuggestions", new Error("ran out of attempts - weak indicators did not find the module; see maintenance notes"));
@@ -12773,7 +13255,7 @@ return false;
                 border: none !important;
                 box-shadow: none !important;
             }
-            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [data-nmb-status-overridden="true"] {\n                display: none !important;\n            }\n            [data-list-id*="chat-messages"],\n            [data-list-id*="chat-messages"] *,\n            [class*="chatContent"] [class*="scroller"],\n            [class*="chatContent"] [class*="scroller"] * {\n                overflow-anchor: none !important;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 14px;\n                margin-top: 28px;\n                padding: 14px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: flex-start;\n                text-align: center;\n                padding-top: 32px;\n                padding-bottom: 16px;\n                flex-shrink: 0;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c,\n            .nmb-pins-empty-placeholder .nmb-pins-empty-icon {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n                display: flex;\n                align-items: center;\n                justify-content: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer,\n            .nmb-injected-tip-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n            [data-nmb-relabel-pending="true"] {\n                visibility: hidden !important;\n            }\n            li[data-list-item-id*="private-channels"]:not([data-nmb-relabeled="true"]):has([class*="avatarStack"], [class*="groupAvatar"], [class*="avatarMulti"]) {\n                visibility: hidden !important;\n            }\n\n            ${noticeButtonStyles}\n        `);
+            [data-nmb-zero-reaction="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-hide-view-reactions="true"] { display: none !important; pointer-events: none !important; }\n            [class*="reactorClickable_"][data-nmb-reactor-hidden="true"],\n            [data-nmb-reactor-hidden="true"]:not([class*="reactorsContainer_"]):not([class*="reactors_"]) {\n                display: none !important;\n                pointer-events: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                margin: 0 !important;\n                padding: 0 !important;\n                overflow: hidden !important;\n            }\n            [data-nmb-reactor-remove-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-pin-badge-hidden="true"] {\n                display: none !important;\n                pointer-events: none !important;\n            }\n            [data-nmb-loading-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-tab-hidden="true"] { display: none !important; pointer-events: none !important; }\n            [data-nmb-count-fixed="true"] {\n                font-size: 0 !important;\n                position: relative !important;\n            }\n            [data-nmb-count-fixed="true"]::after {\n                content: attr(data-nmb-real-count);\n                font-size: 14px;\n            }\n            [data-nmb-status-overridden="true"] {\n                display: none !important;\n            }\n            [data-list-id*="chat-messages"],\n            [data-list-id*="chat-messages"] *,\n            [class*="chatContent"] [class*="scroller"],\n            [class*="chatContent"] [class*="scroller"] * {\n                overflow-anchor: none !important;\n            }\n            [class*="messageGroupStart"]:empty,\n            [class*="messageGroupBlocked"]:empty { display: none !important; }\n            [data-nmb-ghost="true"] {\n                display: none !important;\n                height: 0 !important;\n                min-height: 0 !important;\n                max-height: 0 !important;\n                padding: 0 !important;\n                margin: 0 !important;\n                overflow: hidden !important;\n                contain: size style !important;\n            }\n            ${eventsSidebarNameRule}\n            ${hideBlockedBanner}\n            [data-nmb-promoted="true"] [class*="compact"],\n            [data-nmb-promoted="true"] [class*="cozy"] { margin-top: 17px !important; }\n            [data-nmb-promoted="true"] [class*="avatar"],\n            [data-nmb-promoted="true"] img[class*="avatar"] { display: block !important; }\n            [data-nmb-promoted="true"] [class*="username"],\n            [data-nmb-promoted="true"] [class*="header_"],\n            [data-nmb-promoted="true"] [class*="cozyHeader"] { display: flex !important; }\n            [class*="channelInfo"] { display: flex !important; align-items: center !important; gap: 4px !important; }\n            [data-nmb-muted-voice="true"] svg,\n            [data-nmb-muted-voice="true"] [class*="icon"],\n            [data-nmb-muted-voice="true"] [class*="iconLive"] {\n                color: var(--channels-default) !important;\n                fill: currentColor !important;\n            }\n            [class*="bd-modal-large"],\n            [class*="bd-modal"][class*="large"] { width: 90vw !important; max-width: 860px !important; }\n            [class*="bd-modal-body"] { max-height: 82vh !important; }\n            .nmb-panel {\n                padding: 16px 20px;\n                color: var(--text-normal);\n                font-family: var(--font-primary);\n                max-width: 720px;\n                -webkit-font-smoothing: antialiased;\n                -moz-osx-font-smoothing: grayscale;\n                text-rendering: optimizeLegibility;\n                transform: translateZ(0);\n                backface-visibility: hidden;\n            }\n            .nmb-section {\n                background: var(--background-secondary);\n                border-radius: 8px;\n                margin-bottom: 8px;\n                overflow: hidden;\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-section-header {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                padding: 10px 16px;\n                cursor: pointer;\n                user-select: none;\n                transition: background 160ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-section-header:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-section-title {\n                font-size: 12px;\n                font-weight: 600;\n                text-transform: uppercase;\n                letter-spacing: 0.5px;\n                color: var(--header-secondary);\n                margin: 0;\n            }\n            .nmb-chevron {\n                width: 16px;\n                height: 16px;\n                color: var(--text-muted);\n                transition: transform 220ms ease;\n                flex-shrink: 0;\n            }\n            .nmb-section.is-open .nmb-chevron { transform: rotate(180deg); }\n            .nmb-section-body {\n                display: grid;\n                grid-template-rows: 0fr;\n                transition: grid-template-rows 200ms ease;\n            }\n            .nmb-section.is-open .nmb-section-body { grid-template-rows: 1fr; }\n            .nmb-section-body-inner { overflow: hidden; padding: 0 16px; }\n            .nmb-section.is-open .nmb-section-body-inner { padding: 4px 16px 10px; }\n            .nmb-row {\n                display: flex;\n                align-items: center;\n                justify-content: space-between;\n                gap: 12px;\n                padding: 6px 6px;\n                border-radius: 4px;\n                transition: background 150ms ease !important;\n                background: transparent;\n            }\n            .nmb-panel .nmb-row:hover { background: var(--background-modifier-hover) !important; }\n            .nmb-row-label { font-size: 14px; color: var(--text-normal); }\n            .nmb-switch {\n                position: relative;\n                width: 34px;\n                height: 18px;\n                flex-shrink: 0;\n                border-radius: 9px;\n                background: var(--background-tertiary);\n                cursor: pointer;\n                transition: background 160ms ease, box-shadow 160ms ease;\n            }\n            .nmb-switch:hover { box-shadow: 0 0 0 3px rgba(88, 101, 242, 0.25); }\n            .nmb-switch.is-on { background: var(--brand-experiment, #5865f2); }\n            .nmb-switch-knob {\n                position: absolute;\n                top: 2px;\n                left: 2px;\n                width: 14px;\n                height: 14px;\n                border-radius: 50%;\n                background: #fff;\n                box-shadow: 0 1px 2px rgba(0,0,0,0.3);\n                transition: transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1);\n            }\n            .nmb-switch.is-on .nmb-switch-knob { transform: translateX(16px); }\n            .nmb-actions {\n                display: flex;\n                align-items: center;\n                flex-wrap: wrap;\n                gap: 14px;\n                margin-top: 28px;\n                padding: 14px 0;\n                border-top: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-update-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease, box-shadow 160ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn:hover:not(:disabled) {\n                background: var(--brand-experiment-hover, #4752c4);\n                transform: translateY(-1px);\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-update-btn.is-up-to-date {\n                background: var(--text-positive, #23a559);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-up-to-date:hover:not(:disabled) {\n                background: #1e8f4e;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            .nmb-update-btn.is-update-available {\n                background: var(--brand-experiment, #5865f2);\n                color: #fff;\n                border: none;\n                animation: nmb-pulse-update 2s ease-in-out infinite;\n            }\n            .nmb-update-btn.is-update-available:hover { filter: brightness(1.1); }\n            .nmb-update-btn.is-error {\n                background: var(--text-danger, #f23f43);\n                color: #fff;\n                border: none;\n            }\n            .nmb-update-btn.is-error:hover:not(:disabled) {\n                background: #d73338;\n                box-shadow: 0 2px 8px rgba(0,0,0,0.25);\n            }\n            @keyframes nmb-pulse-update {\n                0%, 100% { box-shadow: 0 0 0 0 rgba(88,101,242,0.4); }\n                50% { box-shadow: 0 0 0 6px rgba(88,101,242,0); }\n            }\n            .nmb-last-check { font-size: 12px; color: var(--text-muted); }\n            .nmb-diagnostic-btn {\n                display: inline-flex;\n                align-items: center;\n                gap: 6px;\n                border-radius: 6px;\n                font-weight: 600;\n                cursor: pointer;\n                transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 120ms ease;\n                white-space: nowrap;\n                padding: 8px 14px;\n                font-size: 13px;\n                background: transparent;\n                color: var(--text-normal);\n                border: 1px solid var(--background-modifier-accent);\n            }\n            .nmb-diagnostic-btn:hover:not(:disabled) {\n                background: var(--background-modifier-hover);\n                transform: translateY(-1px);\n            }\n            .nmb-diagnostic-btn:disabled { opacity: 0.55; cursor: default; }\n            .nmb-diagnostic-btn.is-copied {\n                border-color: var(--text-positive, #23a559);\n                color: var(--text-positive, #23a559);\n            }\n            .nmb-pins-empty-placeholder {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: flex-start;\n                text-align: center;\n                padding-top: 32px;\n                padding-bottom: 16px;\n                flex-shrink: 0;\n            }\n            .nmb-pins-empty-placeholder .image_e8b59c,\n            .nmb-pins-empty-placeholder .nmb-pins-empty-icon {\n                width: 120px;\n                height: 120px;\n                background-size: contain;\n                background-repeat: no-repeat;\n                background-position: center;\n                display: flex;\n                align-items: center;\n                justify-content: center;\n            }\n            .nmb-pins-empty-placeholder .body_e8b59c {\n                display: block;\n                height: auto;\n                white-space: normal;\n            }\n            .nmb-pins-empty-footer,\n            .nmb-injected-tip-footer {\n                flex-shrink: 0;\n            }\n            .nmb-injected-forum-empty {\n                display: flex;\n                flex-direction: column;\n                align-items: center;\n                justify-content: center;\n                text-align: center;\n                width: 100%;\n                padding: 60px 16px;\n                gap: 8px;\n            }\n            [data-nmb-relabel-pending="true"] {\n                visibility: hidden !important;\n            }\n            li[data-list-item-id*="private-channels"]:not([data-nmb-relabeled="true"]):has([class*="avatarStack"], [class*="groupAvatar"], [class*="avatarMulti"]) {\n                visibility: hidden !important;\n            }\n\n            ${noticeButtonStyles}\n        `);
     }
     removeStyles() {
         try {
@@ -12788,10 +13270,100 @@ return false;
             });
         } catch (_) {}
     }
+    _logThrottled(key, err, level = "warn") {
+        const now = Date.now();
+        if (this._throttledLogs && this._throttledLogs.get(key) > now - 60000) return;
+        this._throttledLogs = this._throttledLogs || new Map;
+        this._throttledLogs.set(key, now);
+        try {
+            const errInfo = err && err.message ? err.message : err;
+            if (this.logger) {
+                if (level === "error") this.logger.error(key, errInfo);
+                else this.logger.warn(key, errInfo);
+            } else {
+                const msg = `[ByeBlocked] ${key}: ${errInfo}`;
+                if (level === "error") console.error(msg, err || "");
+                else console.warn(msg, err || "");
+            }
+        } catch (_) {}
+    }
+    getDiagnosticReport() {
+        const report = {
+            plugin: this.pluginName,
+            version: ByeBlocked.VERSION,
+            generatedAt: new Date().toISOString(),
+            discordBuildNumber: null,
+            settings: null,
+            patchFailures: {},
+            healthChecks: [],
+            recentLogs: []
+        };
+        try {
+            report.discordBuildNumber = (window?.GLOBAL_ENV?.RELEASE_CHANNEL && window?.GLOBAL_ENV?.BUILD_NUMBER)
+                ? `${window.GLOBAL_ENV.RELEASE_CHANNEL}-${window.GLOBAL_ENV.BUILD_NUMBER}`
+                : null;
+        } catch (_) {}
+        try { report.settings = JSON.parse(JSON.stringify(this.settings)); } catch (_) {}
+        try {
+            if (this._patcher?.failCounts) report.patchFailures = { ...this._patcher.failCounts };
+        } catch (_) {}
+        try {
+            if (this._health?.checks) {
+                report.healthChecks = Object.keys(this._health.checks).map(name => ({
+                    check: name,
+                    degraded: this._health.isDegraded(name),
+                    failStreak: this._health.checks[name].failStreak,
+                    totalFailures: this._health.checks[name].totalFailures,
+                    degradedCount: this._health.checks[name].degradedCount,
+                    lastError: this._health.checks[name].lastError
+                        ? (this._health.checks[name].lastError.message || String(this._health.checks[name].lastError))
+                        : null
+                }));
+            }
+        } catch (_) {}
+        try {
+            if (this.logger) report.recentLogs = this.logger.getEntries();
+        } catch (_) {}
+        return report;
+    }
+    async _copyDiagnosticReport(btn) {
+        let reportText;
+        try {
+            reportText = JSON.stringify(this.getDiagnosticReport(), null, 2);
+        } catch (err) {
+            this.toast("Couldn't build the diagnostic report.", "error");
+            this.logger?.error("_copyDiagnosticReport: failed to build report", err);
+            return;
+        }
+        try {
+            if (navigator?.clipboard?.writeText) {
+                await navigator.clipboard.writeText(reportText);
+            } else if (typeof BdApi?.Utils?.copyText === "function") {
+                BdApi.Utils.copyText(reportText);
+            } else {
+                throw new Error("No clipboard method available");
+            }
+            this.toast("Diagnostic report copied to clipboard.", "success");
+            if (btn) {
+                const label = btn.querySelector(".nmb-btn-label");
+                const originalText = label ? label.textContent : null;
+                btn.classList.add("is-copied");
+                if (label) label.textContent = "Copied!";
+                setTimeout(() => {
+                    btn.classList.remove("is-copied");
+                    if (label && originalText) label.textContent = originalText;
+                }, 2000);
+            }
+        } catch (err) {
+            this.toast("Couldn't copy to clipboard - see console for the report.", "warn");
+            this.logger?.error("_copyDiagnosticReport: clipboard write failed", err);
+            try { console.info(`[${this.pluginName}] Diagnostic report:`, reportText); } catch (_) {}
+        }
+    }
     getSettingsPanel() {
         const panel = document.createElement("div");
         panel.className = "nmb-panel";
-        panel.innerHTML = `\n            ${this._renderSettingsSection("types", "Who to hide", true)}\n            ${this._renderSettingsSection("places", "Where to hide", true)}\n            ${this._renderSettingsSection("behavior", "Other settings", true)}\n            <div class="nmb-actions">\n                <button class="nmb-update-btn" data-nmb-update-btn>\n                    <span class="nmb-btn-label">Check for updates</span>\n                </button>\n                <span class="nmb-last-check" data-nmb-last-check>Last check: ${this._formatDate(this._lastCheckTimestamp)}</span>\n            </div>\n        `;
+        panel.innerHTML = `\n            ${this._renderSettingsSection("types", "Who to hide", true)}\n            ${this._renderSettingsSection("places", "Where to hide", true)}\n            ${this._renderSettingsSection("behavior", "Other settings", true)}\n            <div class="nmb-actions">\n                <button class="nmb-update-btn" data-nmb-update-btn>\n                    <span class="nmb-btn-label">Check for updates</span>\n                </button>\n                <button class="nmb-diagnostic-btn" data-nmb-diagnostic-btn title="Copy a diagnostic report (patch status, health checks, recent log entries) for bug reports">\n                    <span class="nmb-btn-label">Copy diagnostic report</span>\n                </button>\n                <span class="nmb-last-check" data-nmb-last-check>Last check: ${this._formatDate(this._lastCheckTimestamp)}</span>\n            </div>\n        `;
         if (this._updateState.status === "available") {
             this._renderUpdateBtn(panel);
         } else {
@@ -12813,6 +13385,11 @@ return false;
         return panel;
     }
     _onSettingsPanelClick(event, panel) {
+        const diagnosticBtn = event.target.closest("[data-nmb-diagnostic-btn]");
+        if (diagnosticBtn) {
+            this._copyDiagnosticReport(diagnosticBtn);
+            return;
+        }
         const updateBtn = event.target.closest("[data-nmb-update-btn]");
         if (updateBtn) {
             if (this._updateState.status === "available" && this._updateState.remoteText) {
