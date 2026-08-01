@@ -3858,16 +3858,6 @@ module.exports = class ByeBlocked {
             this._retryGuardExit("patchPrivateChannelStore");
             return;
         }
-        try {
-            console.log("[ByeBlocked][DIAG] pcs resolvido:", {
-                ctorName: pcs?.constructor?.name,
-                displayName: pcs?.getName?.(),
-                hasGetPrivateChannelIds: typeof pcs?.getPrivateChannelIds,
-                hasGetMutablePrivateChannels: typeof pcs?.getMutablePrivateChannels,
-                hasGetPrivateChannels: typeof pcs?.getPrivateChannels,
-                idsRightNow: (() => { try { return pcs?.getPrivateChannelIds?.(); } catch (e) { return "THREW: " + e.message; } })()
-            });
-        } catch (_) {}
         const self = this;
         const migrateIfGroupDM = ch => {
             try {
@@ -3894,22 +3884,19 @@ module.exports = class ByeBlocked {
         let patchedAny = false;
         if (typeof pcs.getPrivateChannelIds === "function") {
             this.patchAfter(pcs, "getPrivateChannelIds", (_, __, ret) => {
-                try { console.log("[ByeBlocked][DIAG] getPrivateChannelIds ret=", ret, "len=", ret?.length); } catch (_) {}
-                try { return filterIds(ret); } catch (e) { console.error("[ByeBlocked][DIAG] filterIds THREW", e); return ret; }
+                try { return filterIds(ret); } catch (_) { return ret; }
             });
             patchedAny = true;
         }
         if (typeof pcs.getMutablePrivateChannels === "function") {
             this.patchAfter(pcs, "getMutablePrivateChannels", (_, __, ret) => {
-                try { console.log("[ByeBlocked][DIAG] getMutablePrivateChannels ret=", ret, "keys=", ret ? Object.keys(ret).length : null); } catch (_) {}
-                try { return filterMutable(ret); } catch (e) { console.error("[ByeBlocked][DIAG] filterMutable THREW", e); return ret; }
+                try { return filterMutable(ret); } catch (_) { return ret; }
             });
             patchedAny = true;
         }
         if (typeof pcs.getPrivateChannels === "function") {
             this.patchAfter(pcs, "getPrivateChannels", (_, __, ret) => {
-                try { console.log("[ByeBlocked][DIAG] getPrivateChannels ret=", ret, "len/keys=", Array.isArray(ret) ? ret.length : (ret ? Object.keys(ret).length : null)); } catch (_) {}
-                try { return filterMutable(ret); } catch (e) { console.error("[ByeBlocked][DIAG] filterMutable(getPrivateChannels) THREW", e); return ret; }
+                try { return filterMutable(ret); } catch (_) { return ret; }
             });
             patchedAny = true;
         }
