@@ -30,7 +30,7 @@
 
 Requires [BetterDiscord](https://betterdiscord.app) to be installed.
 
-1. Download [`ByeBlocked.plugin.js`](https://github.com)
+1. Download the plugin from [Releases](https://github.com/8ug8ird/ByeBlocked/releases)
 2. Go to **Settings > Plugins > Open Plugins Folder**
 3. Drop the file in and enable it
 
