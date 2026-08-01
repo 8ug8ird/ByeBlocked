@@ -2,7 +2,7 @@
  * @name Probe
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 0.4.0
+ * @version 0.4.1
  * @description Compatibility watchdog for ByeBlocked
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -30,6 +30,19 @@ function _hashSource(str) {
         h = Math.imul(h, 0x01000193);
     }
     return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+function _unwrapReactComponent(v) {
+    if (typeof v === "function") return v;
+    if (v && typeof v === "object") {
+        const typeofTag = v.$$typeof?.toString?.() || "";
+        if (typeofTag.includes("react.memo") && typeof v.type === "function") return v.type;
+        if (typeofTag.includes("react.forward_ref") && typeof v.render === "function") return v.render;
+        for (const nestedKey of ["type", "render", "Component", "default"]) {
+            if (typeof v[nestedKey] === "function") return v[nestedKey];
+        }
+    }
+    return null;
 }
 
 async function yieldToUI(iteration, interval) {
@@ -379,16 +392,20 @@ class WebpackScanner {
             keyCount
         };
 
-        if (typeof exportValue === "function") {
+        const unwrapped = typeof exportValue === "function" ? exportValue : _unwrapReactComponent(exportValue);
+        if (typeof unwrapped === "function") {
             if (this._shouldDeepScan(moduleId)) {
-                data.functionSignature = this._buildFunctionSignature(exportValue);
+                data.functionSignature = this._buildFunctionSignature(unwrapped);
             }
             try {
-                const src = exportValue.toString();
+                const src = unwrapped.toString();
                 const MAX_SNIPPET = 400;
                 data.sourceSnippet = src.length > MAX_SNIPPET ? src.slice(0, MAX_SNIPPET) : src;
                 data.sourceTruncated = src.length > MAX_SNIPPET;
                 data.sourceHash = _hashSource(src);
+                if (unwrapped !== exportValue) {
+                    data.sourceUnwrappedFrom = exportValue?.$$typeof?.toString?.() || "wrapped-component";
+                }
             } catch (_) {}
         }
 
@@ -804,7 +821,7 @@ class StoreScanner {
                         if (!nameRe.test(src)) continue;
                         const uses = nameRe.test(src);
                         const observes = /addChangeListener|addListener|subscribe/.test(src) && nameRe.test(src);
-                        const modifies = /\.dispatch\s*\(/.test(src) && nameRe.test(src);
+                        const modifies = /\.dispatch\s*\(|\.dispatchAction\s*\(/.test(src) && nameRe.test(src);
                         if (uses) consumersByStore[name].uses.push(ids[i]);
                         if (observes) consumersByStore[name].observes.push(ids[i]);
                         if (modifies) consumersByStore[name].modifies.push(ids[i]);
@@ -920,6 +937,11 @@ const COMPATIBILITY_CHECKS = [
       maxHops: 15,
       requiresContext: "memberListOpen",
       note: "Fiber-walk fallback for the member list row component, used when neither storeName nor protoShape can pin down how a blocked member's identity reaches the row." },
+    { plugin: "ByeBlocked", label: "Private channel row component (patchPrivateChannelRowComponent target)", kind: "domProp",
+      selector: '[data-list-item-id*="private-channels"][data-list-item-id*="___"]',
+      expectedPropAny: ["channel"],
+      maxHops: 40,
+      note: "Fiber-walk fallback for the group-DM row component, mirroring ByeBlocked's own ROW_SELECTOR and 40-hop Fiber walk in patchPrivateChannelRowComponent() (v2.5.0). This confirms a 'channel' prop reaches this part of the tree - the same structural prerequisite ByeBlocked's patch relies on - but not that the channel is specifically a Group DM (ByeBlocked further checks channel.isGroupDM via looksLikeGroupDmChannel, which this check doesn't replicate). No requiresContext is declared: unlike voice/stage/memberList, 'has at least one Group DM in the channel list' isn't something _detectActiveContexts can reliably signal, and the patch itself is a no-op entirely when settings.places.groupDms is off - cannot_verify is the correct default when there's simply nothing to find, same as how the 'events' health check is documented to no-op when its setting is disabled." },
 
     { plugin: "ByeBlocked", label: "Runtime: notification dispatcher patch", kind: "pluginHealthCheck",
       sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "dispatcherPatch",
@@ -945,7 +967,7 @@ const COMPATIBILITY_CHECKS = [
       note: "Cross-references ByeBlocked's own HealthMonitor entry for muting blocked users' voice audio against the structural health of the media engine / voice state Stores." },
     { plugin: "ByeBlocked", label: "Runtime: group DM hiding", kind: "pluginHealthCheck",
       sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "groupDms",
-      relatedChecks: ["PrivateChannelStore", "Channel class (isGroupDM/isDM)"],
+      relatedChecks: ["PrivateChannelStore", "Channel class (isGroupDM/isDM)", "Private channel row component (patchPrivateChannelRowComponent target)"],
       note: "Cross-references ByeBlocked's own HealthMonitor entry for hiding group DMs from blocked-only participants against the structural health of PrivateChannelStore and the Channel class shape." },
 
     { plugin: "ByeBlocked", label: "Runtime: member list filtering", kind: "pluginHealthCheck",
@@ -992,7 +1014,22 @@ const COMPATIBILITY_CHECKS = [
       sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "voiceStatesAltFilter",
       relatedChecks: ["SortedVoiceStateStore"],
       requiresContext: "voiceCall",
-      note: "Cross-references ByeBlocked's own HealthMonitor entry for the profile-popout voice-states alt method (patchStores() resolves this dynamically as getVoiceStatesForChannelAlt or an equivalent name via _findVoiceStatesAltMethodName) against the structural health of SortedVoiceStateStore, the store this alt method lives on regardless of its exact name. The method name itself isn't independently fingerprinted since it's resolved dynamically at runtime, not via a fixed candidate list - the store it hangs off of is the meaningful structural anchor here." }
+      note: "Cross-references ByeBlocked's own HealthMonitor entry for the profile-popout voice-states alt method (patchStores() resolves this dynamically as getVoiceStatesForChannelAlt or an equivalent name via _findVoiceStatesAltMethodName) against the structural health of SortedVoiceStateStore, the store this alt method lives on regardless of its exact name. The method name itself isn't independently fingerprinted since it's resolved dynamically at runtime, not via a fixed candidate list - the store it hangs off of is the meaningful structural anchor here." },
+
+    { plugin: "ByeBlocked", label: "Runtime: message filter effectiveness (raw data check)", kind: "pluginHealthCheck",
+      sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "messageFilterEffectiveness",
+      relatedChecks: ["MessageStore"],
+      note: "Cross-references ByeBlocked's own HealthMonitor entry for whether _filterMessagesCollectionUncached actually removes blocked-author messages from the raw MessageStore data for the current channel, against the structural health of MessageStore itself. Distinct from the 'Runtime: message list filtering' DOM-sampling check: this one inspects the raw pre-render message collection directly, so it can catch a MessageStore data-shape change even before/without any blocked message being visibly rendered on screen. Was previously untracked by Probe - ByeBlocked's own 'messageFilterEffectiveness' health check had no relatedChecks to cross-reference against." },
+
+    { plugin: "ByeBlocked", label: "Runtime: autocomplete filtering (live DOM)", kind: "pluginHealthCheck",
+      sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "autocomplete",
+      relatedChecks: ["Autocomplete row component (patchAutocompleteRowComponent target)"],
+      note: "Cross-references ByeBlocked's own HealthMonitor entry for whether blocked users are actually hidden from live channel/mention autocomplete rows in the DOM, against the structural health of the autocomplete row component's source fingerprint. Distinct from 'Runtime: autocomplete row patch': that one only verifies the patch is still attached; this one samples up to 40 live [role=\"option\"] rows and verifies none of them belong to a blocked user. Only meaningful when settings.places.autocomplete is on; ByeBlocked's own check no-ops otherwise. Was previously untracked by Probe." },
+
+    { plugin: "ByeBlocked", label: "Runtime: DOM removal guard stability", kind: "pluginHealthCheck",
+      sourcePlugin: "ByeBlocked", dataKey: "healthSnapshotForProbe", healthCheckName: "domRemovalGuardSwallowRate",
+      relatedChecks: [],
+      note: "Cross-references ByeBlocked's own HealthMonitor entry for how often its Node.prototype.removeChild/insertBefore guard has to swallow a NotFoundError to avoid crashing (threshold: 20 swallows per check window) against Probe. No relatedChecks: this guard protects DOM operations across every UI-facing patch in the plugin rather than one specific feature, so there's no single structural module/store it makes sense to cross-reference - Probe will report 'unknown' verdict on a degradation here by design (see _diagnosePluginHealthDegradation), same as ByeBlocked's own inviteQueryModule and autocompleteRowPatch checks did before their relatedChecks were added above. A rising swallow rate is still meaningful on its own: it suggests Discord changed how it reconciles the DOM around elements ByeBlocked is hiding/removing." }
 ];
 
 function _loadDependencyManifest() {
@@ -1141,12 +1178,95 @@ class CompatibilityModule {
         this.allEntities = options.allEntities || [];
         this.checks = options.checks || COMPATIBILITY_CHECKS;
         this.activeContexts = options.activeContexts instanceof Set ? options.activeContexts : new Set();
+        this.historyLookup = typeof options.historyLookup === "function" ? options.historyLookup : null;
     }
 
     isImplemented() { return true; }
 
     setEntities(entities) {
         this.allEntities = entities || [];
+    }
+
+    static get FEATURE_MAP() {
+        return {
+            messages: { label: "Messages", tier: "critical", checks: ["messages", "dispatcherPatch"] },
+            members: { label: "Member list", tier: "critical", checks: ["members"] },
+            groupDms: { label: "Group DMs", tier: "critical", checks: ["groupDms"] },
+            voice: { label: "Voice", tier: "important", checks: ["voice", "voiceAudio", "voiceUserComponentPatch"] },
+            reactions: { label: "Reactions", tier: "important", checks: ["reactions"] },
+            autocomplete: { label: "Autocomplete", tier: "important", checks: ["autocomplete", "autocompleteRowPatch", "inviteQueryModule"] },
+            events: { label: "Scheduled events", tier: "optional", checks: ["events"] },
+            forum: { label: "Forum posts", tier: "optional", checks: ["forumPostPatch"] },
+            profilePopout: { label: "Profile popout (voice states)", tier: "optional", checks: ["voiceStatesAltFilter"] }
+        };
+    }
+
+    _computeFeatureSummary(results) {
+        const byHealthCheckName = new Map();
+        for (const r of results) {
+            if (r.kind !== "pluginHealthCheck" || !r.healthCheckName) continue;
+            byHealthCheckName.set(r.healthCheckName, r);
+        }
+
+        const brokenStatuses = new Set(["not_resolved", "fallback_broken"]);
+        const features = [];
+        const tierCounts = {
+            critical: { healthy: 0, total: 0 },
+            important: { healthy: 0, total: 0 },
+            optional: { healthy: 0, total: 0 }
+        };
+
+        for (const [key, def] of Object.entries(CompatibilityModule.FEATURE_MAP)) {
+            const subResults = def.checks
+                .map(name => byHealthCheckName.get(name))
+                .filter(Boolean);
+
+            if (subResults.length === 0) {
+                features.push({ key, label: def.label, tier: def.tier, status: "cannot_verify", reason: "No matching health data in this scan.", checks: [] });
+                continue;
+            }
+
+            const activeBroken = subResults.filter(r => brokenStatuses.has(r.status) && r.contextActive !== false);
+            const heartbeatIssues = subResults.filter(r => r.status === "plausible" && r.heartbeat && r.heartbeat.tracked && !r.heartbeat.alive);
+            const anyCannotVerify = subResults.some(r => r.status === "cannot_verify");
+
+            let status, reason;
+            if (activeBroken.length > 0) {
+                status = "degraded";
+                reason = `${activeBroken.map(r => r.label).join(", ")} failed.`;
+            } else if (heartbeatIssues.length > 0) {
+                status = "heartbeat_stale";
+                reason = `${heartbeatIssues.map(r => r.label).join(", ")} installed and not explicitly failing, but its heartbeat hasn't fired recently - may not be triggering in practice.`;
+            } else if (anyCannotVerify && subResults.every(r => r.status === "cannot_verify")) {
+                status = "cannot_verify";
+                reason = "No health data published yet for this feature.";
+            } else {
+                status = "healthy";
+                reason = null;
+            }
+
+            tierCounts[def.tier].total++;
+            if (status === "healthy") tierCounts[def.tier].healthy++;
+
+            features.push({
+                key, label: def.label, tier: def.tier, status, reason,
+                checks: subResults.map(r => ({ label: r.label, healthCheckName: r.healthCheckName, status: r.status }))
+            });
+        }
+
+        const pct = tier => tierCounts[tier].total === 0 ? null : Math.round(100 * tierCounts[tier].healthy / tierCounts[tier].total);
+        const criticalPct = pct("critical");
+        const overall = criticalPct === null ? "UNKNOWN" : criticalPct < 100 ? "UNSAFE" : "SAFE";
+
+        return {
+            features,
+            byTier: {
+                critical: { ...tierCounts.critical, pct: criticalPct },
+                important: { ...tierCounts.important, pct: pct("important") },
+                optional: { ...tierCounts.optional, pct: pct("optional") }
+            },
+            overall
+        };
     }
 
     _levenshtein(a, b) {
@@ -1245,11 +1365,25 @@ class CompatibilityModule {
             : "";
 
         if (!entry.degraded) {
+            const heartbeat = this._evaluateHeartbeat(entry, snapshot);
+            if (heartbeat.tracked && !heartbeat.alive) {
+                const heartbeatIssue = heartbeat.neverFired
+                    ? `never reported a heartbeat since this snapshot was published (${Math.round((Date.now() - (snapshot.publishedAt || 0)) / 60000)}min ago) despite the startup grace window having passed`
+                    : `last reported a heartbeat ${Math.round(heartbeat.msSinceHeartbeat / 60000)}min ago, past the stale threshold`;
+                return {
+                    status: "plausible",
+                    confidence: "medium",
+                    matchedVia: `${pluginName}.HealthMonitor:${check.healthCheckName}`,
+                    note: `${pluginName} reports this feature as installed and not explicitly degraded (failStreak: ${entry.failStreak}, lifetime failures: ${entry.totalFailures}), but its heartbeat ${heartbeatIssue}. This means the patch is present but its trigger event may not be firing in practice - worth exercising this feature directly to confirm it actually works, not just that it installed.${staleWarning}`,
+                    heartbeat
+                };
+            }
             return {
                 status: "resolved",
                 confidence: "high",
                 matchedVia: `${pluginName}.HealthMonitor:${check.healthCheckName}`,
-                note: `${pluginName} reports this runtime feature as healthy (failStreak: ${entry.failStreak}, lifetime failures: ${entry.totalFailures}).${staleWarning}`
+                note: `${pluginName} reports this runtime feature as healthy (failStreak: ${entry.failStreak}, lifetime failures: ${entry.totalFailures}).${staleWarning}`,
+                heartbeat
             };
         }
 
@@ -1261,6 +1395,7 @@ class CompatibilityModule {
             confidence: diagnosis.verdict === "unknown" ? "low" : "medium",
             matchedVia: `${pluginName}.HealthMonitor:${check.healthCheckName}`,
             note: `${pluginName} reports this runtime feature as DEGRADED (failStreak: ${entry.failStreak}, lifetime failures: ${entry.totalFailures}, degraded ${entry.degradedCount} time(s) this session).${staleWarning} Diagnosis: ${diagnosis.summary}`,
+            heartbeat: this._evaluateHeartbeat(entry, snapshot),
             investigation: {
                 investigatedAt: Date.now(),
                 technique: "pluginHealthCheck:cross-reference-structural-checks",
@@ -1272,6 +1407,21 @@ class CompatibilityModule {
                 summary: diagnosis.summary
             }
         };
+    }
+
+    _evaluateHeartbeat(entry, snapshot) {
+        if (!("lastHeartbeatAt" in entry)) return { tracked: false };
+
+        const STARTUP_GRACE_MS = 2 * 60 * 1000;
+        const STALE_MS = 10 * 60 * 1000;
+
+        if (entry.lastHeartbeatAt == null) {
+            const pastGrace = !!snapshot.publishedAt && (Date.now() - snapshot.publishedAt) > STARTUP_GRACE_MS;
+            return { tracked: true, alive: !pastGrace, neverFired: true };
+        }
+
+        const stale = typeof entry.msSinceHeartbeat === "number" && entry.msSinceHeartbeat > STALE_MS;
+        return { tracked: true, alive: !stale, neverFired: false, msSinceHeartbeat: entry.msSinceHeartbeat };
     }
 
     _investigateStoreNameBroad(check) {
@@ -1587,11 +1737,40 @@ class CompatibilityModule {
                 investigation: this._investigateSourceString(check, modules, needleLower)
             };
         }
+        try {
+            if (typeof BdApi?.Webpack?.getWithKey === "function") {
+                const liveHit = BdApi.Webpack.getWithKey(m => {
+                    const fn = _unwrapReactComponent(m) || (typeof m === "function" ? m : null);
+                    if (!fn) return false;
+                    try {
+                        const src = Function.prototype.toString.call(fn).toLowerCase();
+                        return needleLower.filter(n => src.includes(n)).length >= minHits;
+                    } catch (_) { return false; }
+                });
+                let pair = null;
+                if (liveHit) {
+                    if (Array.isArray(liveHit)) pair = liveHit;
+                    else if (typeof liveHit[Symbol.iterator] === "function" || typeof liveHit.next === "function") {
+                        const spread = [...liveHit];
+                        if (spread.length && spread[0] !== undefined) pair = spread;
+                    }
+                }
+                if (pair && pair[0] !== undefined) {
+                    return {
+                        status: "resolved",
+                        confidence: "medium",
+                        matchedVia: ["live:getWithKey"],
+                        note: `Not found in the static WebpackScanner snapshot, but a live BdApi.Webpack.getWithKey search (same needle terms, minHits: ${minHits}) found a matching module just now. This is the same "exists but not export-scannable" situation ByeBlocked's own fallback patches handle via direct Fiber walk - treat as a real match, not a weaker one.`,
+                        investigation: this._investigateSourceString(check, modules, needleLower)
+                    };
+                }
+            }
+        } catch (_) {}
         return {
             status: "cannot_verify",
             confidence: "low",
             matchedVia: null,
-            note: "No webpackModule entity in this scan has a captured source snippet or name/alias matching any needle term. This does NOT mean the fingerprint is broken - the target module may not have been resolved (lazy-loaded) this session, or its match sits past the truncated snippet window. Treat as inconclusive, not as a failure.",
+            note: "No webpackModule entity in this scan has a captured source snippet or name/alias matching any needle term, and a live getWithKey search found no match either. This does NOT mean the fingerprint is broken - the target module may not have been resolved (lazy-loaded) this session, or its match sits past the truncated snippet window. Treat as inconclusive, not as a failure.",
             investigation: this._investigateSourceString(check, modules, needleLower)
         };
     }
@@ -1893,6 +2072,29 @@ class CompatibilityModule {
         };
     }
 
+    _applyHistoryCoverage(result, check, contextActive) {
+        if (contextActive || result.status !== "cannot_verify" || !this.historyLookup) return result;
+        let hist;
+        try {
+            hist = this.historyLookup(check.label, check.plugin);
+        } catch (_) {
+            return result;
+        }
+        if (!hist || hist.scansObserved < 2) return result;
+
+        if (hist.unhealthyCount > 0) {
+            return {
+                ...result,
+                historicalCoverage: {
+                    verdict: "unstable",
+                    note: `Context not active this scan, so this can't be checked directly - but history shows it was unhealthy in ${hist.unhealthyCount} of the last ${hist.scansObserved} scan(s) where it *was* checked. Worth visiting this screen to confirm current state rather than assuming it's fine.`
+                }
+            };
+        }
+
+        return result;
+    }
+
     async scan() {
         const entities = [];
         const results = [];
@@ -1911,13 +2113,14 @@ class CompatibilityModule {
                 result = { status: "cannot_verify", confidence: "low", matchedVia: null, note: `Unknown check kind "${check.kind}".` };
             }
             const contextActive = !check.requiresContext || this.activeContexts.has(check.requiresContext);
-            results.push({ plugin: check.plugin, label: check.label, kind: check.kind, requiresContext: check.requiresContext || null, contextActive, ...result });
+            result = this._applyHistoryCoverage(result, check, contextActive);
+            results.push({ plugin: check.plugin, label: check.label, kind: check.kind, requiresContext: check.requiresContext || null, contextActive, healthCheckName: null, ...result });
         }
 
         for (const check of deferred) {
             const result = this._checkPluginHealthCheck(check, results);
             const contextActive = !check.requiresContext || this.activeContexts.has(check.requiresContext);
-            results.push({ plugin: check.plugin, label: check.label, kind: check.kind, requiresContext: check.requiresContext || null, contextActive, ...result });
+            results.push({ plugin: check.plugin, label: check.label, kind: check.kind, requiresContext: check.requiresContext || null, contextActive, healthCheckName: check.healthCheckName || null, ...result });
         }
 
         const byPlugin = {};
@@ -1952,20 +2155,71 @@ class CompatibilityModule {
             bucket.total++;
         }
 
+        const relatedChecksIndex = new Map();
+        for (const check of this.checks) {
+            if (check.kind !== "pluginHealthCheck" || !Array.isArray(check.relatedChecks)) continue;
+            for (const relatedLabel of check.relatedChecks) {
+                if (!relatedChecksIndex.has(relatedLabel)) relatedChecksIndex.set(relatedLabel, []);
+                relatedChecksIndex.get(relatedLabel).push(check.healthCheckName);
+            }
+        }
+        const healthResultByCheckName = new Map();
+        for (const r of results) {
+            if (r.kind === "pluginHealthCheck" && r.healthCheckName) healthResultByCheckName.set(r.healthCheckName, r);
+        }
+
+        const contextlessUnresolved = [];
+        for (const r of results) {
+            if (r.requiresContext || r.status !== "cannot_verify") continue;
+            const linkedHealthCheckNames = relatedChecksIndex.get(r.label) || [];
+            const linkedHealthResults = linkedHealthCheckNames.map(name => healthResultByCheckName.get(name)).filter(Boolean);
+            const anyLinkedHealthy = linkedHealthResults.some(hr => hr.status === "resolved");
+            const anyLinkedDegraded = linkedHealthResults.some(hr => hr.status === "not_resolved" || hr.status === "fallback_broken" || hr.status === "plausible");
+
+            if (anyLinkedHealthy && !anyLinkedDegraded) {
+                continue;
+            }
+            contextlessUnresolved.push({
+                plugin: r.plugin, label: r.label, status: r.status, kind: r.kind, note: r.note || null,
+                linkedHealthCheckStatus: linkedHealthResults.length > 0
+                    ? linkedHealthResults.map(hr => `${hr.label}: ${hr.status}`).join(", ")
+                    : "no linked runtime health check found"
+            });
+        }
+
         const unresolvedStatuses = new Set(["cannot_verify", "not_resolved", "plausible", "fallback_broken"]);
         const pendingByContext = {};
         for (const r of results) {
             if (!r.requiresContext) continue;
             if (!unresolvedStatuses.has(r.status)) continue;
             if (!pendingByContext[r.requiresContext]) pendingByContext[r.requiresContext] = [];
-            pendingByContext[r.requiresContext].push({ plugin: r.plugin, label: r.label, status: r.status, contextActive: r.contextActive });
+            pendingByContext[r.requiresContext].push({ plugin: r.plugin, label: r.label, status: r.status, contextActive: r.contextActive, kind: r.kind, historicalCoverage: r.historicalCoverage || null });
         }
-        const pendingContexts = Object.entries(pendingByContext).map(([context, checks]) => ({
-            context,
-            affectedCheckCount: checks.length,
-            genuinelySuspicious: checks.filter(c => c.contextActive).length,
-            checks
-        }));
+        const pendingContexts = Object.entries(pendingByContext).map(([context, checks]) => {
+            const suspiciousChecks = checks.filter(c => c.contextActive);
+            const hardSuspicious = suspiciousChecks.filter(c => c.kind !== "domProp");
+            const softSuspicious = suspiciousChecks.filter(c => c.kind === "domProp");
+
+            const unstableCovered = checks.filter(c => c.historicalCoverage && c.historicalCoverage.verdict === "unstable").length;
+
+            return {
+                context,
+                affectedCheckCount: checks.length,
+                genuinelySuspicious: suspiciousChecks.length,
+                genuinelySuspiciousNote: softSuspicious.length > 0
+                    ? `${softSuspicious.length} of these are domProp check(s) where context detection and the check use independent selectors - a mismatch here can mean one selector drifted, not that the feature broke. Treat as "worth a second look", not confirmed. ${hardSuspicious.length > 0 ? `${hardSuspicious.length} other check(s) here use context-independent signals (store lookups, etc.) and are a stronger signal.` : ""}`.trim()
+                    : null,
+                coverage: {
+                    unstableCovered,
+                    note: unstableCovered > 0
+                        ? `${unstableCovered} of these show unstable history (unhealthy in a recent scan) even though context isn't active right now - worth checking sooner rather than assuming it's fine.`
+                        : null
+                },
+                checks
+            };
+        });
+
+        const featureSummary = this._computeFeatureSummary(results);
 
         entities.push(makeEntity({
             id: "compatibility:report",
@@ -1979,7 +2233,9 @@ class CompatibilityModule {
                 summaryByPlugin: byPlugin,
                 summaryByPluginContextAware: byPluginContextAware,
                 checks: results,
-                pendingContexts
+                pendingContexts,
+                contextlessUnresolved,
+                featureSummary
             }
         }));
 
@@ -2010,6 +2266,175 @@ class CompatibilityModule {
         return entities;
     }
 }
+class FingerprintWatchdog {
+    constructor(options = {}) {
+        this.moduleName = "FingerprintWatchdog";
+        this.logger = options.logger;
+        this.bootstrap = options.bootstrap;
+        this.checks = options.checks || [];
+        this.compatibilityResults = options.compatibilityResults || [];
+
+        this._gatewayActionPattern = /\b(MESSAGE_CREATE|MESSAGE_UPDATE|MESSAGE_DELETE|CHANNEL_CREATE|GUILD_MEMBER_(?:ADD|REMOVE|UPDATE)|VOICE_STATE_UPDATE|PRESENCE_UPDATE|RELATIONSHIP_(?:ADD|REMOVE))\b/;
+    }
+
+    isImplemented() { return true; }
+
+    _fingerprintScanForNeedles(wpRequire, needles, minHits) {
+        if (!wpRequire || !wpRequire.c) return { found: false, moduleId: null, hitCount: 0, hits: [] };
+        const needlesLower = needles.map(n => n.toLowerCase());
+
+        for (const [moduleId, mod] of Object.entries(wpRequire.c)) {
+            let exp;
+            try { exp = mod && mod.exports; } catch (_) { continue; }
+            if (!exp) continue;
+
+            const candidateExports = typeof exp === "function" ? [exp] : Object.values(exp).filter(v => v && (typeof v === "function" || typeof v === "object"));
+            if (typeof exp === "object") candidateExports.push(exp);
+
+            for (const target of candidateExports) {
+                let methodNames = [];
+                try {
+                    methodNames = Object.getOwnPropertyNames(target);
+                    const proto = Object.getPrototypeOf(target);
+                    if (proto && proto !== Object.prototype && proto !== Function.prototype) {
+                        methodNames = [...new Set([...methodNames, ...Object.getOwnPropertyNames(proto)])];
+                    }
+                } catch (_) {}
+                const methodHits = needlesLower.filter(n => methodNames.some(m => m.toLowerCase() === n));
+                if (methodHits.length >= (minHits ?? needles.length)) {
+                    return { found: true, moduleId, hitCount: methodHits.length, hits: methodHits, matchedVia: "prototype-method-names" };
+                }
+
+                if (typeof target === "function") {
+                    let src;
+                    try { src = target.toString(); } catch (_) { continue; }
+                    const srcLower = src.toLowerCase();
+                    const textHits = needlesLower.filter(n => srcLower.includes(n));
+                    if (textHits.length >= (minHits ?? needles.length)) {
+                        return { found: true, moduleId, hitCount: textHits.length, hits: textHits, matchedVia: "source-text", gatewayActionDetected: this._gatewayActionPattern.test(src) };
+                    }
+                }
+            }
+        }
+        return { found: false, moduleId: null, hitCount: 0, hits: [] };
+    }
+
+    _crossCheckStoreName(check) {
+        const officialHits = [];
+        if (typeof BdApi !== "undefined" && BdApi.Webpack && typeof BdApi.Webpack.getStore === "function") {
+            for (const candidate of check.candidates) {
+                try {
+                    const store = BdApi.Webpack.getStore(candidate);
+                    if (store) officialHits.push({ candidate, viaOfficialApi: true });
+                } catch (_) {}
+            }
+        }
+
+        if (!check.expectedMethods || check.expectedMethods.length === 0) {
+            return { officialHits, fingerprint: { found: false, moduleId: null, hitCount: 0, hits: [] }, skipped: true };
+        }
+
+        const wpRequire = this.bootstrap.getRequire();
+        const fp = this._fingerprintScanForNeedles(wpRequire, check.expectedMethods, Math.min(2, check.expectedMethods.length));
+
+        return { officialHits, fingerprint: fp, skipped: false };
+    }
+
+    _crossCheckSourceOrProto(check) {
+        const wpRequire = this.bootstrap.getRequire();
+        const needles = check.kind === "protoShape" ? check.methods : check.needles;
+        const minHits = check.kind === "protoShape" ? check.methods.length : (check.minHits ?? needles.length);
+        const fp = this._fingerprintScanForNeedles(wpRequire, needles, minHits);
+        return { officialHits: [], fingerprint: fp };
+    }
+
+    _detectDrift(check, compatResult, crossCheck) {
+        const compatResolved = compatResult && compatResult.status === "resolved";
+        const fingerprintResolved = crossCheck.fingerprint.found;
+
+        if (compatResolved && !fingerprintResolved) {
+            return {
+                driftType: "api-found-fingerprint-missed",
+                severity: "info",
+                message: `"${check.label}": BD's public API/heuristics resolved (matchedVia="${compatResult.matchedVia}"), but the independent textual fingerprinting scan did NOT find anything matching. Could just be a difference in search strategy (not necessarily an error) - but worth checking whether matchedVia is still the right module.`
+            };
+        }
+
+        if (!compatResolved && fingerprintResolved) {
+            return {
+                driftType: "fingerprint-found-api-missed",
+                severity: "warn",
+                message: `"${check.label}": BD's public API/heuristics did NOT resolve, but the textual fingerprinting scan found a plausible candidate (moduleId=${crossCheck.fingerprint.moduleId}, ${crossCheck.fingerprint.hitCount} hit(s): [${crossCheck.fingerprint.hits.join(", ")}]). This is a strong candidate to manually add to the check's candidates/needles - NOT applied automatically.`
+            };
+        }
+
+        if (compatResolved && fingerprintResolved && check.kind === "storeName") {
+            const matchedViaStr = Array.isArray(compatResult.matchedVia) ? compatResult.matchedVia[0] : compatResult.matchedVia;
+            const officialCandidateNames = crossCheck.officialHits.map(h => h.candidate);
+            if (officialCandidateNames.length && matchedViaStr && !officialCandidateNames.some(name => matchedViaStr.includes(name))) {
+                return {
+                    driftType: "matched-via-mismatch",
+                    severity: "warn",
+                    message: `"${check.label}": possible mismatch - CompatibilityModule reports matchedVia="${matchedViaStr}", but the official check via BdApi.Webpack.getStore resolved through [${officialCandidateNames.join(", ")}]. Worth manually confirming it's the same Store.`
+                };
+            }
+        }
+
+        return null;
+    }
+
+    async scan() {
+        const wpRequire = this.bootstrap.getRequire();
+        if (!wpRequire) {
+            this.logger.log(this.moduleName, "wpRequire unavailable - watchdog can't run the cross-check scan.", "warn");
+            return [];
+        }
+
+        const resultByLabel = new Map();
+        for (const r of this.compatibilityResults) resultByLabel.set(`${r.plugin}::${r.label}`, r);
+
+        const drifts = [];
+        let crossChecked = 0;
+
+        for (const check of this.checks) {
+            if (check.kind !== "storeName" && check.kind !== "sourceString" && check.kind !== "protoShape") continue;
+
+            const compatResult = resultByLabel.get(`${check.plugin}::${check.label}`);
+            const crossCheck = check.kind === "storeName"
+                ? this._crossCheckStoreName(check)
+                : this._crossCheckSourceOrProto(check);
+
+            if (crossCheck.skipped) continue;
+
+            crossChecked++;
+            const drift = this._detectDrift(check, compatResult, crossCheck);
+            if (drift) {
+                drifts.push({ plugin: check.plugin, label: check.label, ...drift });
+                this.logger.log(this.moduleName, `[DRIFT:${drift.driftType}] ${drift.message}`, drift.severity === "warn" ? "warn" : "info");
+            }
+        }
+
+        if (drifts.length === 0) {
+            this.logger.log(this.moduleName, `cross-check scan complete: ${crossChecked} check(s) compared, no drift between public API and fingerprinting.`, "info");
+        } else {
+            const hasWarnDrift = drifts.some(d => d.severity === "warn");
+            const summaryLevel = hasWarnDrift ? "warn" : "info";
+            this.logger.log(this.moduleName, `cross-check scan complete: ${crossChecked} check(s) compared, ${drifts.length} drift(s) detected (${drifts.filter(d => d.severity === "warn").length} warn, ${drifts.filter(d => d.severity === "info").length} info). See the [DRIFT:*] lines above for details.`, summaryLevel);
+        }
+
+        return [{
+            id: "fingerprint-watchdog:summary",
+            type: "fingerprintWatchdog",
+            name: "FingerprintWatchdog",
+            data: {
+                crossCheckedCount: crossChecked,
+                driftCount: drifts.length,
+                drifts
+            }
+        }];
+    }
+}
+
 class class_Probe {
     constructor() {
         this.pluginName = "Probe";
@@ -2027,6 +2452,10 @@ class class_Probe {
         this._autoCheckIntervalMs = 5 * 60 * 1000;
         this._autoCheckTimer = null;
         this._autoScanInFlight = false;
+        this._lastNotifiedBrokenSignature = null;
+
+        this._scanInFlight = false;
+        this._checkHistoryCache = null;
 
         this._watchModeActive = false;
         this._dispatcher = null;
@@ -2058,20 +2487,11 @@ class class_Probe {
         this.logger.log("core", "plugin stopped.");
     }
 
-    _peekBuildNumber() {
-        try {
-            return (window?.GLOBAL_ENV?.RELEASE_CHANNEL && window?.GLOBAL_ENV?.BUILD_NUMBER)
-                ? `${window.GLOBAL_ENV.RELEASE_CHANNEL}-${window.GLOBAL_ENV.BUILD_NUMBER}`
-                : null;
-        } catch (_) {
-            return null;
-        }
-    }
-
     _resolveDispatcher() {
         if (this._dispatcher) return this._dispatcher;
         try {
             if (typeof BdApi === "undefined" || !BdApi.Webpack || typeof BdApi.Webpack.getModule !== "function") return null;
+
             const found = BdApi.Webpack.getModule(
                 (m) => m && typeof m.subscribe === "function" && typeof m.dispatch === "function" && m._actionHandlers,
                 { first: true }
@@ -2079,8 +2499,21 @@ class class_Probe {
             if (found) {
                 this._dispatcher = found;
                 this.logger.log("core", "Flux Dispatcher resolved for watch mode's event-driven context detection.", "info");
+                return found;
             }
-            return found || null;
+
+            const wasmCandidate = BdApi.Webpack.getModule(
+                (m) => m && typeof m.connectStore === "function" && typeof m.dispatchAction === "function",
+                { first: true }
+            );
+            if (wasmCandidate) {
+                this.logger.log(
+                    "core",
+                    "Flux Dispatcher found, but it's the newer WASM-backed variant (connectStore/dispatchAction) - watch mode's event-driven subscribe path doesn't support this shape yet, falling back to DOM observation only.",
+                    "warn"
+                );
+            }
+            return null;
         } catch (_) {
             return null;
         }
@@ -2168,7 +2601,7 @@ class class_Probe {
         } catch (_) {}
 
         try {
-            if (document.querySelector('[class*="memberRow"], [class*="membersHeader"]')) {
+            if (document.querySelector('[class*="memberRow"], [class*="membersHeader"], [class*="member"][role="listitem"], [class*="memberInner"]')) {
                 active.add("memberListOpen");
             }
         } catch (_) {}
@@ -2343,15 +2776,14 @@ class class_Probe {
         this._stopAutoCheck();
         const poll = async () => {
             if (this._autoScanInFlight) return;
-            const liveBuild = this._peekBuildNumber();
+            const liveBuild = this._detectBuildNumber();
             if (!liveBuild) return;
             const lastKnown = this.lastSnapshot?.discordBuildNumber ?? this.loadLastSnapshot()?.discordBuildNumber;
             if (lastKnown === liveBuild) return;
             this._autoScanInFlight = true;
             try {
                 this.logger.log("core", `build change detected (${lastKnown || "none"} → ${liveBuild}) - running compatibility check automatically.`, "info");
-                const snapshot = await this.runFullScan();
-                this._notifyIfBroken(snapshot);
+                await this.runFullScan();
             } catch (err) {
                 this.logger.log("core", `auto-triggered scan failed: ${err && err.message || err}`, "error");
             } finally {
@@ -2375,13 +2807,23 @@ class class_Probe {
             if (!compat) return;
             const diff = snapshot.compatibilityDiff;
             const brokenNow = (compat.data.checks || []).filter(c => c.status === "not_resolved" || c.status === "fallback_broken");
+            const brokenSignature = brokenNow.map(c => c.label).sort().join("|");
+
             if (brokenNow.length > 0) {
+                if (brokenSignature === this._lastNotifiedBrokenSignature) return;
+                this._lastNotifiedBrokenSignature = brokenSignature;
                 BdApi.UI.showToast(
                     `Probe: Discord update broke ${brokenNow.length} ByeBlocked check(s) - ${brokenNow.map(c => c.label).slice(0, 3).join(", ")}${brokenNow.length > 3 ? "…" : ""}`,
                     { type: "error", timeout: 10000 }
                 );
-            } else if (diff && diff.hasPreviousScan && diff.changedChecks.length > 0) {
-                BdApi.UI.showToast(`Probe: Discord updated - compatibility re-checked, all still resolved.`, { type: "success" });
+            } else {
+                const wasBroken = !!this._lastNotifiedBrokenSignature;
+                this._lastNotifiedBrokenSignature = null;
+                if (wasBroken) {
+                    BdApi.UI.showToast(`Probe: previously broken check(s) are now resolved.`, { type: "success" });
+                } else if (diff && diff.hasPreviousScan && diff.changedChecks.length > 0) {
+                    BdApi.UI.showToast(`Probe: Discord updated - compatibility re-checked, all still resolved.`, { type: "success" });
+                }
             }
         } catch (_) {}
     }
@@ -2407,10 +2849,24 @@ class class_Probe {
             logger: this.logger,
             allEntities: this._allEntities,
             checks: buildCompatibilityChecks(this.logger),
-            activeContexts: this._detectActiveContexts()
+            activeContexts: this._detectActiveContexts(),
+            historyLookup: (label, plugin) => this._summarizeCheckHistory(label, plugin)
         });
 
         return [webpackScanner, storeScanner, compatibility];
+    }
+
+    _buildFingerprintWatchdog(compatEntities) {
+        const compatibilityResults = (compatEntities || [])
+            .filter(e => e.type === "compatibility" && Array.isArray(e.data?.checks))
+            .flatMap(e => e.data.checks);
+
+        return new FingerprintWatchdog({
+            logger: this.logger,
+            bootstrap: this.webpackBootstrap,
+            checks: buildCompatibilityChecks(this.logger),
+            compatibilityResults
+        });
     }
 
     async findMissingModules(onProgress) {
@@ -2428,11 +2884,26 @@ class class_Probe {
         });
 
         const result = await finder.find(currentChecks, onProgress);
+
         this.logger.log("core", `findMissingModules: found ${result.candidatesFound} candidate(s) in ${Date.now() - startedAt}ms (read-only - nothing executed).`);
+
         return result;
     }
 
     async runFullScan() {
+        if (this._scanInFlight) {
+            this.logger.log("core", "scan already in progress - skipping concurrent runFullScan.", "warn");
+            return this.lastSnapshot || this.loadLastSnapshot() || null;
+        }
+        this._scanInFlight = true;
+        try {
+            return await this._runFullScanImpl();
+        } finally {
+            this._scanInFlight = false;
+        }
+    }
+
+    async _runFullScanImpl() {
         const startedAt = Date.now();
 
         const freshRequire = this.webpackBootstrap.getRequire(true);
@@ -2457,6 +2928,11 @@ class class_Probe {
         const { entities: compatEntities, stats: compatStats } = await this.runner.run(compatibility);
         allEntities.push(...compatEntities);
         moduleStats.push(compatStats);
+
+        const fingerprintWatchdog = this._buildFingerprintWatchdog(compatEntities);
+        const { entities: watchdogEntities, stats: watchdogStats } = await this.runner.run(fingerprintWatchdog);
+        allEntities.push(...watchdogEntities);
+        moduleStats.push(watchdogStats);
 
         const buildNumber = this._detectBuildNumber();
         const compatibilityDiff = this._diffAgainstPrevious(allEntities, previousSnapshot, buildNumber);
@@ -2490,6 +2966,7 @@ class class_Probe {
         } else {
             this.logger.log("core", `scan complete: ${allEntities.length} entity(ies) in ${Date.now() - startedAt}ms - Compatibility: ${overallStats.overall} - status unchanged since last scan.`);
         }
+        this._notifyIfBroken(snapshot);
         return snapshot;
     }
 
@@ -2664,15 +3141,19 @@ class class_Probe {
             history.push(record);
             while (history.length > class_Probe.MAX_CHECK_HISTORY_ENTRIES) history.shift();
             BdApi.Data.save(this.pluginName, "checkHistory", history);
+            this._checkHistoryCache = null;
         } catch (err) {
             this.logger.log("core", `failed to append check history: ${err && err.message || err}`, "warn");
         }
     }
 
     _loadCheckHistory() {
+        if (this._checkHistoryCache) return this._checkHistoryCache;
         try {
             const history = BdApi.Data.load(this.pluginName, "checkHistory");
-            return Array.isArray(history) ? history : [];
+            const result = Array.isArray(history) ? history : [];
+            this._checkHistoryCache = result;
+            return result;
         } catch (_) {
             return [];
         }
@@ -2781,7 +3262,11 @@ class class_Probe {
 
     _computeOverallStats(snapshot) {
         const compatEntities = (snapshot?.entities || []).filter(e => e.type === "compatibility");
-        const totals = { total: 0, resolved: 0, failed: 0, warnings: 0, contextsMissing: 0, contextSkipped: 0 };
+        const totals = {
+            total: 0, resolved: 0, failed: 0, warnings: 0,
+            contextsMissing: 0, contextSkipped: 0,
+            historyCoveredUnstable: 0
+        };
         for (const ce of compatEntities) {
             const summaries = ce.data.summaryByPluginContextAware || ce.data.summaryByPlugin || {};
             for (const counts of Object.values(summaries)) {
@@ -2791,6 +3276,9 @@ class class_Probe {
                 totals.warnings += (counts.fallback_renamed || 0) + (counts.plausible || 0);
                 totals.contextsMissing += counts.cannot_verify || 0;
                 totals.contextSkipped += counts.context_not_active || 0;
+            }
+            for (const c of ce.data.checks || []) {
+                if (c.historicalCoverage && c.historicalCoverage.verdict === "unstable") totals.historyCoveredUnstable++;
             }
         }
         const totalScanTimeMs = (snapshot?.moduleStats || []).reduce((sum, s) => sum + (s.durationMs || 0), 0);
@@ -2853,6 +3341,16 @@ class class_Probe {
 
         wrap.appendChild(this._buildOverallSummaryBlock(snapshot));
 
+        const { featureSummary } = compatEntity.data;
+        if (featureSummary) {
+            wrap.appendChild(this._buildFeatureSummaryBlock(featureSummary));
+        }
+
+        const watchdogEntity = snapshot?.entities?.find(e => e.type === "fingerprintWatchdog");
+        if (watchdogEntity && watchdogEntity.data.driftCount > 0) {
+            wrap.appendChild(this._buildFingerprintWatchdogBlock(watchdogEntity.data));
+        }
+
         const diff = snapshot.compatibilityDiff;
         const hasDiff = diff && diff.hasPreviousScan && (diff.changedChecks.length > 0 || (diff.matchedViaDrifts || []).length > 0 || diff.newStores.length > 0 || diff.missingStores.length > 0);
         if (hasDiff) wrap.appendChild(this._buildDiffBlock(diff));
@@ -2878,39 +3376,145 @@ class class_Probe {
         return wrap;
     }
 
-    _buildOverallSummaryBlock(snapshot) {
-        const stats = this._computeOverallStats(snapshot);
+    _featureStatusMeta(status) {
+        switch (status) {
+            case "healthy": return { label: "Working", color: this._statusColor("resolved"), icon: "\u2705" };
+            case "degraded": return { label: "Broken", color: this._statusColor("not_resolved"), icon: "\u26D4" };
+            case "heartbeat_stale": return { label: "Installed but not firing", color: this._statusColor("plausible"), icon: "\uD83D\uDC94" };
+            case "cannot_verify": return { label: "No data yet", color: this._statusColor("cannot_verify"), icon: "\u2753" };
+            default: return { label: status, color: "var(--text-normal)", icon: "" };
+        }
+    }
+
+    _buildFeatureSummaryBlock(featureSummary) {
+        const overallMeta = featureSummary.overall === "SAFE"
+            ? { label: "All critical features confirmed working", color: this._statusColor("resolved"), icon: "\u2705" }
+            : featureSummary.overall === "UNSAFE"
+            ? { label: "At least one critical feature is broken or not firing", color: this._statusColor("not_resolved"), icon: "\u26D4" }
+            : { label: "No critical feature data in this scan yet - open ByeBlocked's settings or wait for its next health cycle", color: this._statusColor("cannot_verify"), icon: "\u2753" };
+
         const box = this._el("div", {
-            padding: "12px 14px",
-            marginBottom: "12px",
-            borderRadius: "6px",
-            background: "var(--background-secondary)",
-            fontSize: "12px"
+            padding: "12px 14px", marginBottom: "14px", borderRadius: "8px",
+            background: "var(--background-secondary)", fontSize: "12px",
+            border: `1px solid ${overallMeta.color}33`
         });
 
-        const topRow = this._el("div", { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" });
+        box.appendChild(this._el("div", {
+            fontWeight: "700", fontSize: "13px", marginBottom: "10px",
+            color: overallMeta.color, display: "flex", alignItems: "center", gap: "6px"
+        }, `${overallMeta.icon} ${overallMeta.label}`));
+
+        const tierOrder = ["critical", "important", "optional"];
+        const tierLabels = { critical: "Critical", important: "Important", optional: "Optional" };
+        for (const tier of tierOrder) {
+            const tierFeatures = featureSummary.features.filter(f => f.tier === tier);
+            if (tierFeatures.length === 0) continue;
+            box.appendChild(this._el("div", {
+                fontSize: "10.5px", fontWeight: "600", opacity: "0.6", marginTop: "8px", marginBottom: "4px", textTransform: "uppercase"
+            }, tierLabels[tier]));
+            for (const f of tierFeatures) {
+                const meta = this._featureStatusMeta(f.status);
+                const row = this._el("div", {
+                    display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "4px 8px", marginBottom: "2px", borderRadius: "4px",
+                    background: "var(--background-modifier-accent)"
+                });
+                const left = this._el("div", { display: "flex", alignItems: "center", gap: "6px" });
+                left.appendChild(this._el("span", {}, meta.icon));
+                left.appendChild(this._el("span", { fontWeight: "500" }, f.label));
+                row.appendChild(left);
+                row.appendChild(this._el("span", { color: meta.color, fontWeight: "600", fontSize: "11px" }, meta.label));
+                box.appendChild(row);
+                if (f.reason) {
+                    box.appendChild(this._el("div", { fontSize: "10.5px", opacity: "0.7", marginLeft: "4px", marginBottom: "4px" }, f.reason));
+                }
+            }
+        }
+
+        return box;
+    }
+
+    _buildFingerprintWatchdogBlock(watchdogData) {
+        const box = this._el("div", {
+            padding: "10px 12px", marginBottom: "10px", borderRadius: "6px",
+            background: "var(--background-modifier-accent)", fontSize: "12px"
+        });
+
+        const driftTypeMeta = {
+            "fingerprint-found-api-missed": { color: this._statusColor("not_resolved"), icon: "\u26A0\uFE0F" },
+            "api-found-fingerprint-missed": { color: this._statusColor("cannot_verify"), icon: "\u2139\uFE0F" },
+            "matched-via-mismatch": { color: this._statusColor("plausible"), icon: "\u26A0\uFE0F" }
+        };
+
+        const hasWarnDrift = watchdogData.drifts.some(d => d.severity === "warn");
+        const headerColor = hasWarnDrift ? this._statusColor("not_resolved") : this._statusColor("cannot_verify");
+        const headerIcon = hasWarnDrift ? "\u26A0\uFE0F" : "\u2139\uFE0F";
+
+        box.appendChild(this._el("div", { fontWeight: "600", marginBottom: "6px", color: headerColor },
+            `${headerIcon} Fingerprint Watchdog: ${watchdogData.driftCount} drift(s) between BD's public API and independent source-fingerprinting (${watchdogData.crossCheckedCount} check(s) cross-verified):`));
+
+        for (const d of watchdogData.drifts) {
+            const meta = driftTypeMeta[d.driftType] || { color: "var(--text-normal)", icon: "\u2022" };
+            box.appendChild(this._el("div", { color: meta.color, marginBottom: "2px" },
+                `${meta.icon} ${d.plugin}: ${d.label} - ${d.message}`));
+        }
+
+        box.appendChild(this._el("div", { opacity: "0.65", fontSize: "10.5px", marginTop: "6px" },
+            "Read-only comparison - nothing is applied automatically. \"Fingerprint found, API missed\" candidates are worth adding to the check's candidates/needles manually after you confirm they're the right module."));
+
+        return box;
+    }
+
+
+    _buildOverallSummaryBlock(snapshot) {
+        const stats = this._computeOverallStats(snapshot);
         const overallColor = stats.overall === "FAIL" ? this._statusColor("not_resolved")
             : stats.overall === "WARN" ? this._statusColor("plausible")
             : this._statusColor("resolved");
-        topRow.appendChild(this._el("div", { fontWeight: "700", fontSize: "15px", color: overallColor }, `Compatibility: ${stats.overall}`));
-        topRow.appendChild(this._el("div", { opacity: "0.7" }, `Scan time: ${stats.totalScanTimeMs}ms`));
+        const overallLabel = stats.overall === "FAIL" ? "Not compatible"
+            : stats.overall === "WARN" ? "Mostly compatible"
+            : "Compatible";
+        const overallIcon = stats.overall === "FAIL" ? "\u26D4" : stats.overall === "WARN" ? "\u26A0\uFE0F" : "\u2705";
+
+        const box = this._el("div", {
+            padding: "14px",
+            marginBottom: "14px",
+            borderRadius: "8px",
+            background: "var(--background-secondary)",
+            fontSize: "12px",
+            border: `1px solid ${overallColor}33`
+        });
+
+        const topRow = this._el("div", { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "6px" });
+
+        const statusPill = this._el("div", {
+            display: "inline-flex", alignItems: "center", gap: "6px",
+            padding: "4px 10px", borderRadius: "20px",
+            background: `${overallColor}22`, color: overallColor,
+            fontWeight: "700", fontSize: "14px"
+        });
+        statusPill.textContent = `${overallIcon} ${overallLabel}`;
+        topRow.appendChild(statusPill);
+        topRow.appendChild(this._el("div", { opacity: "0.6", fontSize: "11px" }, `Scan took ${stats.totalScanTimeMs}ms`));
         box.appendChild(topRow);
 
-        const grid = this._el("div", { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(90px, 1fr))", gap: "6px" });
+        const grid = this._el("div", { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: "10px 8px" });
         const cells = [
-            ["Checks", `${stats.resolved} / ${stats.total}`, null],
-            ["Resolved", String(stats.resolved), this._statusColor("resolved")],
+            ["Checks passed", `${stats.resolved} / ${stats.total}`, null],
             ["Failed", String(stats.failed), stats.failed > 0 ? this._statusColor("not_resolved") : null],
             ["Warnings", String(stats.warnings), stats.warnings > 0 ? this._statusColor("plausible") : null],
-            ["Contexts missing", String(stats.contextsMissing), null],
-            ["Skipped (context inactive)", String(stats.contextSkipped), null]
+            ["Needs more info", String(stats.contextsMissing), null],
+            ["Not applicable now", String(stats.contextSkipped), null]
         ];
+        if (stats.historyCoveredUnstable > 0) {
+            cells.push(["Unstable history", String(stats.historyCoveredUnstable), this._statusColor("not_resolved")]);
+        }
         for (const [label, value, color] of cells) {
             const cell = this._el("div");
-            const valEl = this._el("div", { fontWeight: "600", fontSize: "14px" }, value);
+            const valEl = this._el("div", { fontWeight: "700", fontSize: "16px" }, value);
             if (color) valEl.style.color = color;
             cell.appendChild(valEl);
-            cell.appendChild(this._el("div", { opacity: "0.6", fontSize: "10px" }, label));
+            cell.appendChild(this._el("div", { opacity: "0.6", fontSize: "10.5px", marginTop: "1px" }, label));
             grid.appendChild(cell);
         }
         box.appendChild(grid);
@@ -2991,13 +3595,27 @@ class class_Probe {
         ctxBox.appendChild(this._el("div", { fontWeight: "600", marginBottom: "6px" },
             `${pendingContexts.length} scenario(s) needed for deeper investigation - open these, then re-scan:`));
         for (const p of pendingContexts) {
-            const suspiciousNote = p.genuinelySuspicious > 0
-                ? ` (${p.genuinelySuspicious} of these failed WITH the context already active - may be a real break, not just missing navigation)`
-                : "";
+            const hasHardSuspicion = p.genuinelySuspicious > 0 && !p.genuinelySuspiciousNote;
+            const hasSoftSuspicion = p.genuinelySuspicious > 0 && !!p.genuinelySuspiciousNote;
+            let suspiciousNote = "";
+            if (hasHardSuspicion) {
+                suspiciousNote = ` (${p.genuinelySuspicious} of these failed WITH the context already active - may be a real break, not just missing navigation)`;
+            } else if (hasSoftSuspicion) {
+                suspiciousNote = ` (${p.genuinelySuspicious} of these failed WITH the context already active - but detection uses a separate selector from the check itself, so this may just mean one selector drifted rather than the feature breaking; worth a second look, not confirmed)`;
+            }
             const line = this._el("div", { marginBottom: "2px" },
                 `${p.context} - affects ${p.affectedCheckCount} check(s): ${p.checks.map(c => c.label).join(", ")}${suspiciousNote}`);
-            if (p.genuinelySuspicious > 0) line.style.color = this._statusColor("not_resolved");
+            if (hasHardSuspicion) line.style.color = this._statusColor("not_resolved");
+            else if (hasSoftSuspicion) line.style.color = this._statusColor("cannot_verify");
             ctxBox.appendChild(line);
+
+            if (p.coverage && p.coverage.note) {
+                const coverageLine = this._el("div", {
+                    fontSize: "11px", marginBottom: "6px", marginLeft: "8px",
+                    opacity: "0.9", color: this._statusColor("not_resolved")
+                }, `⚠ ${p.coverage.note}`);
+                ctxBox.appendChild(coverageLine);
+            }
         }
         return ctxBox;
     }
@@ -3126,6 +3744,34 @@ class class_Probe {
         });
 
         row.appendChild(this._el("div", { fontWeight: "600" }, `[${check.status}] ${check.plugin}: ${check.label}`));
+
+        if (check.heartbeat && check.heartbeat.tracked && !check.heartbeat.alive) {
+            const hb = check.heartbeat;
+            const hbLine = this._el("div", {
+                fontSize: "11px", marginTop: "3px", padding: "4px 6px",
+                borderRadius: "4px", background: "var(--background-modifier-accent)",
+                color: this._statusColor("plausible")
+            });
+            hbLine.appendChild(this._el("div", { fontWeight: "600", marginBottom: "2px" }, "\uD83D\uDC94 HEARTBEAT: NOT FIRING"));
+            hbLine.appendChild(document.createTextNode(
+                hb.neverFired
+                    ? "Patch is installed but has never reported a heartbeat since it started."
+                    : `Patch is installed but hasn't reported a heartbeat in ${Math.round(hb.msSinceHeartbeat / 60000)}min.`
+            ));
+            row.appendChild(hbLine);
+        }
+
+        if (check.historicalCoverage) {
+            const hc = check.historicalCoverage;
+            const coverageLine = this._el("div", {
+                fontSize: "11px", marginTop: "3px", padding: "4px 6px",
+                borderRadius: "4px", background: "var(--background-modifier-accent)",
+                color: this._statusColor("not_resolved")
+            });
+            coverageLine.appendChild(this._el("div", { fontWeight: "600", marginBottom: "2px" }, "⚠ HISTORY: UNSTABLE"));
+            coverageLine.appendChild(document.createTextNode(hc.note));
+            row.appendChild(coverageLine);
+        }
 
         const hist = this._summarizeCheckHistory(check.label, check.plugin);
         if (hist.scansObserved >= 2) {
@@ -3371,20 +4017,22 @@ class class_Probe {
 
     _buildTabBar(tabs, activeKey, onSelect) {
         const bar = this._el("div", {
-            display: "flex", gap: "4px", marginBottom: "12px",
+            display: "flex", gap: "4px", marginBottom: "14px",
             borderBottom: "1px solid var(--background-modifier-accent)"
         });
         for (const tab of tabs) {
             const isActive = tab.key === activeKey;
             const btn = this._el("button", {
-                padding: "7px 12px",
+                padding: "8px 14px",
                 border: "none",
+                borderRadius: "4px 4px 0 0",
                 borderBottom: isActive ? "2px solid var(--brand-experiment, #5865f2)" : "2px solid transparent",
-                background: "transparent",
+                background: isActive ? "var(--background-modifier-selected, #3a3c43)" : "transparent",
                 color: isActive ? "var(--text-normal)" : "var(--text-muted, #949ba4)",
                 fontWeight: isActive ? "600" : "500",
                 fontSize: "13px",
-                cursor: "pointer"
+                cursor: "pointer",
+                transition: "background 0.1s ease"
             });
             btn.type = "button";
             btn.textContent = tab.badge ? `${tab.label} (${tab.badge})` : tab.label;
@@ -3395,51 +4043,44 @@ class class_Probe {
     }
 
     getSettingsPanel() {
-        const panel = this._el("div", { padding: "12px", color: "var(--text-normal)" });
+        const panel = this._el("div", { padding: "14px", color: "var(--text-normal)" });
 
-        const liveVersion = (() => {
-            try { return BdApi.Plugins.get("Probe")?.version || null; } catch (_) { return null; }
-        })();
-        const title = this._el("h3", { marginBottom: "2px" }, liveVersion ? `Probe v${liveVersion}` : "Probe");
-        panel.appendChild(title);
-        panel.appendChild(this._el("p", { fontSize: "12px", opacity: "0.7", marginBottom: "12px", marginTop: "0" },
-            "Compatibility check for ByeBlocked"));
+        panel.appendChild(this._el("p", {
+            fontSize: "12px", opacity: "0.65", marginTop: "0", marginBottom: "14px", lineHeight: "1.5"
+        }, "Checks whether ByeBlocked is still compatible with your current Discord version."));
 
-        const btnRow = this._el("div", { display: "flex", gap: "8px", marginBottom: "8px", flexWrap: "wrap" });
+        const primaryRow = this._el("div", { display: "flex", gap: "8px", marginBottom: "8px", flexWrap: "wrap" });
 
-        const scanBtn = this._el("button", {}, "Run compatibility check");
+        const scanBtn = this._el("button", {}, "\u25B6\uFE0F  Run compatibility check");
         this._styleButton(scanBtn, "primary");
-        btnRow.appendChild(scanBtn);
-
-        const findBtn = this._el("button", {}, "\uD83D\uDD0D Find missing modules");
-        this._styleButton(findBtn, "secondary");
-        findBtn.title = "Searches Discord's not-yet-loaded modules for the ones ByeBlocked's pending checks need, and executes only the likely matches (capped per run) instead of requiring you to navigate to that screen manually.";
-        btnRow.appendChild(findBtn);
+        primaryRow.appendChild(scanBtn);
 
         const watchBtn = this._el("button", {});
         this._styleButton(watchBtn, "secondary");
         watchBtn.title = "While active, quietly watches which screens you visit (voice call, video/screen share, Activity/Watch-Together, Stage, member list, forum channel) and re-runs the compatibility check by itself the first time a screen you haven't visited this session opens. Also automatically scans for missing modules already present in the downloaded bundle (same as clicking \"Find missing modules\"), so some cannot_verify checks may resolve without navigating anywhere. No toasts - just check back on this panel whenever you like. Starts automatically when the plugin loads, so you don't have to remember to click it; stops automatically if you close Discord or disable the plugin, and you can still stop/restart it manually here anytime.";
-        btnRow.appendChild(watchBtn);
+        primaryRow.appendChild(watchBtn);
 
-        const exportBtn = this._el("button", {}, "Export .json");
+        panel.appendChild(primaryRow);
+
+        const secondaryRow = this._el("div", { display: "flex", gap: "8px", marginBottom: "10px", flexWrap: "wrap" });
+
+        const findBtn = this._el("button", {}, "\uD83D\uDD0D  Find missing modules");
+        this._styleButton(findBtn, "secondary");
+        findBtn.title = "Searches Discord's not-yet-loaded modules for source-text matches against ByeBlocked's pending checks (read-only - nothing is executed). Shows ranked candidates so you know which Discord screen to open to let the real module load normally, then re-run the compatibility check.";
+        secondaryRow.appendChild(findBtn);
+
+        const exportBtn = this._el("button", {}, "\u2B07\uFE0F  Export .json");
         this._styleButton(exportBtn, "secondary");
+        exportBtn.title = "Saves the full scan result as a .json file.";
         exportBtn.onclick = () => this.exportSnapshotAsFile(this._panelSnapshot);
-        btnRow.appendChild(exportBtn);
+        secondaryRow.appendChild(exportBtn);
 
-        const copyAllBtn = this._el("button", {}, "\uD83D\uDCCB Copy report");
-        this._styleButton(copyAllBtn, "secondary");
-        copyAllBtn.onclick = () => {
-            const snapshot = this._panelSnapshot;
-            if (!snapshot) return;
-            let text;
-            try { text = JSON.stringify(snapshot, null, 2); } catch (_) { text = "(could not serialize snapshot)"; }
-            this._copyToClipboard(text, copyAllBtn, "\uD83D\uDCCB Copy report");
-        };
-        btnRow.appendChild(copyAllBtn);
+        panel.appendChild(secondaryRow);
 
-        panel.appendChild(btnRow);
-
-        const metaEl = this._el("div", { fontSize: "11px", opacity: "0.6", marginBottom: "12px" });
+        const metaEl = this._el("div", {
+            fontSize: "11px", opacity: "0.55", marginBottom: "14px",
+            paddingBottom: "12px", borderBottom: "1px solid var(--background-modifier-accent)"
+        });
         panel.appendChild(metaEl);
 
         const tabBarSlot = this._el("div");
@@ -3503,6 +4144,10 @@ class class_Probe {
         };
 
         scanBtn.onclick = async () => {
+            if (this._scanInFlight) {
+                BdApi.UI.showToast("Probe: a scan is already running - wait for it to finish.", { type: "warn" });
+                return;
+            }
             scanBtn.disabled = true;
             scanBtn.textContent = "Scanning...";
             scanBtn.style.opacity = "0.6";
@@ -3513,14 +4158,14 @@ class class_Probe {
                 BdApi.UI.showToast(`Scan failed: ${err.message}`, { type: "error" });
             }
             scanBtn.disabled = false;
-            scanBtn.textContent = "Run compatibility check";
+            scanBtn.textContent = "\u25B6\uFE0F  Run compatibility check";
             scanBtn.style.opacity = "1";
             render();
         };
 
         findBtn.onclick = async () => {
             findBtn.disabled = true;
-            const originalLabel = "\uD83D\uDD0D Find missing modules";
+            const originalLabel = "\uD83D\uDD0D  Find missing modules";
             findBtn.textContent = "Searching...";
             findBtn.style.opacity = "0.6";
             try {
@@ -3533,7 +4178,7 @@ class class_Probe {
                     );
                 } else {
                     BdApi.UI.showToast(
-                        `Found ${result.candidatesFound} candidate module(s) that mention the pending checks' terms - see the Overview tab. This is read-only (nothing was executed); open the matching screen in Discord, then re-run the compatibility check to confirm.`,
+                        `Found ${result.candidatesFound} candidate module(s) for the pending checks (read-only - nothing executed). Open the matching Discord screen so they load normally, then re-run the compatibility check. See the Overview tab for details.`,
                         { type: "info" }
                     );
                 }
