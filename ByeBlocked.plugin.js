@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.6.0
+ * @version 2.6.1
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -568,7 +568,7 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.6.0";
+    static VERSION="2.6.1";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -3858,6 +3858,16 @@ module.exports = class ByeBlocked {
             this._retryGuardExit("patchPrivateChannelStore");
             return;
         }
+        try {
+            console.log("[ByeBlocked][DIAG] pcs resolvido:", {
+                ctorName: pcs?.constructor?.name,
+                displayName: pcs?.getName?.(),
+                hasGetPrivateChannelIds: typeof pcs?.getPrivateChannelIds,
+                hasGetMutablePrivateChannels: typeof pcs?.getMutablePrivateChannels,
+                hasGetPrivateChannels: typeof pcs?.getPrivateChannels,
+                idsRightNow: (() => { try { return pcs?.getPrivateChannelIds?.(); } catch (e) { return "THREW: " + e.message; } })()
+            });
+        } catch (_) {}
         const self = this;
         const migrateIfGroupDM = ch => {
             try {
@@ -3873,42 +3883,34 @@ module.exports = class ByeBlocked {
             for (const id of ids) {
                 try { migrateIfGroupDM(self.modules.ChannelStore?.getChannel?.(id)); } catch (_) {}
             }
-            if (!self.settings.places.messages) return ids;
-            return ids.filter(id => {
-                try {
-                    const ch = self.modules.ChannelStore?.getChannel?.(id);
-                    if (!ch) return true;
-                    if (ch.isDM?.() && self.shouldHide(ch.recipient?.id || ch.recipientId)) return false;
-                    return true;
-                } catch (_) {
-                    return true;
-                }
-            });
+            return ids;
         };
         const filterMutable = obj => {
-            if (!obj || typeof obj !== "object") return obj;
-            const out = Array.isArray(obj) ? [] : {};
-            const entries = Array.isArray(obj) ? obj.entries() : Object.entries(obj);
-            for (const [key, ch] of entries) {
-                const id = ch?.id || key;
-                const channel = ch || self.modules.ChannelStore?.getChannel?.(id);
-                migrateIfGroupDM(channel);
-                if (self.settings.places.messages && channel?.isDM?.() && self.shouldHide(channel.recipient?.id || channel.recipientId)) continue;
-                if (Array.isArray(out)) out.push(ch); else out[key] = ch;
+            for (const ch of (Array.isArray(obj) ? obj : Object.values(obj || {}))) {
+                migrateIfGroupDM(ch);
             }
-            return out;
+            return obj;
         };
         let patchedAny = false;
         if (typeof pcs.getPrivateChannelIds === "function") {
-            this.patchAfter(pcs, "getPrivateChannelIds", (_, __, ret) => filterIds(ret));
+            this.patchAfter(pcs, "getPrivateChannelIds", (_, __, ret) => {
+                try { console.log("[ByeBlocked][DIAG] getPrivateChannelIds ret=", ret, "len=", ret?.length); } catch (_) {}
+                try { return filterIds(ret); } catch (e) { console.error("[ByeBlocked][DIAG] filterIds THREW", e); return ret; }
+            });
             patchedAny = true;
         }
         if (typeof pcs.getMutablePrivateChannels === "function") {
-            this.patchAfter(pcs, "getMutablePrivateChannels", (_, __, ret) => filterMutable(ret));
+            this.patchAfter(pcs, "getMutablePrivateChannels", (_, __, ret) => {
+                try { console.log("[ByeBlocked][DIAG] getMutablePrivateChannels ret=", ret, "keys=", ret ? Object.keys(ret).length : null); } catch (_) {}
+                try { return filterMutable(ret); } catch (e) { console.error("[ByeBlocked][DIAG] filterMutable THREW", e); return ret; }
+            });
             patchedAny = true;
         }
         if (typeof pcs.getPrivateChannels === "function") {
-            this.patchAfter(pcs, "getPrivateChannels", (_, __, ret) => filterMutable(ret));
+            this.patchAfter(pcs, "getPrivateChannels", (_, __, ret) => {
+                try { console.log("[ByeBlocked][DIAG] getPrivateChannels ret=", ret, "len/keys=", Array.isArray(ret) ? ret.length : (ret ? Object.keys(ret).length : null)); } catch (_) {}
+                try { return filterMutable(ret); } catch (e) { console.error("[ByeBlocked][DIAG] filterMutable(getPrivateChannels) THREW", e); return ret; }
+            });
             patchedAny = true;
         }
         if (patchedAny) {
@@ -4620,8 +4622,10 @@ return false;
             this._groupDMPrototypeRef = proto;
             this._groupDMPrototypePatched = true;
             this._retryGuardExit("patchGroupDMChannelPrototype");
-            try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
-            try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+            setTimeout(() => {
+                try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
+                try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+            }, 0);
         } catch (e) {
             if (attempt < 20) { setTimeout(() => this.patchGroupDMChannelPrototype(attempt + 1), this._retryDelay(attempt, 2500)); return; }
             this._patcher._logFail("patchGroupDMChannelPrototype", e);
@@ -4629,6 +4633,8 @@ return false;
         }
     }
     _scheduleGroupDMPrototypeRetryOnDataReady(attempt) {
+        if (this._groupDMPrototypeWatchActive) return;
+        this._groupDMPrototypeWatchActive = true;
         const FAST_RETRY_ATTEMPTS = 20;
         const isSlowPhase = attempt >= FAST_RETRY_ATTEMPTS;
         if (isSlowPhase && !this._groupDMPrototypeSlowRetryWarned) {
@@ -4640,13 +4646,20 @@ return false;
         const cleanup = () => {
             if (done) return;
             done = true;
+            this._groupDMPrototypeWatchActive = false;
             clearTimeout(timer);
+            clearTimeout(debounceTimer);
             for (const s of stores) { try { s.removeChangeListener(onChange); } catch (_) {} }
         };
+        let debounceTimer = null;
         const onChange = () => {
             if (done || this._groupDMPrototypePatched) return;
-            cleanup();
-            this.patchGroupDMChannelPrototype(attempt + 1);
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                if (done || this._groupDMPrototypePatched) return;
+                cleanup();
+                this.patchGroupDMChannelPrototype(attempt + 1);
+            }, 300);
         };
         for (const s of stores) { try { s.addChangeListener(onChange); } catch (_) {} }
         const backstopDelay = isSlowPhase ? 15000 : 2500;
@@ -4960,8 +4973,10 @@ return false;
         this._shouldHideCache = new Map;
         this._voiceStateFilterCache = new WeakMap;
         if (this.settings.places.groupDms) {
-            try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
-            try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+            setTimeout(() => {
+                try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
+                try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+            }, 0);
         }
         if (this.settings.places.voiceChannels) {
             this._emitVoiceStateChanges();
@@ -5290,8 +5305,12 @@ return false;
     _filterMessagesCollectionUncached(value) {
         if (!value) return value;
         if (Array.isArray(value)) {
-            const filtered = value.filter(msg => !this.isBlockedMessageData(msg));
-            return filtered.length === value.length ? value : filtered;
+            if (value.length > 0) {
+                const filtered = value.filter(msg => !this.isBlockedMessageData(msg));
+                if (filtered.length === 0) return value;
+                return filtered.length === value.length ? value : filtered;
+            }
+            return value;
         }
         if (value && typeof value.filter === "function" && typeof value.toArray === "function") {
             try {
@@ -5342,7 +5361,7 @@ return false;
                     for (const msg of list) {
                         if (msg && self.isBlockedMessageData(msg)) blockedIds.push(msg.id);
                     }
-                    if (blockedIds.length) {
+                    if (blockedIds.length && blockedIds.length < list.length) {
                         try { props.messages = msgs.removeMany(blockedIds); } catch (_) {}
                     }
                     return;
@@ -5665,14 +5684,14 @@ return false;
             this._callGridPatched = true;
             this._callGridPatchInFlight = false;
 
-            try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+            setTimeout(() => { try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {} }, 0);
             return;
         }
 
         if (tryPatchPerParticipantViaHeuristic()) {
             this._callGridPatched = true;
             this._callGridPatchInFlight = false;
-            try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+            setTimeout(() => { try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {} }, 0);
             return;
         }
 
@@ -7596,11 +7615,16 @@ return false;
     }
     hideTopicPanelItems() {
         try {
-            let topicItems = document.querySelectorAll('[class*="container_"]');
+            const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+            const channel = channelId ? this.modules.ChannelStore?.getChannel?.(channelId) : null;
+            const isForumOrThreadChannel = channel && (channel.type === 15 || channel.type === 16 || channel.isThread?.());
+            if (!isForumOrThreadChannel) return;
+            let topicItems = document.querySelectorAll('main [class*="container_"]');
             if (!topicItems.length) {
                 topicItems = document.querySelectorAll('[data-list-item-id*="forum"], [data-list-item-id*="thread"], [class*="thread_"], [class*="forum_"], [role="listitem"]');
             }
             for (const item of topicItems) {
+                if (item.tagName === "MAIN") continue;
                 if (item.dataset?.hiddenBlocked === "true") continue;
                 let authorId = null;
                 const listId = item.dataset?.listItemId || item.getAttribute("data-list-item-id") || "";
@@ -7992,8 +8016,10 @@ return false;
         return false;
     }
     refreshGroupDmLabels() {
-        try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
-        try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+        setTimeout(() => {
+            try { this.modules.PrivateChannelStore?.emitChange?.(); } catch (_) {}
+            try { this.modules.ChannelStore?.emitChange?.(); } catch (_) {}
+        }, 0);
     }
     _isGroupDmRow(row) {
         if (row.dataset.nmbIsGroupDm === "true") return true;
@@ -12095,6 +12121,7 @@ return false;
     }
     hideElement(el, reason = "blocked", userId = null) {
         if (!el || el.dataset?.hiddenBlocked === "true") return;
+        if (el.tagName === "MAIN" || el.id === "app-mount") return;
         if (!el.hasAttribute("data-nmb-prev-style")) el.setAttribute("data-nmb-prev-style", el.getAttribute("style") || "");
         const resolvedUserId = userId === false ? null : userId || this.findUserId(el);
         if (resolvedUserId) {
