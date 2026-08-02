@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.6.2
+ * @version 2.6.3
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -682,7 +682,7 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.6.2";
+    static VERSION="2.6.3";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -816,6 +816,7 @@ module.exports = class ByeBlocked {
             GuildChannelStore: ["GuildChannelStore", "GuildChannelsStore"],
             GuildStore: ["GuildStore", "GuildsStore"],
             NotificationSettingsStore: ["NotificationSettingsStore", "NotificationStore"],
+            UserGuildSettingsStore: ["UserGuildSettingsStore", "GuildSettingsStore"],
             ChannelPinsStore: ["ChannelPinsStore", "PinnedMessagesStore"],
             ActiveJoinedThreadsStore: ["ActiveJoinedThreadsStore", "JoinedThreadsStore"],
             ThreadStore: ["ActiveThreadsStore", "ThreadStore", "ForumChannelStore", "GuildThreadStore", "ThreadsStore"],
@@ -852,6 +853,7 @@ module.exports = class ByeBlocked {
                   methodNames: ["getSortedPrivateChannels"]
               } },
             { label: "NotificationSettingsStore", kind: "storeName", candidates: ["NotificationSettingsStore", "NotificationStore"] },
+            { label: "UserGuildSettingsStore", kind: "storeName", candidates: ["UserGuildSettingsStore", "GuildSettingsStore"] },
             { label: "ChannelPinsStore", kind: "storeName", candidates: ["ChannelPinsStore", "PinnedMessagesStore"] },
             { label: "ActiveJoinedThreadsStore", kind: "storeName", candidates: ["ActiveJoinedThreadsStore", "JoinedThreadsStore"] },
             { label: "ThreadStore", kind: "storeName", candidates: ["ActiveThreadsStore", "ThreadStore", "ForumChannelStore", "GuildThreadStore", "ThreadsStore"] },
@@ -2162,13 +2164,45 @@ module.exports = class ByeBlocked {
         if (typeof rs.hasUnreadOrMentions === "function" && rs.hasUnreadOrMentions(channelId)) return true;
         return !!rs.hasUnread?.(channelId);
     }
+    _guildHasVisibleUnread(guildId) {
+        if (!guildId) return false;
+        const gcs = this.modules.GuildChannelStore;
+        if (!gcs) return true;
+        try {
+            const groups = gcs.getChannels?.(guildId);
+            if (!groups || typeof groups !== "object") return true;
+            for (const list of Object.values(groups)) {
+                if (!Array.isArray(list)) continue;
+                for (const entry of list) {
+                    const id = entry?.channel?.id;
+                    if (!id || !this._channelHasRawUnread(id)) continue;
+                    if (!this._hasBlockedOnlyReadActivity(id)) return true;
+                }
+            }
+        } catch (_) {
+            return true;
+        }
+        return false;
+    }
+    _guildAllowsUnreadBadge(guildId) {
+        if (!guildId) return true;
+        const ugs = this.modules.UserGuildSettingsStore;
+        if (!ugs) return true;
+        try {
+            const level = typeof ugs.getMessageNotifications === "function" ? ugs.getMessageNotifications(guildId) : null;
+            if (level === null || level === undefined) return true;
+            return level === 0;
+        } catch (_) {
+            return true;
+        }
+    }
     _filteredHasAnyUnread() {
         const grs = this.modules.GuildReadStateStore;
         for (const guildId of this._getGuildIds()) {
             try {
                 if (!grs?.hasUnread?.(guildId)) continue;
-                if (this._guildHasBlockedOnlyUnread(guildId)) continue;
-                return true;
+                if (!this._guildAllowsUnreadBadge(guildId)) continue;
+                if (this._guildHasVisibleUnread(guildId)) return true;
             } catch (_) {}
         }
         let foundPrivate = false;
@@ -6536,6 +6570,9 @@ return false;
         }
         try {
             document.getElementById('ByeBlocked-unreadbadge-bootguard')?.remove();
+        } catch (_) {}
+        try {
+            BdApi.Patcher.unpatchAll('ByeBlockedTaskbarBadgeBootRace');
         } catch (_) {}
     }
     _retryTaskbarBadgeUntilRelationshipReady(attempt = 0) {
