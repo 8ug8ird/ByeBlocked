@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.6.1
+ * @version 2.6.2
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -512,6 +512,120 @@ function _findCloseButton(dialog) {
     } catch (_) {}
 })();
 
+(function byeBlockedUnreadBadgeBootGuard() {
+    try {
+        if (document.getElementById('ByeBlocked-unreadbadge-bootguard')) return;
+        let messagesEnabled = true;
+        try {
+            const stored = BdApi?.Data?.load?.('ByeBlocked', 'settings');
+            if (stored && stored.places && typeof stored.places.messages === 'boolean') {
+                messagesEnabled = stored.places.messages;
+            }
+        } catch (_) {}
+        if (!messagesEnabled) return;
+        const style = document.createElement('style');
+        style.id = 'ByeBlocked-unreadbadge-bootguard';
+        style.textContent = `
+            [aria-label="Servidores"] div[aria-hidden="true"] > span:first-child,
+            [aria-label="Servers"] div[aria-hidden="true"] > span:first-child,
+            [role="tree"] div[aria-hidden="true"] > span:first-child {
+                visibility: hidden !important;
+            }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+        setTimeout(() => {
+            try {
+                const inst = window.__byeBlocked;
+                if (inst && typeof inst._bootstrapBlockedUnreadSuppression === 'function') {
+                    inst._bootstrapBlockedUnreadSuppression(0);
+                    try { inst._forceReadStateRecheck?.(true); } catch (_) {}
+                    try { inst._refreshTaskbarBadge?.(); } catch (_) {}
+                }
+            } catch (_) {}
+            try { document.getElementById('ByeBlocked-unreadbadge-bootguard')?.remove(); } catch (_) {}
+        }, 8000);
+    } catch (_) {}
+})();
+
+(function byeBlockedTaskbarBadgeBootRace() {
+    const BOOT_RACE_PATCH_ID = 'ByeBlockedTaskbarBadgeBootRace';
+    try {
+        let messagesEnabled = true;
+        let suppressTaskbarBadge = true;
+        try {
+            const stored = BdApi?.Data?.load?.('ByeBlocked', 'settings');
+            if (stored?.places && typeof stored.places.messages === 'boolean') {
+                messagesEnabled = stored.places.messages;
+            }
+            if (stored?.behavior && typeof stored.behavior.suppressTaskbarBadge === 'boolean') {
+                suppressTaskbarBadge = stored.behavior.suppressTaskbarBadge;
+            }
+        } catch (_) {}
+        if (!messagesEnabled || !suppressTaskbarBadge) return;
+
+        let patchedNative = false;
+        let patchedElectron = false;
+
+        const tryPatchNative = () => {
+            if (patchedNative) return true;
+            try {
+                if (typeof DiscordNative !== "undefined" && typeof DiscordNative?.app?.setBadgeCount === "function") {
+                    BdApi.Patcher.before(BOOT_RACE_PATCH_ID, DiscordNative.app, "setBadgeCount", (_, args) => {
+                        args[0] = 0;
+                    });
+                    patchedNative = true;
+                }
+            } catch (_) {}
+            return patchedNative;
+        };
+
+        const tryPatchElectron = () => {
+            if (patchedElectron) return true;
+            try {
+                const electron = BdApi?.Webpack?.getByKeys?.("setBadge", "setSystemTrayIcon")
+                    || BdApi?.Webpack?.getByKeys?.("setBadge");
+                if (electron?.setBadge) {
+                    BdApi.Patcher.before(BOOT_RACE_PATCH_ID, electron, "setBadge", (_, args) => {
+                        args[0] = 0;
+                    });
+                    if (typeof electron.setSystemTrayIcon === "function") {
+                        BdApi.Patcher.before(BOOT_RACE_PATCH_ID, electron, "setSystemTrayIcon", (_, args) => {
+                            if (args[0] === "UNREAD") args[0] = "DEFAULT";
+                        });
+                    }
+                    patchedElectron = true;
+                }
+            } catch (_) {}
+            return patchedElectron;
+        };
+
+        const zeroOutBadgeNow = () => {
+            try { if (typeof DiscordNative !== "undefined" && typeof DiscordNative?.app?.setBadgeCount === "function") DiscordNative.app.setBadgeCount(0); } catch (_) {}
+            try {
+                const electron = BdApi?.Webpack?.getByKeys?.("setBadge", "setSystemTrayIcon") || BdApi?.Webpack?.getByKeys?.("setBadge");
+                if (electron?.setBadge) electron.setBadge(0);
+                if (electron?.setSystemTrayIcon) electron.setSystemTrayIcon("DEFAULT");
+            } catch (_) {}
+        };
+        zeroOutBadgeNow();
+        tryPatchNative();
+        tryPatchElectron();
+
+        let attempts = 0;
+        const maxAttempts = 20;
+        const tick = () => {
+            attempts++;
+            const nativeDone = tryPatchNative();
+            const electronDone = tryPatchElectron();
+            if ((!nativeDone || !electronDone) && attempts < maxAttempts) {
+                setTimeout(tick, 30);
+            }
+        };
+        tick();
+    } catch (_) {}
+})();
+
+
 class ScrollManager {
     constructor() {
         this._pending = new Map();
@@ -568,7 +682,7 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.6.1";
+    static VERSION="2.6.2";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -2052,7 +2166,9 @@ module.exports = class ByeBlocked {
         const grs = this.modules.GuildReadStateStore;
         for (const guildId of this._getGuildIds()) {
             try {
-                if (grs?.hasUnread?.(guildId)) return true;
+                if (!grs?.hasUnread?.(guildId)) continue;
+                if (this._guildHasBlockedOnlyUnread(guildId)) continue;
+                return true;
             } catch (_) {}
         }
         let foundPrivate = false;
@@ -2060,6 +2176,7 @@ module.exports = class ByeBlocked {
             if (foundPrivate) return;
             if (channel?.guild_id) return;
             if (channel?.isDM?.() && this.shouldHide(channel.recipient?.id || channel.recipientId)) return;
+            if (this._hasBlockedOnlyReadActivity(channelId)) return;
             if (this._channelHasVisibleUnread(channelId)) foundPrivate = true;
         });
         return foundPrivate;
@@ -2149,9 +2266,10 @@ module.exports = class ByeBlocked {
         } catch (_) {}
         return false;
     }
-    _bootstrapBlockedUnreadSuppression() {
+    _bootstrapBlockedUnreadSuppression(_retryAttempt = 0) {
         const helpers = this._getReadStateHelpers();
         let changed = false;
+        const pendingUnresolved = [];
         this._forEachKnownChannel((channelId, channel) => {
             if (!this._channelHasRawUnread(channelId)) return;
             if (this._hasBlockedOnlyReadActivity(channelId)) return;
@@ -2163,6 +2281,8 @@ module.exports = class ByeBlocked {
                         const lastId = this.modules.ReadStateStore?.lastMessageId?.(channelId);
                         this._markBlockedOnlyReadActivity(channelId, channel?.parent_id, lastId);
                         changed = true;
+                    } else if (forumResult === null) {
+                        pendingUnresolved.push(channelId);
                     }
                     return;
                 }
@@ -2200,6 +2320,8 @@ module.exports = class ByeBlocked {
                 if (blockedOnly === false) {
                     this._markBlockedOnlyReadActivity(channelId, channel?.parent_id, lastMessageId);
                     changed = true;
+                } else if (blockedOnly === null) {
+                    pendingUnresolved.push(channelId);
                 }
             } catch (_) {}
         });
@@ -2207,6 +2329,64 @@ module.exports = class ByeBlocked {
             this._forceReadStateRecheck(true);
             this._refreshTaskbarBadge();
         }
+        const wasPending = this._hasPendingUnreadResolution;
+        this._hasPendingUnreadResolution = pendingUnresolved.length > 0;
+        if (wasPending && !this._hasPendingUnreadResolution && !changed) {
+            this._refreshTaskbarBadge();
+        }
+        if (pendingUnresolved.length) {
+            this._fetchUnresolvedUnreadMessages(pendingUnresolved);
+            this._scheduleUnresolvedBlockedUnreadRetry(_retryAttempt);
+        }
+        return this._hasPendingUnreadResolution;
+    }
+    _fetchUnresolvedUnreadMessages(channelIds) {
+        const actions = this.modules.MessageActionsModule;
+        if (typeof actions?.fetchMessages !== "function") {
+            return;
+        }
+        const REFETCH_COOLDOWN_MS = 2000;
+        if (!this._fetchedUnresolvedChannels) this._fetchedUnresolvedChannels = new Map;
+        const rs = this.modules.ReadStateStore;
+        const now = Date.now();
+        let newlyFetched = 0;
+        for (const channelId of channelIds) {
+            const key = String(channelId);
+            const lastFetchedAt = this._fetchedUnresolvedChannels.get(key);
+            if (lastFetchedAt !== undefined && (now - lastFetchedAt) < REFETCH_COOLDOWN_MS) continue;
+            this._fetchedUnresolvedChannels.set(key, now);
+            newlyFetched++;
+            try {
+                const lastMessageId = rs?.lastMessageId?.(channelId);
+                let afterId = "0";
+                if (lastMessageId) {
+                    try { afterId = (BigInt(lastMessageId) - 1n).toString(); } catch (_) { afterId = "0"; }
+                }
+                actions.fetchMessages({ channelId, after: afterId, limit: 2 });
+            } catch (_) {}
+        }
+    }
+    _scheduleUnresolvedBlockedUnreadRetry(attempt = 0) {
+        const effectiveAttempt = Math.max(attempt, this._unresolvedBlockedUnreadHighestAttempt || 0);
+        this._unresolvedBlockedUnreadHighestAttempt = effectiveAttempt;
+        const attemptForThisCall = effectiveAttempt;
+        if (attemptForThisCall >= 10) {
+            this._hasPendingUnreadResolution = false;
+            this._releaseUnreadBadgeBootGuard?.();
+            return;
+        }
+        if (this._unresolvedBlockedUnreadRetryTimeout) {
+            return;
+        }
+        const delay = Math.min(500 * Math.pow(2, attemptForThisCall), 4000);
+        this._unresolvedBlockedUnreadRetryTimeout = setTimeout(() => {
+            this._unresolvedBlockedUnreadRetryTimeout = null;
+            try {
+                const stillPending = this._bootstrapBlockedUnreadSuppression(attemptForThisCall + 1);
+                if (!stillPending) this._releaseUnreadBadgeBootGuard?.();
+            } catch (_) {}
+        }, delay);
+        this._unresolvedBlockedUnreadRetryAttempt = attempt + 1;
     }
     _markBlockedOnlyReadActivity(channelId, parentChannelId, activityId) {
         if (!this._blockedOnlyReadChannels) this._blockedOnlyReadChannels = new Set;
@@ -2272,7 +2452,17 @@ module.exports = class ByeBlocked {
                 if (unread.length) {
                     const anyVisible = unread.some(m => !helpers.isBlockedMessage(m));
                     if (!anyVisible) return false;
+                    return true;
                 }
+            }
+            if (ackId && messages.length) return true;
+            if (messages.length) {
+                const newest = messages[messages.length - 1];
+                if (newest && helpers.isBlockedMessage(newest)) return false;
+                if (newest) return true;
+            }
+            if (this._fetchedUnresolvedChannels?.has(String(channelId))) {
+                return true;
             }
         } catch (_) {}
         return null;
@@ -2315,8 +2505,12 @@ module.exports = class ByeBlocked {
         return false;
     }
     _filterBadgeArgs(args) {
-        if (!this._taskbarBadgeEnabled()) return;
+        if (!this._taskbarBadgeEnabled()) { return; }
         if (!this._readStatePatched) {
+            args[0] = 0;
+            return;
+        }
+        if (this._hasPendingUnreadResolution) {
             args[0] = 0;
             return;
         }
@@ -2329,7 +2523,7 @@ module.exports = class ByeBlocked {
         if (!electron?.setBadge) return;
         this.modules.ElectronModule = electron;
         const self = this;
-        const badgeBefore = (_, args) => self._filterBadgeArgs(args);
+        const badgeBefore = (_, args) => { self._filterBadgeArgs(args); };
         this._patcher.before(electron, "setBadge", badgeBefore);
         try {
             const nativeApp = typeof DiscordNative !== "undefined" ? DiscordNative?.app : null;
@@ -3243,6 +3437,7 @@ module.exports = class ByeBlocked {
         this._filteredChannelCache?.clear();
         this._filteredGroupDmChannelCache = null;
         document.getElementById('ByeBlocked-bootguard')?.remove();
+        document.getElementById('ByeBlocked-unreadbadge-bootguard')?.remove();
         if (this._domGuardOwner && typeof this._domGuardRestore === "function") {
             this._domGuardRestore();
         }
@@ -3250,6 +3445,12 @@ module.exports = class ByeBlocked {
         this._domGuardOwner = false;
         clearTimeout(this._moduleRetryTimeout);
         this._moduleRetryTimeout = null;
+        clearTimeout(this._taskbarBadgeRelationshipRetryTimeout);
+        this._taskbarBadgeRelationshipRetryTimeout = null;
+        clearTimeout(this._unresolvedBlockedUnreadRetryTimeout);
+        this._unresolvedBlockedUnreadRetryTimeout = null;
+        this._unresolvedBlockedUnreadHighestAttempt = 0;
+        this._fetchedUnresolvedChannels = null;
         if (window.__byeBlocked === this) delete window.__byeBlocked;
         if (this._updateResetTimer) {
             clearTimeout(this._updateResetTimer);
@@ -3406,6 +3607,7 @@ module.exports = class ByeBlocked {
         this._lastWatchedChannelId = null;
         this._forumRetryScheduled = false;
         this._patcher?.cleanup();
+        try { BdApi.Patcher.unpatchAll('ByeBlockedTaskbarBadgeBootRace'); } catch (_) {}
         this._migrateGroupDMInstanceValue = null;
         try {
             if (this._groupDMPrototypeRef && this._groupDMRecipientsSyms) {
@@ -3540,6 +3742,9 @@ module.exports = class ByeBlocked {
         this._resolveSimpleStores();
         this.modules.MessageStore = getStore("MessageStore", "MessagesStore", "ChannelMessagesStore");
         this._resolveMessagesGet();
+        this.modules.MessageActionsModule = this.modules.MessageActionsModule
+            || (() => { try { return BdApi.Webpack.getModule(m => m && typeof m.fetchMessages === "function" && typeof m.jumpToMessage === "function"); } catch (_) { return null; } })()
+            || (() => { try { return BdApi.Webpack.getModule(m => m && typeof m.fetchMessages === "function"); } catch (_) { return null; } })();
         this.modules.RelationshipUtils = getModule(m => m?.addRelationship && m?.removeRelationship, undefined, "RelationshipUtils");
         this.modules.PrivateChannelStore = getStore("PrivateChannelStore", "PrivateChannelsStore")
             || (["getPrivateChannels", "getPrivateChannelIds", "getMutablePrivateChannels"].some(k => typeof this.modules.ChannelStore?.[k] === "function")
@@ -3563,7 +3768,7 @@ module.exports = class ByeBlocked {
         const store = this.modules.RelationshipStore;
         this._relIsBlockedFn = null;
         this._relIsIgnoredFn = null;
-        if (!store) return;
+        if (!store) { return; }
         const names = ByeBlocked.RELATIONSHIP_METHOD_NAMES;
         const bind = (methodNames) => {
             for (const n of methodNames) {
@@ -5778,6 +5983,11 @@ return false;
                 const action = args[0];
                 if (!action || typeof action !== "object") return;
                 if (action.type === self.constructor.ACTIONS.LOAD_MESSAGES_SUCCESS) {
+                    const rawArr = Array.isArray(action.messages) ? action.messages
+                        : (Array.isArray(action.messages?.messages) ? action.messages.messages : null);
+                    if (rawArr && rawArr.length) {
+                        self._reconcileBlockedOnlyFromRawBatch(action.channelId || action.channel_id || action.messages?.channelId, rawArr);
+                    }
                     if (Array.isArray(action.messages)) {
                         action.messages = self._filterActionMessageArray(action.messages);
                     } else if (Array.isArray(action.messages?.messages)) {
@@ -5787,6 +5997,32 @@ return false;
             } catch (_) {}
         });
         this._retryGuardExit("patchMessageLoadDispatch");
+    }
+    _reconcileBlockedOnlyFromRawBatch(channelId, rawMessages) {
+        try {
+            if (!channelId || !Array.isArray(rawMessages) || !rawMessages.length) return;
+            const store = this.modules.ReadStateStore;
+            const ackId = store?.ackMessageId ? store.ackMessageId(channelId) : null;
+            const lastMessageId = store?.lastMessageId ? store.lastMessageId(channelId) : null;
+            if (!lastMessageId) return;
+            const relevant = ackId
+                ? rawMessages.filter(m => m?.id && this._snowflakeGreater(m.id, ackId))
+                : rawMessages;
+            if (!relevant.length) return;
+            const hasNonBlockedUnread = relevant.some(m => !this.isBlockedMessageData(m));
+            let parentId = null;
+            try { parentId = this.modules.ChannelStore?.getChannel?.(channelId)?.parent_id || null; } catch (_) {}
+            if (hasNonBlockedUnread) {
+                this._clearBlockedOnlyReadActivity(channelId);
+                if (parentId) this._clearBlockedOnlyReadActivity(parentId);
+            } else if (relevant.some(m => m?.id === lastMessageId)) {
+                this._markBlockedOnlyReadActivity(channelId, parentId, lastMessageId);
+            }
+            queueMicrotask(() => {
+                this._forceReadStateRecheck(true);
+                this._refreshTaskbarBadge();
+            });
+        } catch (_) {}
     }
     patchChannelPinsStore(attempt = 0) {
         if (!this.settings.places.messages) return;
@@ -6289,7 +6525,38 @@ return false;
         self._applyGroupDMUnreadSectionGhosting();
         if (relationshipStoreReady) {
             self._refreshTaskbarBadge();
+            self._releaseUnreadBadgeBootGuard();
+        } else {
+            self._retryTaskbarBadgeUntilRelationshipReady();
         }
+    }
+    _releaseUnreadBadgeBootGuard() {
+        if (this._hasPendingUnreadResolution) {
+            return;
+        }
+        try {
+            document.getElementById('ByeBlocked-unreadbadge-bootguard')?.remove();
+        } catch (_) {}
+    }
+    _retryTaskbarBadgeUntilRelationshipReady(attempt = 0) {
+        if (this._readStatePatched) return;
+        if (this._relIsBlockedFn) {
+            this._readStatePatched = true;
+            this._bootstrapBlockedUnreadSuppression();
+            this._refreshTaskbarBadge();
+            this._forceReadStateRecheck?.(true);
+            this._releaseUnreadBadgeBootGuard();
+            return;
+        }
+        if (attempt >= 15) {
+            this._patcher?._warn("_retryTaskbarBadgeUntilRelationshipReady", new Error("RelationshipStore.isBlocked never resolved after 15 attempts - unread suppression for blocked users will not work until this is fixed."));
+            return;
+        }
+        clearTimeout(this._taskbarBadgeRelationshipRetryTimeout);
+        this._taskbarBadgeRelationshipRetryTimeout = setTimeout(() => {
+            this._taskbarBadgeRelationshipRetryTimeout = null;
+            this._retryTaskbarBadgeUntilRelationshipReady(attempt + 1);
+        }, this._retryDelay ? this._retryDelay(attempt, 1000) : Math.min(1000 * (attempt + 1), 8000));
     }
     _getReadStateHelpers() {
         return {
