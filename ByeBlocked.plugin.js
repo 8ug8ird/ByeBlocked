@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.6.3
+ * @version 2.6.4
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -194,7 +194,7 @@ class ModuleResolver {
                     const state = mod.getState();
                     if (state && typeof state === 'object')
                         for (const key of Object.keys(state))
-                            if (key.toLowerCase().includes(t.replace(/^./, c => c.toLowerCase()))) return this._cache[k] = mod;
+                            if (key.toLowerCase().includes(t)) return this._cache[k] = mod;
                 } catch (_) {}
             }
         } catch (_) {}
@@ -682,7 +682,7 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.6.3";
+    static VERSION="2.6.4";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -781,6 +781,12 @@ module.exports = class ByeBlocked {
             CALL_DELETE: "CALL_DELETE",
             VOICE_CHANNEL_SELECT: "VOICE_CHANNEL_SELECT",
             CHANNEL_STATUS_REGEX: /CHANNEL_STATUS|VOICE_STATUS|VOICE_CHANNEL_STATUS/i,
+        };
+    }
+    static get MESSAGE_TYPES() {
+        return {
+            RECIPIENT_ADD: 1,
+            CHANNEL_PINNED_MESSAGE: 6,
         };
     }
     static get VOICE_SYNC_STALE_STORE_MAX_RETRIES() { return 12; }
@@ -957,7 +963,7 @@ module.exports = class ByeBlocked {
             'soundboard','guildMembersPage','guildMemberStore','eventsSidebarUnread',
             'memberListRow','stageRenderComponent','activityPanelComponent','callGrid',
             'blockedMsgGroup','voiceMute','guildScheduledEventStore']) {
-            this['_' + flag + 'Patched'] = this['_' + flag] || false;
+            this['_' + flag + 'Patched'] = false;
         }
         
         this._voiceChannelMemberIds = new Map;
@@ -1050,7 +1056,7 @@ module.exports = class ByeBlocked {
                     const state = mod.getState();
                     if (state && typeof state === 'object')
                         for (const key of Object.keys(state))
-                            if (key.toLowerCase().includes(t.replace(/^./, c => c.toLowerCase()))) { if (!this._storeResolveCache) this._storeResolveCache = {}; return this._storeResolveCache[ck] = mod; }
+                            if (key.toLowerCase().includes(t)) { if (!this._storeResolveCache) this._storeResolveCache = {}; return this._storeResolveCache[ck] = mod; }
                 } catch (_) {}
             }
         } catch (_) {}
@@ -1948,7 +1954,7 @@ module.exports = class ByeBlocked {
         const list = this._getChannelMessagesList(channelId);
         for (let i = list.length - 1; i >= 0; i--) {
             const msg = list[i];
-            if (msg?.type !== 6) continue;
+            if (!this._isMessageOfType(msg, "CHANNEL_PINNED_MESSAGE")) continue;
             const ref = msg.messageReference?.message_id || msg.message_reference?.message_id;
             if (ref === messageId) return msg;
         }
@@ -2662,7 +2668,7 @@ module.exports = class ByeBlocked {
             if (!Array.isArray(list) || !list.length) return;
             for (let i = 0; i < list.length; i++) {
                 const msg = list[i];
-                if (!msg || msg.type !== 6) continue;
+                if (!this._isMessageOfType(msg, "CHANNEL_PINNED_MESSAGE")) continue;
                 this._handlePinSystemMessage(msg);
             }
         } catch (_) {}
@@ -3327,7 +3333,6 @@ module.exports = class ByeBlocked {
         p.safe('watchVoiceJoinForGridPatch', () => this._watchVoiceJoinForGridPatch());
         p.safe('patchMessageStore', () => this.patchMessageStore());
         p.safe('patchMessageLoadDispatch', () => this.patchMessageLoadDispatch());
-        p.safe('patchMessageItemComponent', () => this.patchMessageItemComponent());
     }
     start(_retryAttempt = 0) {
         if (this.isRunning) return;
@@ -3419,7 +3424,6 @@ module.exports = class ByeBlocked {
             if (this.settings.behavior.blockRingingFromBlocked) {
                 p.safe('patchBlockedCallRinging', () => this.patchBlockedCallRinging());
                 p.safe('patchRingtoneAudio', () => this.patchRingtoneAudio());
-                p.safe('patchHideBlockedCallUI', () => this.patchHideBlockedCallUI());
                 p.safe('watchCallCreateForHideBlockedCallUI', () => this._watchCallCreateForHideBlockedCallUI());
             }
         }, 2e3);
@@ -3756,7 +3760,7 @@ module.exports = class ByeBlocked {
         this._voiceMutePatched = false;
         this._autocompleteRowPatched = false;
         this._voiceUserComponentPatched = false;
-        this._messageItemPatched = false;
+        this._reactionsPatched = false;
         if (this._muteTimeout) {
             clearTimeout(this._muteTimeout);
             this._muteTimeout = null;
@@ -4416,23 +4420,18 @@ module.exports = class ByeBlocked {
         try {
             const VOICE_USER_TERMS = ["userId", "speaking", "muted", "deafen", "ringing"];
             const VOICE_USER_REQUIRED = 3;
-            const raw = BdApi.Webpack.getWithKey(m => {
+            const LABEL = "Voice user component (patchVoiceUserComponent target)";
+            const result = this._wpGetModuleWithKey(m => {
                 if (typeof m !== "function") return false;
                 try {
                     const src = Function.prototype.toString.call(m);
                     return VOICE_USER_TERMS.filter(t => src.includes(t)).length >= VOICE_USER_REQUIRED;
                 } catch (_) { return false; }
-            });
-            let result = null;
-            if (raw) {
-                if (Array.isArray(raw)) result = raw;
-                else if (typeof raw[Symbol.iterator] === "function" || typeof raw.next === "function") {
-                    const pair = [...raw];
-                    if (pair.length && pair[0] !== undefined) result = pair;
-                }
-            }
+            }, LABEL);
             if (result) {
-                const [mod, key] = result;
+                let [mod, key] = result;
+                if (mod && key == null) key = this._wpFindFnKeyFuzzy(mod, ...VOICE_USER_TERMS);
+                if (mod && key) {
                 this.patchInstead(mod, key, function(ctx, args, orig) {
                     self._health?.heartbeat("voiceUserComponentPatch");
                     try {
@@ -4444,6 +4443,7 @@ module.exports = class ByeBlocked {
                 });
                 this._voiceUserComponentPatched = true;
                 return;
+                }
             }
         } catch (err) { this._patcher?._warn("patchVoiceUserComponent", err); }
         if (!this._voiceUserComponentPatched && attempt < 6) {
@@ -4451,9 +4451,6 @@ module.exports = class ByeBlocked {
         } else if (!this._voiceUserComponentPatched) {
             this._patcher?._warn("patchVoiceUserComponent", new Error("ran out of attempts - no module matched the voice-user term set; Discord likely renamed something in this component"));
         }
-    }
-    patchMessageItemComponent(attempt = 0) {
-        this._messageItemPatched = true;
     }
     patchGuildMemberStore(attempt = 0) {
         if (this._guildMemberStorePatched || !this.settings.places.memberList) return;
@@ -5309,27 +5306,8 @@ return false;
             || document.querySelector('[data-item-role="item"]')
             || document.querySelector('[data-list-id^="forum-channel-list-"]')
             || document.querySelector('[class*="mainCard"]')
-            || document.querySelector('[class*="card"]')
         );
         if (hadCandidateEl) {
-        try {
-            const candidateEl = document.querySelector('[class*="card_"][data-item-role="item"]')
-                || document.querySelector('[data-item-role="item"]')
-                || document.querySelector('[data-list-id^="forum-channel-list-"]')
-                || document.querySelector('[class*="mainCard"]')
-                || document.querySelector('[class*="card"]');
-            if (candidateEl) {
-                const rowListComponent = this.findComponentViaFiber(
-                    candidateEl,
-                    (type, props) => isForumRowListProps(props),
-                    30,
-                    "patchForumPostComponent:findRowList"
-                );
-                if (rowListComponent) {
-                    this.patchBefore(rowListComponent, "prototype" in rowListComponent && rowListComponent.prototype?.render ? undefined : undefined, () => {});
-                }
-            }
-        } catch (_) {}
         try {
             const candidateEl = document.querySelector('[data-item-role="item"]')
                 || document.querySelector('[data-list-id^="forum-channel-list-"]');
@@ -5340,11 +5318,11 @@ return false;
                     const props = fiber.memoizedProps || fiber.pendingProps;
                     if (!isForumRowListProps(props)) continue;
                     const compType = fiber.type;
-                    if (typeof compType !== "function") continue;
-                    try {
-                        const key = this._r.findFnKey({ [compType.name || "comp"]: compType }, "renderRow");
-                    } catch (_) {}
-                    if (compType.prototype && typeof compType.prototype.render === "function") {
+                    const isPlainFn = typeof compType === "function";
+                    const isWrapperObj = compType && typeof compType === "object"
+                        && (typeof compType.render === "function" || typeof compType.type === "function");
+                    if (!isPlainFn && !isWrapperObj) continue;
+                    if (isPlainFn && compType.prototype && typeof compType.prototype.render === "function") {
                         this.patchBefore(compType.prototype, "render", ctx => {
                             try {
                                 if (ctx?.props && typeof ctx.props.renderRow === "function" && !ctx.props.renderRow.__byeblockedWrapped) {
@@ -5353,6 +5331,19 @@ return false;
                             } catch (_) {}
                         });
                         patchedAny = true;
+                    } else if (isWrapperObj) {
+                        const wrapperKey = typeof compType.render === "function" ? "render" : "type";
+                        try {
+                            this.patchBefore(compType, wrapperKey, (_, args) => {
+                                try {
+                                    const p = args?.[0];
+                                    if (p && typeof p.renderRow === "function" && !p.renderRow.__byeblockedWrapped) {
+                                        p.renderRow = wrapRenderRow(p.renderRow);
+                                    }
+                                } catch (_) {}
+                            });
+                            patchedAny = true;
+                        } catch (_) {}
                     } else {
                         try {
                             const found = this._wpGetModuleWithKey(m => m === compType, "Forum row-list functional component");
@@ -5594,7 +5585,13 @@ return false;
                 }
                 if (msgs._array && Array.isArray(msgs._array)) {
                     const filtered = self.filterMessagesCollection(msgs._array);
-                    if (filtered !== msgs._array) msgs._array = filtered;
+                    if (filtered !== msgs._array) {
+                        try {
+                            const clone = Object.create(Object.getPrototypeOf(msgs));
+                            Object.assign(clone, msgs, { _array: filtered });
+                            props.messages = clone;
+                        } catch (_) {}
+                    }
                 }
             } catch (_) {}
         };
@@ -5676,12 +5673,45 @@ return false;
         this._patcher?._warn("patchMessagesWrapComponent", new Error(`ran out of attempts to locate the MessagesWrap module via fiber walk - best candidate matched ${bestKeyHits.length}/${WRAP_REQUIRED} required prop keys (${bestKeyHits.join(", ") || "none"}). This patch requires a message list to be visible on screen during at least one attempt.`));
         this._retryGuardExit("patchMessagesWrapComponent");
     }
+    _hasAnyGroupDMInData() {
+        try {
+            const cs = this.modules.ChannelStore;
+            if (!cs) return false;
+            const collect = fn => {
+                if (typeof fn !== "function") return [];
+                const all = fn.call(cs);
+                return Array.isArray(all) ? all : Object.values(all || {});
+            };
+            const lists = [collect(cs.getPrivateChannels), collect(cs.getMutablePrivateChannels)];
+            for (const list of lists) {
+                if (list.some(ch => ch?.isGroupDM?.())) return true;
+            }
+        } catch (_) {}
+        return false;
+    }
     patchPrivateChannelRowComponent(attempt = 0) {
         if (!this.settings.places.groupDms) return;
         if (this._privateChannelRowPatched) return;
         if (attempt === 0) {
             if (this._rowPatchInFlight) return;
             this._rowPatchInFlight = true;
+        }
+        if (this._groupDMPrototypePatched) {
+            this._rowPatchInFlight = false;
+            this.logger?.info("patchPrivateChannelRowComponent: recipients/rawRecipients already filtered at the prototype level, skipping the row component patch (it's redundant here)");
+            return;
+        }
+        if (attempt === 0 && !this._hasAnyGroupDMInData()) {
+            this._rowPatchInFlight = false;
+            this._rowPatchWaitCycles = 0;
+            this.logger?.info("patchPrivateChannelRowComponent: no Group DM in data yet, deferring to passive watch instead of DOM polling");
+            this._watchForGroupDmRowRetry();
+            return;
+        }
+        const PROTOTYPE_GRACE_ATTEMPTS = 5;
+        if (attempt < PROTOTYPE_GRACE_ATTEMPTS && !this._groupDMPrototypePatched) {
+            setTimeout(() => this.patchPrivateChannelRowComponent(attempt + 1), 300);
+            return;
         }
         const self = this;
         this._filteredChannelCache = this._filteredChannelCache || new Map();
@@ -5696,7 +5726,7 @@ return false;
                 const filteredRecipients = Array.isArray(recipients) ? recipients.filter(id => !id || !self.shouldHide(id?.id || id)) : recipients;
                 const filteredRaw = Array.isArray(rawRecipients) ? rawRecipients.filter(u => !u || !self.shouldHide(u?.id || u)) : rawRecipients;
                 if (filteredRecipients?.length === recipients?.length && filteredRaw?.length === rawRecipients?.length) return channel;
-                const sig = channel.id + '|' + filteredRecipients.map(idOf).join(',') + '|' + filteredRaw.map(idOf).join(',');
+                const sig = channel.id + '|' + (Array.isArray(filteredRecipients) ? filteredRecipients.map(idOf).join(',') : '') + '|' + (Array.isArray(filteredRaw) ? filteredRaw.map(idOf).join(',') : '');
                 const cached = self._filteredChannelCache.get(channel.id);
                 if (cached && cached.sig === sig) {
                     return cached.clone;
@@ -6104,7 +6134,7 @@ return false;
             try {
                 const action = args?.[0];
                 if (!action || typeof action !== "object") return;
-                if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && action.message?.type === 1) {
+                if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && self._isMessageOfType(action.message, "RECIPIENT_ADD")) {
                     self._handleGroupRecipientAdd(action.message);
                     return;
                 }
@@ -6117,7 +6147,7 @@ return false;
                     self._unmarkMessageUnpinned(action.messageId);
                     return;
                 }
-                if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && action.message?.type === 6) {
+                if (action.type === self.constructor.ACTIONS.MESSAGE_CREATE && self._isMessageOfType(action.message, "CHANNEL_PINNED_MESSAGE")) {
                     self._handlePinSystemMessage(action.message);
                     return;
                 }
@@ -6151,11 +6181,36 @@ return false;
         return [];
     }
     _getAuthorId(msg) { return msg?.author?.id || msg?.authorId || msg?.user?.id; }
+    _looksLikeMessageOfType(msg, typeKey) {
+        if (!msg || typeof msg !== "object") return false;
+        const hasTextContent = typeof msg.content === "string" && msg.content.trim().length > 0;
+        if (typeKey === "CHANNEL_PINNED_MESSAGE") {
+            const hasMessageRef = !!(msg.messageReference?.message_id || msg.message_reference?.message_id);
+            return hasMessageRef && !hasTextContent;
+        }
+        if (typeKey === "RECIPIENT_ADD") {
+            const hasMentions = Array.isArray(msg.mentions) && msg.mentions.length > 0;
+            const channelId = msg.channel_id || msg.channelId;
+            return hasMentions && !hasTextContent && !!channelId;
+        }
+        return false;
+    }
+    _isMessageOfType(msg, typeKey) {
+        if (!msg) return false;
+        const expected = ByeBlocked.MESSAGE_TYPES[typeKey];
+        if (msg.type === expected) return true;
+        return this._looksLikeMessageOfType(msg, typeKey);
+    }
     _isBlockedMessage(msg) {
         if (!msg) return false;
         if (msg.blocked === true) return true;
         const authorId = this._getAuthorId(msg);
         if (authorId && this.shouldHide(authorId)) return true;
+        try {
+            const ref = this.getReferencedMessage(msg);
+            const refAuthorId = ref?.author?.id || null;
+            if (refAuthorId && this.shouldHide(refAuthorId)) return true;
+        } catch (_) {}
         if (Array.isArray(msg.mentions)) {
             for (const mention of msg.mentions) {
                 const mid = typeof mention === 'string' ? mention : (mention?.id || mention?.userId);
@@ -6791,15 +6846,16 @@ return false;
     _registerDispatcherPatchHealthCheck() {
         if (!this._health || this._dispatcherPatchHealthRegistered) return;
         this._dispatcherPatchHealthRegistered = true;
-        const requiredActions = ["MESSAGE_CREATE", "THREAD_CREATE", "CHANNEL_ACK", "ACK_MESSAGES", "THREAD_ACK"];
+        const HEARTBEAT_STALE_MS = 30000;
         this._health.register(
             "dispatcherPatch",
             () => {
                 try {
                     if (!this._notificationDispatcherPatched) return false;
                     if (typeof this.modules.Dispatcher?.dispatch !== "function") return false;
-                    const actions = this.constructor.ACTIONS;
-                    return requiredActions.every(name => actions?.[name] === name);
+                    const sinceHeartbeat = this._health.msSinceHeartbeat("dispatcherPatch");
+                    if (sinceHeartbeat === null) return true;
+                    return sinceHeartbeat <= HEARTBEAT_STALE_MS;
                 } catch (_) {
                     return false;
                 }
@@ -7489,7 +7545,21 @@ return false;
                 const selection = window.getSelection();
                 selection.removeAllRanges();
                 selection.addRange(range);
-                document.execCommand("delete");
+                const execOk = document.execCommand("delete");
+                const clearedByExec = execOk && (editor.textContent || "").trim() === "";
+                if (clearedByExec) return;
+                try {
+                    const beforeInputEvent = new InputEvent("beforeinput", {
+                        bubbles: true,
+                        cancelable: true,
+                        inputType: "deleteContentBackward"
+                    });
+                    editor.dispatchEvent(beforeInputEvent);
+                    if ((editor.textContent || "").trim() === "") return;
+                } catch (err) {
+                    this._logThrottled("_maybeClearBlockedStatusEditor", `falha ao disparar beforeinput sintético: ${err?.message || err}`, "warn");
+                }
+                this._logThrottled("_maybeClearBlockedStatusEditor", "não foi possível limpar o editor de status bloqueado - execCommand e o fallback de beforeinput sintético não surtiram efeito; o status bloqueado pode continuar visível no editor até a próxima edição manual", "warn");
             };
             setTimeout(verifyAndClear, 30);
         } catch (_) {}
@@ -7577,6 +7647,16 @@ return false;
         if (Array.isArray(users)) return users.length;
         return 0;
     }
+    _reactionUsersComputable(users) {
+        return users instanceof Map || Array.isArray(users);
+    }
+    _warnUncomputableReactions(emoji, reason) {
+        const now = Date.now();
+        if (this._lastUncomputableReactionsWarnAt && now - this._lastUncomputableReactionsWarnAt < 60000) return;
+        this._lastUncomputableReactionsWarnAt = now;
+        const emojiDesc = emoji && typeof emoji === "object" ? `${emoji.name || "?"}${emoji.id ? `:${emoji.id}` : " (unicode, id:null)"}` : String(emoji);
+        this._patcher?._warn("_getFilteredReactions", new Error(`getReactions returned an unrecognized shape or threw for emoji ${emojiDesc} (${reason}) - treating as not-computable rather than 0 to avoid hiding legitimate reactions. This warning is throttled to once/60s.`));
+    }
     _getFilteredReactions(store, channelId, messageId, emoji, burstType = 0) {
         if (!store || !channelId || !messageId) return null;
         try {
@@ -7587,8 +7667,10 @@ return false;
                 const filteredBurst = this._filterReactionUsers(burstUsers);
                 if (this._reactionUsersSize(filteredBurst) > 0) users = filteredBurst;
             }
+            if (!this._reactionUsersComputable(users)) this._warnUncomputableReactions(emoji, "unrecognized-shape");
             return users;
-        } catch (_) {
+        } catch (err) {
+            this._warnUncomputableReactions(emoji, err?.message || String(err));
             return null;
         }
     }
@@ -7790,6 +7872,7 @@ return false;
                 const emoji = r?.emoji;
                 if (!emoji) continue;
                 const users = this._getFilteredReactions(store, channelId, messageId, emoji, r.burst_colors?.length ? 1 : 0);
+                if (!this._reactionUsersComputable(users)) return true;
                 if (this._reactionUsersSize(users) > 0) return true;
             }
             return false;
@@ -7904,12 +7987,18 @@ return false;
             placeholder.style.display = "none";
         }
     }
-    hideTopicPanelItems() {
+    _isCurrentChannelForumOrThread() {
         try {
             const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
             const channel = channelId ? this.modules.ChannelStore?.getChannel?.(channelId) : null;
-            const isForumOrThreadChannel = channel && (channel.type === 15 || channel.type === 16 || channel.isThread?.());
-            if (!isForumOrThreadChannel) return;
+            return !!(channel && (channel.type === 15 || channel.type === 16 || channel.isThread?.()));
+        } catch (_) {
+            return false;
+        }
+    }
+    hideTopicPanelItems() {
+        try {
+            if (!this._isCurrentChannelForumOrThread()) return;
             let topicItems = document.querySelectorAll('main [class*="container_"]');
             if (!topicItems.length) {
                 topicItems = document.querySelectorAll('[data-list-item-id*="forum"], [data-list-item-id*="thread"], [class*="thread_"], [class*="forum_"], [role="listitem"]');
@@ -8598,7 +8687,7 @@ return false;
                     this.hideForumPosts();
                     this._scheduleForumRetry();
                 }
-                if (node.matches?.('[class*="container_"]')) this.hideTopicPanelItems();
+                if (node.matches?.('[class*="container_"]') && this._isCurrentChannelForumOrThread()) this.hideTopicPanelItems();
                 if (node.matches?.('[data-list-item-id*="private-channels"][data-list-item-id*="___"]') || node.closest?.('[data-list-item-id*="private-channels"][data-list-item-id*="___"]')) this.hidePrivateChannels();
                 if (places.memberList && (node.matches?.('[class*="memberRow"]') || node.querySelector?.('[class*="memberRow"]'))) {
                     this.hideMemberRows();
@@ -8627,7 +8716,7 @@ return false;
                     }
                 }
                 if (places.voiceChannels) {
-                    const voiceSel = '[class*="voiceUser"],[class*="stageUser_"],[class*="stageSection_"],[class*="activityPanel_"],[class*="activityPanel"],[class*="streamPreview_"],[class*="streamTile_"],[class*="tile_"],[class*="tileSizer_"],[class*="videoWrapper_"],[class*="participantWrapper_"],[class*="gridLayout_"],[class*="callContainer_"],[class*="audienceContainer__"],[class*="raisedHandCount__"],[class*="toolbar__"],[class*="details_"],[class*="speakerCount__"],[class*="text__9aed4"],[class*="blockedNotice__"],[class*="channelNotice__"],[class*="subtitle__"]';
+                    const voiceSel = '[class*="voiceUser"],[class*="stageUser_"],[class*="stageSection_"],[class*="activityPanel_"],[class*="activityPanel"],[class*="streamPreview_"],[class*="streamTile_"],[class*="tile_"],[class*="tileSizer_"],[class*="videoWrapper_"],[class*="participantWrapper_"],[class*="gridLayout_"],[class*="callContainer_"],[class*="audienceContainer__"],[class*="raisedHandCount__"],[class*="toolbar__"],[class*="details_"],[class*="speakerCount__"],[class*="blockedNotice__"],[class*="channelNotice__"],[class*="subtitle__"]';
                     const voiceAriaSel = _VOICE_CHANNEL_ARIA_LABEL_SEL;
                     if (node.matches?.(voiceSel) || node.querySelector?.(voiceSel) || node.matches?.(voiceAriaSel) || node.querySelector?.(voiceAriaSel)) {
                         try { this.hideVoiceUsers(); } catch (_) {}
@@ -8880,7 +8969,6 @@ return false;
                 this.fixVoiceChannelIconColors();
                 this._resyncBlockedChannelStatuses();
                 this.hideOrphanedDividers();
-                this.collapseGhostSlots();
                 this.promoteOrphanedMessages();
                 if (this.settings.places?.reactions) {
                     this.fixReactionCounts();
@@ -8902,7 +8990,6 @@ return false;
             }
             if (p.memberList) this.hideMemberRows();
             if (p.messages) {
-                this.hideMessages();
                 this.hidePinnedMessages();
                 this.hideForumPosts();
                 this.hideTopicPanelItems();
@@ -8927,7 +9014,6 @@ return false;
             this.fixVoiceChannelIconColors();
             this._resyncBlockedChannelStatuses();
             this.hideOrphanedDividers();
-            this.collapseGhostSlots();
             this.promoteOrphanedMessages();
         } catch (e) {
             this._logThrottled("scanDom", e);
@@ -9031,9 +9117,6 @@ return false;
         }
         return null;
     }
-    collapseGhostSlots() {
-        return;
-    }
     _ghostHide(el) {
         el.dataset.nmbGhost = "true";
         if (!el.hasAttribute("data-nmb-prev-ghost-style")) {
@@ -9088,9 +9171,6 @@ return false;
                 }
             }
         }
-    }
-    hideMessages() {
-        return;
     }
     hideParent(el, reason = "empty-parent") {
         if (!el || el.dataset?.hiddenBlocked === "true") return;
@@ -9389,7 +9469,7 @@ return false;
             const hasVoiceButtons = !!el.querySelector(
                 'button[aria-label*="chamada" i], button[aria-label*="call" i],' +
                 'button[aria-label*="vídeo" i], button[aria-label*="video" i]'
-            );
+            ) || el.querySelectorAll('button:has(svg), [role="button"]:has(svg)').length >= 2;
             if (!hasAvatars || !hasVoiceButtons) continue;
             this.hideElement(el, "blocked-ringing-overlay", blockedUserId);
         }
@@ -9757,7 +9837,7 @@ return false;
                     placeholder = document.createElement("div");
                     placeholder.className = "emptyStateContainer";
                     placeholder.dataset.nmbInjected = "true";
-                    placeholder.innerHTML = `<img alt="" class="sparkleIcon sparkleBottom" src="/assets/3a6a08a976f34e04.svg">
+                    placeholder.innerHTML = `<svg class="sparkleIcon sparkleBottom" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" opacity="0.65" d="M12 0c.7 3.6 1.6 6.1 3.4 7.9C17.2 9.7 19.7 10.6 24 11.3v.4c-4.3.7-6.8 1.6-8.6 3.4C13.6 16.9 12.7 19.4 12 23h-.4c-.7-3.6-1.6-6.1-3.4-7.9C6.4 13.3 3.9 12.4 0 11.7v-.4c3.9-.7 6.4-1.6 8.2-3.4C10 6.1 10.9 3.6 11.6 0h.4z"/></svg>
                         <div class="background">
                             <svg class="foreground" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="none" viewBox="0 0 24 24">
                                 <path fill="currentColor" d="M19.61 18.25a1.08 1.08 0 0 1-.07-1.33 9 9 0 1 0-15.07 0c.26.42.25.97-.08 1.33l-.02.02c-.41.44-1.12.43-1.46-.07a11 11 0 1 1 18.17 0c-.33.5-1.04.51-1.45.07l-.02-.02Z"></path>
@@ -9765,7 +9845,7 @@ return false;
                                 <path fill="currentColor" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM6.33 20.03c-.25.72.12 1.5.8 1.84a10.96 10.96 0 0 0 9.73 0 1.52 1.52 0 0 0 .8-1.84 6 6 0 0 0-11.33 0Z"></path>
                             </svg>
                         </div>
-                        <img alt="" class="sparkleIcon sparkleTop" src="/assets/30d1720360dd2c40.svg">
+                        <svg class="sparkleIcon sparkleTop" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" opacity="0.65" d="M12 0c.7 3.6 1.6 6.1 3.4 7.9C17.2 9.7 19.7 10.6 24 11.3v.4c-4.3.7-6.8 1.6-8.6 3.4C13.6 16.9 12.7 19.4 12 23h-.4c-.7-3.6-1.6-6.1-3.4-7.9C6.4 13.3 3.9 12.4 0 11.7v-.4c3.9-.7 6.4-1.6 8.2-3.4C10 6.1 10.9 3.6 11.6 0h.4z"/></svg>
                         <div class="text-lg/semibold emptyStateTitle" data-text-variant="text-lg/semibold" style="color: var(--text-strong);">${t.title}</div>
                         <div class="text-sm/normal emptyStateBody" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.body}</div>`;
                     heading.insertAdjacentElement("afterend", placeholder);
@@ -9870,7 +9950,7 @@ return false;
     }
     _buildEventsEmptySkeletonHtml() {
         const t = _locale(_getLocale(), ByeBlocked.EVENTS_LOCALE);
-        return `<div class="nmb-injected-events-empty container">\n                    <img alt="" class="sparkleIcon sparkleBottom" src="/assets/3a6a08a976f34e04.svg">\n                    <div class="circle">\n                        <svg class="icon" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="none" viewBox="0 0 24 24">\n                            <path fill="currentColor" d="M7 1a1 1 0 0 1 1 1v.75c0 .14.11.25.25.25h7.5c.14 0 .25-.11.25-.25V2a1 1 0 1 1 2 0v.75c0 .14.11.25.25.25H19a3 3 0 0 1 3 3 1 1 0 0 1-1 1H3a1 1 0 0 1-1-1 3 3 0 0 1 3-3h.75c.14 0 .25-.11.25-.25V2a1 1 0 0 1 1-1Z"></path>\n                            <path fill="currentColor" fill-rule="evenodd" d="M2 10a1 1 0 0 1 1-1h18a1 1 0 0 1 1 1v9a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-9Zm3.5 2a.5.5 0 0 0-.5.5v3c0 .28.22.5.5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3Z" clip-rule="evenodd"></path>\n                        </svg>\n                    </div>\n                    <img alt="" class="sparkleIcon sparkleTop" src="/assets/30d1720360dd2c40.svg">\n                    <h2 class="heading-xl/semibold defaultColor title" data-text-variant="heading-xl/semibold" style="color: var(--text-strong);">${t.title}</h2>\n                    <div class="text-sm/normal subtitle" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.subtitle}</div>\n                    <div class="text-sm/normal roleTip" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.tip_prefix}<strong><a class="anchor anchorUnderlineOnHover" role="link" tabindex="0" data-nmb-open-role-settings="true">${t.tip_link}</a></strong>.</div>\n                </div>`;
+        return `<div class="nmb-injected-events-empty container">\n                    <svg class="sparkleIcon sparkleBottom" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" opacity="0.65" d="M12 0c.7 3.6 1.6 6.1 3.4 7.9C17.2 9.7 19.7 10.6 24 11.3v.4c-4.3.7-6.8 1.6-8.6 3.4C13.6 16.9 12.7 19.4 12 23h-.4c-.7-3.6-1.6-6.1-3.4-7.9C6.4 13.3 3.9 12.4 0 11.7v-.4c3.9-.7 6.4-1.6 8.2-3.4C10 6.1 10.9 3.6 11.6 0h.4z"/></svg>\n                    <div class="circle">\n                        <svg class="icon" aria-hidden="true" role="img" xmlns="http://www.w3.org/2000/svg" width="40" height="40" fill="none" viewBox="0 0 24 24">\n                            <path fill="currentColor" d="M7 1a1 1 0 0 1 1 1v.75c0 .14.11.25.25.25h7.5c.14 0 .25-.11.25-.25V2a1 1 0 1 1 2 0v.75c0 .14.11.25.25.25H19a3 3 0 0 1 3 3 1 1 0 0 1-1 1H3a1 1 0 0 1-1-1 3 3 0 0 1 3-3h.75c.14 0 .25-.11.25-.25V2a1 1 0 0 1 1-1Z"></path>\n                            <path fill="currentColor" fill-rule="evenodd" d="M2 10a1 1 0 0 1 1-1h18a1 1 0 0 1 1 1v9a3 3 0 0 1-3 3H5a3 3 0 0 1-3-3v-9Zm3.5 2a.5.5 0 0 0-.5.5v3c0 .28.22.5.5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5h-3Z" clip-rule="evenodd"></path>\n                        </svg>\n                    </div>\n                    <svg class="sparkleIcon sparkleTop" width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" opacity="0.65" d="M12 0c.7 3.6 1.6 6.1 3.4 7.9C17.2 9.7 19.7 10.6 24 11.3v.4c-4.3.7-6.8 1.6-8.6 3.4C13.6 16.9 12.7 19.4 12 23h-.4c-.7-3.6-1.6-6.1-3.4-7.9C6.4 13.3 3.9 12.4 0 11.7v-.4c3.9-.7 6.4-1.6 8.2-3.4C10 6.1 10.9 3.6 11.6 0h.4z"/></svg>\n                    <h2 class="heading-xl/semibold defaultColor title" data-text-variant="heading-xl/semibold" style="color: var(--text-strong);">${t.title}</h2>\n                    <div class="text-sm/normal subtitle" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.subtitle}</div>\n                    <div class="text-sm/normal roleTip" data-text-variant="text-sm/normal" style="color: var(--text-default);">${t.tip_prefix}<strong><a class="anchor anchorUnderlineOnHover" role="link" tabindex="0" data-nmb-open-role-settings="true">${t.tip_link}</a></strong>.</div>\n                </div>`;
     }
     hideBlockedEvents() {
         const containers = new Set;
@@ -11026,7 +11106,7 @@ return false;
             }
             {
                 const bodyText = this._findLocalizedPinsEmptyText() || "This channel doesn't have<br>any pinned messages... yet.";
-                placeholder.innerHTML = `\n                    <div class="image_e8b59c nmb-pins-empty-icon" style="background-image:url(&quot;/assets/1772d54cb566d95b.svg&quot;)"></div>\n                    <div class="text-md/medium" data-text-variant="text-md/medium" style="color: var(--text-default);">${bodyText}</div>\n                `;
+                placeholder.innerHTML = `\n                    <svg class="nmb-pins-empty-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="opacity:0.45;"><path fill="currentColor" d="M14.7 2.3a1 1 0 0 0-1.4 0L11.6 4a3.5 3.5 0 0 0-4.2.6L6 6a1 1 0 0 0 0 1.4l2.3 2.3-4.6 4.6a1 1 0 0 0-.28.5L2.5 18a1 1 0 0 0 1.22 1.22l3.2-.92a1 1 0 0 0 .5-.28l4.6-4.6 2.3 2.3a1 1 0 0 0 1.4 0l1.4-1.4a3.5 3.5 0 0 0 .6-4.2l1.7-1.7a1 1 0 0 0 0-1.4l-5-5Z"/></svg>\n                    <div class="text-md/medium" data-text-variant="text-md/medium" style="color: var(--text-default);">${bodyText}</div>\n                `;
             }
             placeholder.style.display = "";
             void listRoot.offsetHeight;
@@ -11045,9 +11125,16 @@ return false;
                     nativeFooter.setAttribute("data-nmb-prev-footer-html", nativeFooter.innerHTML);
                 }
                 const innerBlock = nativeFooter.firstElementChild;
+                let labelEl = null, textEl = null;
                 if (innerBlock && innerBlock.children.length >= 2) {
-                    innerBlock.children[0].textContent = tip.label;
-                    innerBlock.children[1].textContent = tip.text;
+                    const kids = Array.from(innerBlock.children);
+                    const sorted = kids.slice().sort((a, b) => (a.textContent || "").length - (b.textContent || "").length);
+                    labelEl = sorted[0];
+                    textEl = sorted[sorted.length - 1];
+                }
+                if (labelEl && textEl && labelEl !== textEl) {
+                    labelEl.textContent = tip.label;
+                    textEl.textContent = tip.text;
                 } else {
                     nativeFooter.innerHTML = `\n                        <div style="width: 100%; padding-top: 10px; padding-bottom: 10px;">\n                            <div class="text-sm/bold" data-text-variant="text-sm/bold" style="color: var(--text-feedback-positive);">${tip.label}</div>\n                            <div class="defaultColor text-sm/normal" data-text-variant="text-sm/normal">${tip.text}</div>\n                        </div>\n                    `;
                 }
@@ -11588,6 +11675,7 @@ return false;
         if (this._callUiPatched) return;
         if (!this._retryGuardEnter("patchHideBlockedCallUI", attempt)) return;
         let CallButtons = null;
+        let foundVia = null;
         let bestHitCount = 0, bestHitStrings = [];
         const STRINGS = ByeBlocked.CALL_BUTTONS_STRINGS;
         const REQUIRED = ByeBlocked.CALL_BUTTONS_REQUIRED;
@@ -11606,11 +11694,12 @@ return false;
                          typeof val.prototype.shouldRenderCall === "function" ||
                          typeof val.prototype.renderVoiceCallButton === "function")) {
                         CallButtons = val;
+                        foundVia = "exact-name";
                         break;
                     }
                 }
                 if (!CallButtons) {
-                    if (mod.prototype && typeof mod.prototype.render === "function") CallButtons = mod;
+                    if (mod.prototype && typeof mod.prototype.render === "function") { CallButtons = mod; foundVia = "exact-name"; }
                 }
             }
         } catch (_) {}
@@ -11629,13 +11718,13 @@ return false;
                     for (const key of Object.keys(scored)) {
                         const val = scored[key];
                         const renderSrc = val?.prototype?.render?.toString?.();
-                        if (renderSrc && countHits(renderSrc) >= REQUIRED) { CallButtons = val; break; }
+                        if (renderSrc && countHits(renderSrc) >= REQUIRED) { CallButtons = val; foundVia = "source-score"; break; }
                     }
                 }
             } catch (_) {}
         }
         if (!CallButtons) {
-            try { CallButtons = this._findCallButtonsClassByFiber(); } catch (_) {}
+            try { CallButtons = this._findCallButtonsClassByFiber(); if (CallButtons) foundVia = "fiber-structural"; } catch (_) {}
         }
         if (!CallButtons || !CallButtons.prototype || typeof CallButtons.prototype.render !== "function") {
             if (attempt < 15) {
@@ -11650,18 +11739,39 @@ return false;
         this._retryGuardExit("patchHideBlockedCallUI");
         this._blockedRingingChannels = this._blockedRingingChannels || new Map;
         const self = this;
+        const CALL_UI_INSTANCE_METHOD_HINTS = ["renderCall", "shouldRenderCall", "renderVoiceCallButton", "renderVideoCallButton", "renderConnectionStatus", "renderControls", "renderChatButton"];
+        const componentLooksLikeCallUi = () => {
+            try {
+                const proto = CallButtons.prototype;
+                if (CALL_UI_INSTANCE_METHOD_HINTS.some(m => typeof proto[m] === "function")) return true;
+                if (foundVia === "source-score") return false;
+                const renderSrc = typeof proto.render === "function" ? proto.render.toString() : "";
+                return STRINGS.filter(s => renderSrc.includes(s)).length >= REQUIRED;
+            } catch (_) {
+                return false;
+            }
+        };
+        let callUiGuardChecked = false;
+        let callUiGuardPassed = false;
         this.patchBefore(CallButtons.prototype, "render", function(ctx) {
             try {
                 const props = ctx?.props;
                 if (!self.settings.behavior.blockRingingFromBlocked || !props || typeof props !== "object") return;
                 const channelId = props.channel?.id;
                 const callIsActive = props.callActive || props.showCall || props.inCall;
-                if (channelId && self._hasBlockedRinging(channelId) && callIsActive) {
-                    ctx.__byeblockedOrigProps = props;
-                    const override = { callActive: false, inCall: false };
-                    if (typeof props.showCall === "boolean") override.showCall = false;
-                    ctx.props = { ...props, ...override };
+                if (!channelId || !self._hasBlockedRinging(channelId) || !callIsActive) return;
+                if (!callUiGuardChecked) {
+                    callUiGuardChecked = true;
+                    callUiGuardPassed = componentLooksLikeCallUi();
+                    if (!callUiGuardPassed) {
+                        self._logThrottled("patchHideBlockedCallUI:guard", `component matched via ${foundVia} (best source-score ${bestHitCount}/${REQUIRED} strings) but failed the structural call-UI guard on first real render - skipping prop overrides for this component to avoid corrupting unrelated UI`, "warn");
+                    }
                 }
+                if (!callUiGuardPassed) return;
+                ctx.__byeblockedOrigProps = props;
+                const override = { callActive: false, inCall: false };
+                if (typeof props.showCall === "boolean") override.showCall = false;
+                ctx.props = { ...props, ...override };
             } catch (_) {}
         });
         this.patchAfter(CallButtons.prototype, "render", function(ctx) {
@@ -12756,7 +12866,11 @@ return false;
                     const hasParticipants = self._lastActivityParticipantIds.size > 0;
                     const allBlocked = hasParticipants && [ ...self._lastActivityParticipantIds ].every(id => self.shouldHide(id));
                     if (self.settings.places.voiceChannels && allBlocked) {
-                        action.instance.participants = [];
+                        try {
+                            const clonedInstance = Object.assign(Object.create(Object.getPrototypeOf(action.instance)), action.instance, { participants: [] });
+                            const clonedAction = Object.assign(Object.create(Object.getPrototypeOf(action)), action, { instance: clonedInstance });
+                            args[0] = clonedAction;
+                        } catch (_) {}
                     }
                 }
                 return;
@@ -12765,7 +12879,9 @@ return false;
                 if (!self.settings.behavior.muteBlockedVoiceAudio) return;
                 const senderId = action.userId;
                 if (senderId && self.shouldHide(senderId)) {
-                    action.type = "_BYEBLOCKED_SUPPRESSED_VOICE_CHANNEL_EFFECT_SEND";
+                    try {
+                        args[0] = Object.assign(Object.create(Object.getPrototypeOf(action)), action, { type: "_BYEBLOCKED_SUPPRESSED_VOICE_CHANNEL_EFFECT_SEND" });
+                    } catch (_) {}
                 }
                 return;
             }
@@ -12908,7 +13024,7 @@ return false;
             if (Array.isArray(list)) {
                 for (let i = list.length - 1; i >= 0; i--) {
                     const msg = list[i];
-                    if (msg?.type !== 6) continue;
+                    if (!this._isMessageOfType(msg, "CHANNEL_PINNED_MESSAGE")) continue;
                     const ref = msg.messageReference?.message_id || msg.message_reference?.message_id;
                     if (ref === messageId) {
                         matched = msg;
@@ -12937,7 +13053,7 @@ return false;
     }
     _handlePinSystemMessage(msg) {
         try {
-            if (!msg || msg.type !== 6) return;
+            if (!msg || !this._isMessageOfType(msg, "CHANNEL_PINNED_MESSAGE")) return;
             const messageId = msg.messageReference?.message_id || msg.message_reference?.message_id;
             if (!messageId) return;
             const pinnedById = msg.author?.id;
@@ -12953,7 +13069,7 @@ return false;
             const list = this._getChannelMessagesList(channelId);
             for (let i = 0; i < list.length; i++) {
                 const msg = list[i];
-                if (msg?.type === 6) this._handlePinSystemMessage(msg);
+                if (this._isMessageOfType(msg, "CHANNEL_PINNED_MESSAGE")) this._handlePinSystemMessage(msg);
             }
             const items = this.modules.ChannelPinsStore?.getPins?.(channelId)?.items;
             this._processPinStoreItems(channelId, items);
@@ -12961,7 +13077,7 @@ return false;
     }
     _handleGroupRecipientAdd(msg) {
         try {
-            if (!msg || msg.type !== 1) return;
+            if (!msg || !this._isMessageOfType(msg, "RECIPIENT_ADD")) return;
             const channelId = msg.channel_id || msg.channelId;
             const messageId = msg.id;
             if (!channelId || !messageId) return;
@@ -12979,7 +13095,7 @@ return false;
             const list = this._getChannelMessagesList(channelId);
             for (let i = 0; i < list.length; i++) {
                 const msg = list[i];
-                if (msg?.type === 1) this._handleGroupRecipientAdd(msg);
+                if (this._isMessageOfType(msg, "RECIPIENT_ADD")) this._handleGroupRecipientAdd(msg);
             }
         } catch (_) {}
     }
@@ -13055,7 +13171,7 @@ return false;
         try {
             const el = document.querySelector(`[data-list-item-id="guildsnav___${channelId}"]`);
             if (!el) return null;
-            const listItem = el.closest('.listItem__650eb, [class*="listItem_"]');
+            const listItem = el.closest('[class*="listItem_"]');
             if (listItem?.parentElement && /height\s*:/.test(listItem.parentElement.getAttribute('style') || '')) {
                 return listItem.parentElement;
             }
@@ -13324,11 +13440,11 @@ return false;
         };
         document.addEventListener("click", this._inviteClickHandler, true);
     }
-    patchReactions(attempt = 1) {
-        if (!this._retryGuardEnter("patchReactions", attempt - 1)) return;
+    patchReactions(attempt = 0) {
+        if (!this._retryGuardEnter("patchReactions", attempt)) return;
         const store = this.modules.ReactionsStore;
         if (!store || typeof store.getReactions !== "function") {
-            if (attempt > 5) { this._retryGuardExit("patchReactions"); return; }
+            if (attempt > 4) { this._retryGuardExit("patchReactions"); return; }
             setTimeout(() => {
                 const getStore = (...names) => this._wpGetStore(...names);
                 this.modules.ReactionsStore = getStore(...ByeBlocked.STORE_NAMES.REACTIONS);
@@ -13376,6 +13492,10 @@ return false;
                         name: emojiName
                     }, 0);
                 } catch (_) {
+                    continue;
+                }
+                if (!this._reactionUsersComputable(users)) {
+                    visibleReactionCount++;
                     continue;
                 }
                 const realCount = this._reactionUsersSize(users);
@@ -13526,6 +13646,7 @@ return false;
                     id: id,
                     name: name
                 }, 0);
+                if (!this._reactionUsersComputable(users)) return;
                 const realCount = this._reactionUsersSize(users);
                 realCounts.set(tab, realCount);
                 const displayedCount = parseInt(countEl.textContent, 10);
