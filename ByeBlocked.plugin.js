@@ -7,173 +7,12 @@
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
-class ProbeScannerBridge {
-    constructor(options = {}) {
-        this.sourcePluginName = options.sourcePluginName || "Probe";
-        this.consumerPluginName = options.consumerPluginName || "ByeBlocked";
-        this._cachedSnapshot = null;
-        this._cachedAt = 0;
-        this._cachedBuildNumber = null;
-        this._maxAgeMs = options.maxAgeMs ?? 5 * 60 * 1000;
-    }
-
-    _currentBuildNumber() {
-        try {
-            return (window?.GLOBAL_ENV?.RELEASE_CHANNEL && window?.GLOBAL_ENV?.BUILD_NUMBER)
-                ? `${window.GLOBAL_ENV.RELEASE_CHANNEL}-${window.GLOBAL_ENV.BUILD_NUMBER}`
-                : null;
-        } catch (_) { return null; }
-    }
-
-    _getSnapshot() {
-        const now = Date.now();
-        const currentBuildNumber = this._currentBuildNumber();
-        const buildChanged = this._cachedBuildNumber && currentBuildNumber
-            && this._cachedBuildNumber !== currentBuildNumber;
-        if (this._cachedSnapshot && !buildChanged && (now - this._cachedAt) < this._maxAgeMs) {
-            return this._cachedSnapshot;
-        }
-        try {
-            const snapshot = BdApi.Data.load(this.sourcePluginName, "lastSnapshot");
-            if (!snapshot || !Array.isArray(snapshot.entities)) return null;
-            this._cachedSnapshot = snapshot;
-            this._cachedAt = now;
-            this._cachedBuildNumber = snapshot.discordBuildNumber || currentBuildNumber || null;
-            return snapshot;
-        } catch (_) {
-            return null;
-        }
-    }
-
-    isAvailable() {
-        return this._getSnapshot() !== null;
-    }
-
-    getStoreHint(...candidateNames) {
-        const snapshot = this._getSnapshot();
-        if (!snapshot) return null;
-        for (const name of candidateNames) {
-            const entity = snapshot.entities.find(e => e.type === "store" && e.name === name);
-            if (entity) {
-                return {
-                    found: true,
-                    matchedName: name,
-                    confidence: entity.confidence,
-                    stability: entity.stability?.level || entity.data?.stability || null,
-                    discoveredVia: entity.discoveredVia
-                };
-            }
-        }
-        return { found: false, matchedName: null, confidence: null, stability: null, discoveredVia: null };
-    }
-
-    getModuleHint(kind, label) {
-        const issue = this.getCompatibilityIssues().find(c => c.kind === kind && c.label === label);
-        if (!issue) return null;
-        return {
-            found: issue.status === "resolved",
-            status: issue.status,
-            matchedVia: issue.matchedVia ?? null,
-            confidence: issue.confidence ?? null,
-            note: issue.note || null
-        };
-    }
-
-    getCompatibilityIssues() {
-        const snapshot = this._getSnapshot();
-        if (!snapshot) return [];
-        const report = snapshot.entities.find(e => e.type === "compatibility" && e.id === "compatibility:report");
-        if (!report || !Array.isArray(report.data?.checks)) return [];
-        return report.data.checks.filter(c => c.plugin === this.consumerPluginName);
-    }
-
-    getReplacementFor(label) {
-        const issue = this.getCompatibilityIssues().find(c => c.label === label);
-        if (!issue || issue.status !== "resolved" || !issue.matchedVia) return null;
-
-        const base = {
-            label,
-            kind: issue.kind,
-            matchedVia: issue.matchedVia,
-            confidence: issue.confidence ?? null,
-            note: issue.note || null,
-            resolvedModule: null
-        };
-
-        if (issue.kind === "storeName") {
-            const storeName = String(issue.matchedVia).replace(/\s*\([^)]*\)\s*$/, "").trim();
-            try {
-                if (typeof BdApi !== "undefined" && BdApi.Webpack && typeof BdApi.Webpack.getStore === "function") {
-                    base.resolvedModule = BdApi.Webpack.getStore(storeName) || null;
-                }
-            } catch (_) {}
-            return base;
-        }
-
-        if (issue.kind === "sourceString" || issue.kind === "structuralModule") {
-            const ids = Array.isArray(issue.matchedVia) ? issue.matchedVia : [issue.matchedVia];
-            for (const id of ids) {
-                if (typeof id !== "string" && typeof id !== "number") continue;
-                try {
-                    if (typeof BdApi.Webpack.getModule === "function") {
-                        const m = BdApi.Webpack.getModule(() => true, { id, defaultExport: false });
-                        if (m) { base.resolvedModule = m; return base; }
-                    }
-                } catch (_) {}
-            }
-            return base;
-        }
-
-        return base;
-    }
-
-    getConfirmedBreaks() {
-        return this.getCompatibilityIssues().filter(c => c.status === "not_resolved");
-    }
-
-    getSnapshotAgeLabel() {
-        const snapshot = this._getSnapshot();
-        if (!snapshot || !snapshot.capturedAt) return null;
-        const ageMs = Date.now() - snapshot.capturedAt;
-        const ageMin = Math.round(ageMs / 60000);
-        if (ageMin < 60) return `${ageMin}min`;
-        const ageH = Math.round(ageMin / 60);
-        if (ageH < 24) return `${ageH}h`;
-        return `${Math.round(ageH / 24)}d`;
-    }
-}
-
 class ModuleResolver {
     constructor(options = {}) {
         this._cache = {};
-        this.bridge = options.bridge || null;
-        this._usedProbeHints = new Set();
-    }
-    _recordHintUsed(label) {
-        if (label) this._usedProbeHints.add(label);
-    }
-    getUsedProbeHints() {
-        return [...this._usedProbeHints];
-    }
-    _resolveModuleId(id) {
-        if (id == null) return null;
-        try { if (typeof BdApi.Webpack.getModule === "function") {
-            const m = BdApi.Webpack.getModule(m => true, { id, defaultExport: false });
-            if (m) return m;
-        } } catch (_) {}
-        try { if (BdApi.Webpack.require && BdApi.Webpack.require.c && BdApi.Webpack.require.c[id]) {
-            return BdApi.Webpack.require.c[id].exports;
-        } } catch (_) {}
-        return null;
     }
     getStore(...names) {
         for (const n of names) { try { const s = BdApi.Webpack.getStore(n); if (s) return s; } catch (_) {} }
-        if (this.bridge && this.bridge.isAvailable()) {
-            const hint = this.bridge.getStoreHint(...names);
-            if (hint && hint.found && hint.matchedName && !names.includes(hint.matchedName)) {
-                try { const s = BdApi.Webpack.getStore(hint.matchedName); if (s) { this._recordHintUsed(names[0]); return s; } } catch (_) {}
-            }
-        }
         return this._byHeuristic(names[0]);
     }
     _byHeuristic(hint) {
@@ -200,17 +39,15 @@ class ModuleResolver {
         } catch (_) {}
         return null;
     }
-    get(f, o, label) {
+    get(f, o) {
         try { const m = BdApi.Webpack.getModule(f, o); if (m) return m; } catch (_) {}
-        if (label) return this._tryBridgeModuleHint("structuralModule", label) ?? this._tryBridgeModuleHint("sourceString", label);
         return null;
     }
-    getBySource(s, o, label) {
+    getBySource(s, o) {
         try { const m = BdApi.Webpack.getBySource(s, o); if (m) return m; } catch (_) {}
-        if (label) return this._tryBridgeModuleHint("sourceString", label);
         return null;
     }
-    getWithKey(f, label) {
+    getWithKey(f) {
         try {
             const raw = BdApi.Webpack.getWithKey(f);
             if (raw) {
@@ -221,33 +58,12 @@ class ModuleResolver {
                 }
             }
         } catch (_) {}
-        if (label) {
-            const m = this._tryBridgeModuleHint("sourceString", label);
-            if (m) return [m, null];
-        }
         return null;
     }
     findByKeys(...keys) {
         for (const key of keys) { try { const m = BdApi.Webpack.getByKeys(key); if (m) return m; } catch (_) {} }
         try { const m = this.get(mod => mod && typeof mod === 'object' && keys.every(k => k in mod)); if (m) return m; } catch (_) {}
         try { return BdApi.Webpack.getByKeys(...keys); } catch (_) { return null; }
-    }
-    findByKeysWithHint(label, ...keys) {
-        const m = this.findByKeys(...keys);
-        if (m) return m;
-        if (label) return this._tryBridgeModuleHint("structuralModule", label);
-        return null;
-    }
-    _tryBridgeModuleHint(kind, label) {
-        if (!this.bridge || !this.bridge.isAvailable()) return null;
-        const hint = this.bridge.getModuleHint(kind, label);
-        if (!hint || !hint.found || !hint.matchedVia) return null;
-        const ids = Array.isArray(hint.matchedVia) ? hint.matchedVia : [hint.matchedVia];
-        for (const id of ids) {
-            const mod = this._resolveModuleId(id);
-            if (mod) { this._recordHintUsed(label); return mod; }
-        }
-        return null;
     }
     findFnKey(mod, ...needles) {
         if (!mod || typeof mod !== 'object') return null;
@@ -328,10 +144,6 @@ class HealthMonitor {
         this.checks = {};
         this._timer = null;
         this._degraded = {};
-        this._publishSourcePluginName = "ByeBlocked";
-        this._publishKey = "healthSnapshotForProbe";
-        this._publishDebounceMs = 2000;
-        this._publishTimer = null;
     }
     register(name, checkFn, fallbackFn, failThreshold = 2) {
         this.checks[name] = { checkFn, fallbackFn, failStreak: 0, failThreshold, totalFailures: 0, degradedCount: 0, lastHeartbeatAt: null };
@@ -353,12 +165,9 @@ class HealthMonitor {
     }
     stop() {
         if (this._timer) { clearInterval(this._timer); this._timer = null; }
-        if (this._publishTimer) { clearTimeout(this._publishTimer); this._publishTimer = null; }
-        this._publishNow();
     }
     _runAll() {
         for (const name in this.checks) this._runOne(name);
-        this._schedulePublish();
     }
     _runOne(name) {
         const entry = this.checks[name];
@@ -402,46 +211,6 @@ class HealthMonitor {
         }));
         console.table(rows);
         return rows;
-    }
-    _schedulePublish() {
-        if (this._publishTimer) return;
-        this._publishTimer = setTimeout(() => {
-            this._publishTimer = null;
-            this._publishNow();
-        }, this._publishDebounceMs);
-    }
-    _publishNow() {
-        try {
-            if (typeof BdApi === "undefined" || !BdApi.Data || typeof BdApi.Data.save !== "function") return;
-            const checks = Object.keys(this.checks).map(name => ({
-                name,
-                degraded: this.isDegraded(name),
-                failStreak: this.checks[name].failStreak,
-                totalFailures: this.checks[name].totalFailures,
-                degradedCount: this.checks[name].degradedCount,
-                failThreshold: this.checks[name].failThreshold ?? 2,
-                lastHeartbeatAt: this.checks[name].lastHeartbeatAt ?? null,
-                msSinceHeartbeat: this.msSinceHeartbeat(name),
-                lastError: this.checks[name].lastError ? (this.checks[name].lastError.message || String(this.checks[name].lastError)) : null
-            }));
-            const buildNumber = (() => {
-                try {
-                    return (window?.GLOBAL_ENV?.RELEASE_CHANNEL && window?.GLOBAL_ENV?.BUILD_NUMBER)
-                        ? `${window.GLOBAL_ENV.RELEASE_CHANNEL}-${window.GLOBAL_ENV.BUILD_NUMBER}`
-                        : null;
-                } catch (_) { return null; }
-            })();
-            const usedProbeHintFor = (() => {
-                try { return this.p?._r?.getUsedProbeHints?.() || []; } catch (_) { return []; }
-            })();
-            BdApi.Data.save(this._publishSourcePluginName, this._publishKey, {
-                schemaVersion: "0.4.1",
-                publishedAt: Date.now(),
-                discordBuildNumber: buildNumber,
-                usedProbeHintFor,
-                checks
-            });
-        } catch (_) {}
     }
 }
 
@@ -830,73 +599,6 @@ module.exports = class ByeBlocked {
             ChannelStatusStore: ["ChannelStatusStore", "VoiceChannelStatusStore", "ChannelStatusesStore"],
         };
     }
-    static get DEPENDENCY_MANIFEST() {
-        return [
-            { label: "RelationshipStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.RELATIONSHIP },
-            { label: "GuildMemberStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.GUILD_MEMBER },
-            { label: "ReactionsStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.REACTIONS },
-            { label: "SortedVoiceStateStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.VOICE_STATE, requiresContext: "voiceCall" },
-            { label: "StageChannelParticipantStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.STAGE_PARTICIPANT, requiresContext: "stageChannel" },
-            { label: "StageInstanceStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.STAGE_INSTANCE, requiresContext: "stageChannel" },
-            { label: "ActivityStore", kind: "storeName", candidates: ByeBlocked.STORE_NAMES.ACTIVITY, requiresContext: "voiceCallWithActivity" },
-
-            { label: "ChannelStore", kind: "storeName", candidates: ["ChannelStore", "ChannelsStore"] },
-            { label: "MessageStore", kind: "storeName", candidates: ["MessageStore", "MessagesStore", "ChannelMessagesStore"] },
-            { label: "UserStore", kind: "storeName", candidates: ["UserStore", "UsersStore", "CurrentUserStore"] },
-            { label: "SelectedGuildStore", kind: "storeName", candidates: ["SelectedGuildStore", "SelectedGuildIdStore"] },
-            { label: "SelectedChannelStore", kind: "storeName", candidates: ["SelectedChannelStore", "ChannelSelectedStore"] },
-            { label: "CallStore", kind: "storeName", candidates: ["CallStore", "VoiceCallStore"], requiresContext: "voiceCall" },
-            { label: "VoiceStateStore", kind: "storeName", candidates: ["VoiceStateStore", "VoiceStatesStore"], requiresContext: "voiceCall" },
-            { label: "MediaEngineStore", kind: "storeName", candidates: ["MediaEngineStore", "MediaEngineManagerStore"], requiresContext: "voiceCallWithVideo" },
-            { label: "ReadStateStore", kind: "storeName", candidates: ["ReadStateStore", "ChannelReadStateStore", "ReadStatesStore"] },
-            { label: "GuildReadStateStore", kind: "storeName", candidates: ["GuildReadStateStore", "GuildUnreadStore", "GuildReadStatesStore"] },
-            { label: "GuildChannelStore", kind: "storeName", candidates: ["GuildChannelStore", "GuildChannelsStore"] },
-            { label: "GuildStore", kind: "storeName", candidates: ["GuildStore", "GuildsStore"] },
-            { label: "PrivateChannelStore", kind: "storeName", candidates: ["PrivateChannelStore", "PrivateChannelsStore"],
-              methodFallback: {
-                  storeCandidates: ["ChannelStore", "ChannelsStore"],
-                  originalMethodNames: ["getPrivateChannelIds", "getMutablePrivateChannels", "getPrivateChannels"],
-                  methodNames: ["getSortedPrivateChannels"]
-              } },
-            { label: "NotificationSettingsStore", kind: "storeName", candidates: ["NotificationSettingsStore", "NotificationStore"] },
-            { label: "UserGuildSettingsStore", kind: "storeName", candidates: ["UserGuildSettingsStore", "GuildSettingsStore"] },
-            { label: "ChannelPinsStore", kind: "storeName", candidates: ["ChannelPinsStore", "PinnedMessagesStore"] },
-            { label: "ActiveJoinedThreadsStore", kind: "storeName", candidates: ["ActiveJoinedThreadsStore", "JoinedThreadsStore"] },
-            { label: "ThreadStore", kind: "storeName", candidates: ["ActiveThreadsStore", "ThreadStore", "ForumChannelStore", "GuildThreadStore", "ThreadsStore"] },
-            { label: "GuildScheduledEventStore", kind: "storeName", candidates: ["GuildScheduledEventStore", "ScheduledEventStore", "GuildEventsStore"] },
-            { label: "ChannelStatusStore", kind: "storeName", candidates: ["ChannelStatusStore", "VoiceChannelStatusStore", "ChannelStatusesStore"] },
-
-            { label: "RelationshipUtils", kind: "structuralModule", filter: { keys: ["addRelationship", "removeRelationship"] } },
-            { label: "RTCConnectionUtils", kind: "structuralModule", filter: { keys: ["getChannelId", "getGuildId"], requireFunctions: true }, requiresContext: "voiceCall" },
-            { label: "RTCParticipantsModule", kind: "structuralModule",
-              filter: { keysAny: ["getParticipants", "getVoiceParticipants"], excludeKeys: ["getChannelId"], requireFunctions: true, searchExports: true },
-              requiresContext: "voiceCall" },
-
-            { label: "SoundUtils function", kind: "sourceString", needles: ["disableSounds", "getSoundpack"], minHits: 2,
-              fuzzyFallback: { needles: ["playSound", "playFile"] } },
-            { label: "BlockedMessageGroup render", kind: "sourceString",
-              needles: ["MESSAGE_GROUP_BLOCKED", "blockedMessageGroup", "BlockedMessages", "blockedMessages", "messageGroupSpacing", "isBlockedMessage", "BLOCKED_MESSAGE"],
-              minHits: 2 },
-            { label: "MessagesWrap component", kind: "sourceString", needles: ["MessagesWrap"], minHits: 1 },
-            { label: "InviteQueryModule (queryFriends/queryDMUsers)", kind: "sourceString",
-              needles: ["queryFriends", "queryDMUsers", "friendSuggestions"], minHits: 2 },
-            { label: "Autocomplete row component (patchAutocompleteRowComponent target)", kind: "sourceString",
-              needles: ["autocomplete", "aria-selected", "user", "userId"], minHits: 3 },
-            { label: "Forum post card component (patchForumPostComponent target)", kind: "sourceString",
-              needles: ["mainCard_", "forumPostItem", "ForumPostCard", "forum-channel-list-"], minHits: 2 },
-            { label: "Member list row component (source-string heuristic, patchMemberListRow)", kind: "sourceString",
-              needles: [
-                  "guildId", "user",
-                  "isOwner", "isMobileOnline", "isVROnline", "premiumSince",
-                  "colorString", "avatarDecoration", "statusColor", "activity"
-              ], minHits: 3, requiresContext: "memberListOpen",
-            },
-
-            { label: "Flux Dispatcher", kind: "sourceString", needles: ["dispatch", "subscribe"], minHits: 2,
-              fuzzyFallback: { needles: ["dispatchAction", "connectStore"] },
-            },
-        ];
-    }
     static get RELATIONSHIP_METHOD_NAMES() {
         return {
             isBlocked: ["isBlocked", "isBlockedUser", "getIsBlocked"],
@@ -924,7 +626,7 @@ module.exports = class ByeBlocked {
         this.isRunning = false;
         this.logger = new Logger(this.pluginName);
         
-        this._r = new ModuleResolver({ bridge: this.probeScannerBridge = new ProbeScannerBridge() });
+        this._r = new ModuleResolver();
         this.modules = {};
         this.hiddenElements = new Set;
         this.hiddenParents = new Set;
@@ -1100,7 +802,6 @@ module.exports = class ByeBlocked {
         return null;
     }
     _wpGetModuleByKeys(...keys) { return this._r ? this._r.findByKeys(...keys) : this._wpGetModuleByKeysLegacy(...keys); }
-    _wpGetModuleByKeysWithHint(label, ...keys) { return this._r ? this._r.findByKeysWithHint(label, ...keys) : this._wpGetModuleByKeysLegacy(...keys); }
     _wpGetModuleByKeysLegacy(...keys) {
         for (const key of keys) { try { const mod = BdApi.Webpack.getByKeys(key); if (mod) return mod; } catch (_) {} }
         try { const mod = BdApi.Webpack.getModule(m => m && typeof m === 'object' && keys.every(k => k in m)); if (mod) return mod; } catch (_) {}
@@ -4064,22 +3765,8 @@ module.exports = class ByeBlocked {
         this._nmbMissingCoreModules = missing;
         if (missing.length) {
             this.logger.warn(`Essential modules not found: ${missing.join(", ")}. Discord likely changed something internally - related features may not work until the plugin is updated.`);
-            this._nmbMaybeWarnViaProbe(missing);
         }
         return missing;
-    }
-    _nmbMaybeWarnViaProbe(missingNames) {
-        try {
-            if (!this.probeScannerBridge || !this.probeScannerBridge.isAvailable()) return;
-            const confirmedBreaks = this.probeScannerBridge.getConfirmedBreaks();
-            if (!confirmedBreaks.length) return;
-            const relevant = confirmedBreaks.filter(c => missingNames.some(name => c.label.includes(name) || name.includes(c.label)));
-            if (!relevant.length) return;
-            const age = this.probeScannerBridge.getSnapshotAgeLabel();
-            const labels = relevant.map(c => c.label).join(", ");
-            this.toast(`ByeBlocked: ${labels} confirmed missing by Probe (scan ${age} ago). Some features may be broken until Discord's internals stabilize or the plugin updates.`, "warn");
-        } catch (_) {
-        }
     }
     patchPrivateChannelStore(attempt = 0) {
         if (this._privateChannelStorePatched) return;
@@ -7237,18 +6924,6 @@ return false;
         );
 
         this._health.start();
-        this.publishDependencyManifest();
-    }
-    publishDependencyManifest() {
-        try {
-            if (typeof BdApi === "undefined" || !BdApi.Data || typeof BdApi.Data.save !== "function") return;
-            BdApi.Data.save(this.pluginName, "dependencyManifest", {
-                schemaVersion: "1.0",
-                publishedAt: Date.now(),
-                pluginVersion: ByeBlocked.VERSION || null,
-                dependencies: ByeBlocked.DEPENDENCY_MANIFEST
-            });
-        } catch (_) {}
     }
     _sweepOrphanedScrollMasks() {
         try {
