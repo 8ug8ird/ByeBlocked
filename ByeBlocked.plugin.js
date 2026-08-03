@@ -5211,7 +5211,6 @@ return false;
         if (Array.isArray(value)) {
             if (value.length > 0) {
                 const filtered = value.filter(msg => !this.isBlockedMessageData(msg));
-                if (filtered.length === 0) return value;
                 return filtered.length === value.length ? value : filtered;
             }
             return value;
