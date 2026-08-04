@@ -1,0 +1,64 @@
+name: Bug Report
+description: Report a problem with ByeBlocked
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening this issue, make sure you're using the **latest version** of the plugin and BetterDiscord.
+
+  - type: input
+    id: byeblocked-version
+    attributes:
+      label: ByeBlocked version
+      description: Check in BetterDiscord > Plugins, or in console via `BdApi.Plugins.get("ByeBlocked").version`
+      placeholder: "e.g. 1.4.2"
+    validations:
+      required: true
+
+  - type: input
+    id: betterdiscord-version
+    attributes:
+      label: BetterDiscord version
+      placeholder: "e.g. 1.11.2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: bug-description
+    attributes:
+      label: Bug description
+      description: What happened? What did you expect to happen?
+      placeholder: Describe the problem in as much detail as possible
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: How can this be reproduced from scratch?
+      placeholder: |
+        1. Open Discord
+        2. Block/ignore a user
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: console-errors
+    attributes:
+      label: Console errors (DevTools)
+      description: Open DevTools (Ctrl+Shift+I) and paste any errors related to ByeBlocked
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Other installed plugins, themes, or any other relevant information
+    validations:
+      required: false
