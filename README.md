@@ -1,7 +1,7 @@
 <div align="center">
-<img src="assets/img3.png" width="900" alt="ByeBlocked Banner">
+<img src="assets/img.png" width="900" alt="ByeBlocked Banner">
 
-**Discord reminds you they're blocked. ByeBlocked makes you forget they exist.**
+**Blocked. Ignored. Gone.**
 
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-plugin-5865F2)](https://betterdiscord.app)
 [![Version](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
