@@ -1,5 +1,5 @@
 <div align="center">
-<img src="assets/img1.png" width="900" alt="ByeBlocked Banner">
+<img src="assets/B.png" width="900" alt="ByeBlocked Banner">
 
 **Blocked. Ignored. Gone.**
 
