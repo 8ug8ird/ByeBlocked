@@ -7,7 +7,6 @@
 [![Version](https://img.shields.io/github/v/release/StayedBehind/ByeBlocked)](https://github.com/StayedBehind/ByeBlocked/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/StayedBehind/ByeBlocked/total)](https://github.com/StayedBehind/ByeBlocked/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/StayedBehind/ByeBlocked/blob/main/LICENSE)
-[![CI](https://github.com/StayedBehind/ByeBlocked/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/StayedBehind/ByeBlocked/actions/workflows/ci.yml)
 
 </div>
 
