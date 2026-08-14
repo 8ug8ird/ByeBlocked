@@ -3,10 +3,10 @@
 
 **Blocked. Ignored. Gone.**
 
-[![BetterDiscord](https://img.shields.io/badge/BetterDiscord-plugin-3385E8)](https://betterdiscord.app)
-[![Version](https://img.shields.io/github/v/release/StayedBehind/ByeBlocked)](https://github.com/StayedBehind/ByeBlocked/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/StayedBehind/ByeBlocked/total)](https://github.com/StayedBehind/ByeBlocked/releases)
-[![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/StayedBehind/ByeBlocked/blob/main/LICENSE)
+[![BetterDiscord](https://img.shields.io/badge/BetterDiscord-5865F2?style=flat-square&logo=discord&logoColor=white)](https://betterdiscord.app)
+[![Latest Release](https://img.shields.io/github/v/release/StayedBehind/ByeBlocked?style=flat-square&label=Latest%20Release&color=3385E8)](https://github.com/StayedBehind/ByeBlocked/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/StayedBehind/ByeBlocked/total?style=flat-square&label=Downloads&color=3385E8)](https://github.com/StayedBehind/ByeBlocked/releases)
+[![License](https://img.shields.io/github/license/StayedBehind/ByeBlocked?style=flat-square&label=License&color=3385E8)](https://github.com/StayedBehind/ByeBlocked/blob/main/LICENSE)
 
 </div>
 
