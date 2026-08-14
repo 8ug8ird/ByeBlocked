@@ -4,9 +4,9 @@
 **Blocked. Ignored. Gone.**
 
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-3385E8?style=flat-square&logo=discord&logoColor=white)](https://betterdiscord.app)
-[![Latest Release](https://img.shields.io/github/v/release/StayedBehind/ByeBlocked?style=flat-square&label=Latest%20Release&color=3385E8)](https://github.com/StayedBehind/ByeBlocked/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/StayedBehind/ByeBlocked/total?style=flat-square&label=Downloads&color=3385E8)](https://github.com/StayedBehind/ByeBlocked/releases)
-[![License](https://img.shields.io/github/license/StayedBehind/ByeBlocked?style=flat-square&label=License&color=3385E8)](https://github.com/StayedBehind/ByeBlocked/blob/main/LICENSE)
+[![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=flat-square&label=Latest%20Release&color=3385E8)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=flat-square&label=Downloads&color=3385E8)](https://github.com/8ug8ird/ByeBlocked/releases)
+[![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=flat-square&label=License&color=3385E8)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
 </div>
 
@@ -30,7 +30,7 @@
 
 Requires [BetterDiscord](https://betterdiscord.app) to be installed.
 
-1. Download the plugin from [Releases](https://github.com/StayedBehind/ByeBlocked/releases)
+1. Download the plugin from [Releases](https://github.com/8ug8ird/ByeBlocked/releases)
 2. Go to **Settings > Plugins > Open Plugins Folder**
 3. Drop the file in and enable it
 
@@ -38,7 +38,7 @@ Requires [BetterDiscord](https://betterdiscord.app) to be installed.
 
 Found a bug or an edge case?
 
-Feel free to open an [Issue](https://github.com/StayedBehind/ByeBlocked/issues). Bug reports, feature requests, and implementation ideas are always welcome.
+Feel free to open an [Issue](https://github.com/8ug8ird/ByeBlocked/issues). Bug reports, feature requests, and implementation ideas are always welcome.
 
 <br>
 
@@ -47,4 +47,4 @@ Feel free to open an [Issue](https://github.com/StayedBehind/ByeBlocked/issues).
 
 <br>
 
-MIT © [StayedBehind](https://github.com/StayedBehind)
+MIT © [8ug8ird](https://github.com/8ug8ird) 🐦
