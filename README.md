@@ -1,14 +1,8 @@
 <div align="center">
-<img src="assets/B.png" width="900" alt="Banner">
+  <img src="assets/B.png" width="900" alt="Banner">
+</div>
 
 <br>
-
-[![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-5865F2?style=flat-square&logo=discord&logoColor=white)](https://betterdiscord.app)
-[![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=flat-square&label=Latest%20Release)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=flat-square&label=Downloads)](https://github.com/8ug8ird/ByeBlocked/releases)
-[![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=flat-square&label=License)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
-
-</div>
 
 ## Features
 
@@ -23,6 +17,13 @@
 <br>
 
 <div align="center">
+
+[![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-5865F2?style=flat-square&logo=discord&logoColor=white)](https://betterdiscord.app)
+[![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=flat-square&label=Latest%20Release)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=flat-square&label=Downloads)](https://github.com/8ug8ird/ByeBlocked/releases)
+[![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=flat-square&label=License)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
+
+
 <img src="assets/Discord_ubFapzaaLs-output.gif" width="800" alt="ByeBlocked Preview">
 </div>
 
