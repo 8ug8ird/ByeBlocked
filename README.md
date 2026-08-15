@@ -1,7 +1,7 @@
 <div align="center">
 <img src="assets/B.png" width="900" alt="Banner">
 
-**Blocked. Ignored. Gone.**
+<br>
 
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-5865F2?style=flat-square&logo=discord&logoColor=white)](https://betterdiscord.app)
 [![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=flat-square&label=Latest%20Release)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
