@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.7.1
+ * @version 2.7.2
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -78,9 +78,9 @@ class ModuleResolver {
 }
 class PatchManager {
     constructor(p) { this.p = p; this.failCounts = {}; }
-    before(t, m, fn) { try { if (!t?.[m]) return; BdApi.Patcher.before(this.p.pluginName, t, m, fn); } catch (_) {} }
-    after(t, m, fn) { try { if (!t?.[m]) return; BdApi.Patcher.after(this.p.pluginName, t, m, fn); } catch (_) {} }
-    instead(t, m, fn) { try { if (!t?.[m]) return; BdApi.Patcher.instead(this.p.pluginName, t, m, fn); } catch (_) {} }
+    before(t, m, fn) { try { if (!t?.[m]) return; return BdApi.Patcher.before(this.p.pluginName, t, m, fn); } catch (_) {} }
+    after(t, m, fn) { try { if (!t?.[m]) return; return BdApi.Patcher.after(this.p.pluginName, t, m, fn); } catch (_) {} }
+    instead(t, m, fn) { try { if (!t?.[m]) return; return BdApi.Patcher.instead(this.p.pluginName, t, m, fn); } catch (_) {} }
     safe(l, fn) { try { fn(); return true; } catch (e) { this._warn(l, e); return false; } }
     cleanup() { try { BdApi.Patcher.unpatchAll(this.p.pluginName); } catch (_) {} }
     _logFail(l, err) { this._warn(l, err); }
@@ -443,10 +443,11 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.7.1";
+    static VERSION="2.7.2";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
+    static STAGE_USER_SELECTOR = '[class*="stageUser_"], [class*="stageListener_"], [class*="stageSpeaker_"], [class*="participantRow_"], [class*="stageSection_"] [class*="user_"], [class*="stageSection_"] [data-list-item-id], [class*="voiceUser__"]';
     static UPDATE_ALLOWED_HOSTS = [
         "api.github.com",
         "github.com",
@@ -1676,10 +1677,22 @@ module.exports = class ByeBlocked {
             const store = this.modules.MessageStore;
             const rawGet = this._rawGetMessages || store?.getMessages || store?.getMessagesForChannel || store?.getMessagesForChannelId;
             const ret = typeof rawGet === "function" ? rawGet.call(store, channelId) : null;
-            if (Array.isArray(ret)) return ret;
-            if (Array.isArray(ret?._array)) return ret._array;
-            if (ret instanceof Map) return Array.from(ret.values());
-            if (ret && typeof ret === "object") return Object.values(ret);
+            let list = null;
+            if (Array.isArray(ret)) list = ret;
+            else if (Array.isArray(ret?._array)) list = ret._array;
+            else if (ret instanceof Map) list = Array.from(ret.values());
+            else if (ret && typeof ret === "object") list = Object.values(ret);
+            if (list) {
+                try {
+                    for (let i = 0; i < list.length; i++) {
+                        const m = list[i];
+                        const mid = m?.id;
+                        const aid = m?.author?.id;
+                        if (mid && aid) this._recordMessageAuthor(mid, aid);
+                    }
+                } catch (_) {}
+                return list;
+            }
         } catch (_) {}
         return [];
     }
@@ -3374,6 +3387,7 @@ module.exports = class ByeBlocked {
         }
         this._suppressGroupAddSoundMessageId = null;
         this._suppressMentionSoundCredits = [];
+        this._messageStoreUnpatchFns = null;
         clearTimeout(this._moduleRetryTimeout);
         this._moduleRetryTimeout = null;
         clearTimeout(this._taskbarBadgeRelationshipRetryTimeout);
@@ -3436,10 +3450,7 @@ module.exports = class ByeBlocked {
             clearInterval(this._stageRootWatchInterval);
             this._stageRootWatchInterval = null;
         }
-        clearTimeout(this._shortLivedMsgObserverTimeout);
-        this._shortLivedMsgObserverTimeout = null;
-        this._shortLivedMsgObserver?.disconnect();
-        this._shortLivedMsgObserver = null;
+        this._stopShortLivedMessageObserver();
         if (this._reactionClickHandler) {
             document.removeEventListener("click", this._reactionClickHandler, true);
             this._reactionClickHandler = null;
@@ -5007,6 +5018,11 @@ return false;
     }
     patchStageRenderComponent(attempt = 0) {
         if (this._stageRenderComponentPatched) return;
+        if (this._stageRenderComponentUnavailable) return;
+        if (attempt === 0) {
+            if (this._stageRenderComponentPatchInProgress) return;
+            this._stageRenderComponentPatchInProgress = true;
+        }
         const self = this;
         const unwrapComponent = v => {
             if (typeof v === "function") return v;
@@ -5063,15 +5079,26 @@ return false;
                     if (!srcFilter(wholeModule[key])) continue;
                     if (doPatch(wholeModule, key)) {
                         this._stageRenderComponentPatched = true;
+                        this._stageRenderComponentPatchInProgress = false;
                         return;
                     }
                 }
             }
         } catch (_) {}
-        if (!this._stageRenderComponentPatched && attempt < 20) {
+        if (!this._stageRenderComponentPatched && attempt < 8) {
             this._scheduleRetry(() => this.patchStageRenderComponent(attempt + 1), this._retryDelay(attempt, 3000));
         } else if (!this._stageRenderComponentPatched) {
-            this._patcher._logFail("patchStageRenderComponent", new Error("ran out of attempts - weak indicators did not find the module; see maintenance notes"));
+            this._scheduleRetry(() => this._finalizeStageRenderComponentUnavailable(), 4000);
+        }
+    }
+    _finalizeStageRenderComponentUnavailable() {
+        if (this._stageRenderComponentPatched) return;
+        this._stageRenderComponentUnavailable = true;
+        this._stageRenderComponentPatchInProgress = false;
+        if (this._voiceUserComponentPatched) {
+            this.logger.info("patchStageRenderComponent: dedicated Stage seat component no longer found (likely merged into the voice-user row in a recent Discord update). No action needed - patchVoiceUserComponent and the DOM fallback already cover blocked users in Stage/voice channels.");
+        } else {
+            this._patcher._logFail("patchStageRenderComponent", new Error("ran out of attempts - weak indicators did not find the module; this dedicated stage seat component may have been merged into the voice user row / call grid components in a recent Discord update, both of which have their own independent patches. See maintenance notes."));
         }
     }
     patchActivityPanelComponent(attempt = 0) {
@@ -5377,9 +5404,10 @@ return false;
             if (!messages.length) return false;
             return messages.every(msg => this.isBlockedMessageData(msg));
         };
-        try {
-            const msgEl = document.querySelector('[class*="message_"]');
-            if (msgEl) {
+        const tryPatchOnce = () => {
+            try {
+                const msgEl = document.querySelector('[class*="message_"]');
+                if (!msgEl) return false;
                 const Comp = this.findComponentViaFiber(msgEl, (type, props) => {
                     if (!props || typeof props !== "object") return false;
                     if (!("messages" in props) || !("showingQuarantineBanner" in props)) return false;
@@ -5388,52 +5416,76 @@ return false;
                         return BLOCKED_STRINGS.filter(s => src.includes(s)).length >= BLOCKED_REQUIRED;
                     } catch (_) { return false; }
                 }, 30, "patchBlockedMessageGroup:fiberWalk");
-                if (Comp && !Comp.__byeblockedGroupPatched) {
-                    let didPatch = false;
+                if (!Comp || Comp.__byeblockedGroupPatched) return false;
+                let didPatch = false;
+                try {
+                    const found = this._wpGetModuleWithKey(m => m === Comp, "BlockedMessageGroup render");
+                    if (found?.[0] && found[1] != null) {
+                        this.patchInstead(found[0], found[1], function(ctx, args, orig) {
+                            try {
+                                const props = args?.[0] || ctx?.props;
+                                if (shouldSuppressBlockedGroup(props)) return null;
+                            } catch (_) {}
+                            return orig.apply(ctx, args);
+                        });
+                        didPatch = true;
+                    }
+                } catch (_) {}
+                if (!didPatch) {
                     try {
-                        const found = this._wpGetModuleWithKey(m => m === Comp, "BlockedMessageGroup render");
-                        if (found?.[0] && found[1] != null) {
-                            this.patchInstead(found[0], found[1], function(ctx, args, orig) {
+                        const wrapper = new Proxy(Comp, {
+                            apply(target, thisArg, args) {
                                 try {
-                                    const props = args?.[0] || ctx?.props;
+                                    const props = args?.[0];
                                     if (shouldSuppressBlockedGroup(props)) return null;
                                 } catch (_) {}
-                                return orig.apply(ctx, args);
-                            });
-                            didPatch = true;
-                        }
+                                return Reflect.apply(target, thisArg, args);
+                            }
+                        });
+                        const container = { Comp };
+                        this.patchInstead(container, "Comp", () => wrapper);
+                        didPatch = true;
                     } catch (_) {}
-                    if (!didPatch) {
-                        try {
-                            const wrapper = new Proxy(Comp, {
-                                apply(target, thisArg, args) {
-                                    try {
-                                        const props = args?.[0];
-                                        if (shouldSuppressBlockedGroup(props)) return null;
-                                    } catch (_) {}
-                                    return Reflect.apply(target, thisArg, args);
-                                }
-                            });
-                            const container = { Comp };
-                            this.patchInstead(container, "Comp", () => wrapper);
-                            didPatch = true;
-                        } catch (_) {}
-                    }
-                    if (didPatch) {
-                        Comp.__byeblockedGroupPatched = true;
-                        this._blockedMsgGroupPatched = true;
-                        this._retryGuardExit("patchBlockedMessageGroup");
-                        return;
-                    }
                 }
+                if (didPatch) {
+                    Comp.__byeblockedGroupPatched = true;
+                    this._blockedMsgGroupPatched = true;
+                    return true;
+                }
+                return false;
+            } catch (_) {
+                return false;
             }
-        } catch (_) {}
-        if (attempt < 6) {
-            this._scheduleRetry(() => this.patchBlockedMessageGroup(attempt + 1), this._retryDelay(attempt, 5000));
+        };
+        if (tryPatchOnce()) {
+            this._retryGuardExit("patchBlockedMessageGroup");
+            this._stopShortLivedMessageObserver();
             return;
         }
+        if (attempt === 0) {
+            this._startPersistentBlockedGroupObserver(tryPatchOnce, () => {
+                this._blockedMsgGroupPatched = true;
+                this._retryGuardExit("patchBlockedMessageGroup");
+            });
+        }
+        if (attempt < 45) {
+            this._scheduleRetry(() => this.patchBlockedMessageGroup(attempt + 1), this._retryDelay(attempt, 2000));
+            return;
+        }
+        this._stopShortLivedMessageObserver();
         this._patcher?._warn("patchBlockedMessageGroup", new Error("ran out of attempts to locate and patch the blocked-message-group component via fiber walk or proxy wrap - Discord may have changed this component's structure"));
         this._retryGuardExit("patchBlockedMessageGroup");
+    }
+    _startPersistentBlockedGroupObserver(tryFn, onSuccess, _cyclesLeft = 3) {
+        this._startShortLivedMessageObserver(tryFn, onSuccess);
+        clearTimeout(this._blockedGroupObserverRenewTimeout);
+        if (_cyclesLeft <= 0) return;
+        this._blockedGroupObserverRenewTimeout = setTimeout(() => {
+            if (!this.isRunning) return;
+            if (this._blockedMsgGroupPatched) return;
+            if (!this._shortLivedMsgObserver) return;
+            this._startPersistentBlockedGroupObserver(tryFn, onSuccess, _cyclesLeft - 1);
+        }, 30000);
     }
     isBlockedMessageData(message, referencedMessage = null) {
         if (!message || typeof message !== "object") return false;
@@ -5441,9 +5493,17 @@ return false;
             if (message.blocked === true) return true;
             const authorId = message.author?.id || null;
             if (authorId && this.shouldHide(authorId)) return true;
-            const ref = referencedMessage || this.getReferencedMessage(message);
-            const refAuthorId = ref?.author?.id || null;
-            if (refAuthorId && this.shouldHide(refAuthorId)) return true;
+            const refId = (message?.messageReference || message?.message_reference)?.message_id
+                || (message?.messageReference || message?.message_reference)?.messageId
+                || null;
+            const cachedRefAuthorId = refId ? this._lookupMessageAuthor(refId) : null;
+            if (cachedRefAuthorId) {
+                if (this.shouldHide(cachedRefAuthorId)) return true;
+            } else {
+                const ref = referencedMessage || this.getReferencedMessage(message);
+                const refAuthorId = ref?.author?.id || null;
+                if (refAuthorId && this.shouldHide(refAuthorId)) return true;
+            }
             const mentions = message.mentions;
             if (Array.isArray(mentions) && mentions.length) {
                 for (let i = 0; i < mentions.length; i++) {
@@ -5947,13 +6007,19 @@ return false;
             this._retryGuardExit("patchMessageStore");
             return;
         }
+        if (Array.isArray(this._messageStoreUnpatchFns) && this._messageStoreUnpatchFns.length) {
+            for (const unpatch of this._messageStoreUnpatchFns) {
+                try { unpatch?.(); } catch (_) {}
+            }
+        }
+        this._messageStoreUnpatchFns = [];
         this._resolveMessagesGet();
         const self = this;
         const methods = [ "getMessages", "getMessagesForChannel", "getMessagesForChannelId" ];
         let patchedAny = false;
         for (const method of methods) {
             if (typeof store[method] === "function") {
-                this.patchAfter(store, method, function(_, args, ret) {
+                const unpatch = this.patchAfter(store, method, function(_, args, ret) {
                     self._scanForBlockedPinSystemMessages(ret);
                     if (!self.settings.places.messages) return ret;
                     try {
@@ -5962,6 +6028,7 @@ return false;
                         return ret;
                     }
                 });
+                if (typeof unpatch === "function") this._messageStoreUnpatchFns.push(unpatch);
                 patchedAny = true;
             }
         }
@@ -6158,15 +6225,36 @@ return false;
         if (msg.type === expected) return true;
         return this._looksLikeMessageOfType(msg, typeKey);
     }
+    _recordMessageAuthor(messageId, authorId) {
+        if (!messageId || !authorId) return;
+        if (!this._msgAuthorCache) this._msgAuthorCache = new Map();
+        const MAX_SIZE = 3000;
+        if (this._msgAuthorCache.size >= MAX_SIZE && !this._msgAuthorCache.has(String(messageId))) {
+            const oldestKey = this._msgAuthorCache.keys().next().value;
+            if (oldestKey !== undefined) this._msgAuthorCache.delete(oldestKey);
+        }
+        this._msgAuthorCache.set(String(messageId), String(authorId));
+    }
+    _lookupMessageAuthor(messageId) {
+        if (!messageId || !this._msgAuthorCache) return null;
+        return this._msgAuthorCache.get(String(messageId)) || null;
+    }
     _isBlockedMessage(msg) {
         if (!msg) return false;
         if (msg.blocked === true) return true;
         const authorId = this._getAuthorId(msg);
         if (authorId && this.shouldHide(authorId)) return true;
         try {
-            const ref = this.getReferencedMessage(msg);
-            const refAuthorId = ref?.author?.id || null;
-            if (refAuthorId && this.shouldHide(refAuthorId)) return true;
+            const refId = (msg?.messageReference || msg?.message_reference)?.message_id
+                || (msg?.messageReference || msg?.message_reference)?.messageId
+                || null;
+            const cachedRefAuthorId = refId ? this._lookupMessageAuthor(refId) : null;
+            if (cachedRefAuthorId && this.shouldHide(cachedRefAuthorId)) return true;
+            if (!cachedRefAuthorId) {
+                const ref = this.getReferencedMessage(msg);
+                const refAuthorId = ref?.author?.id || null;
+                if (refAuthorId && this.shouldHide(refAuthorId)) return true;
+            }
         } catch (_) {}
         if (Array.isArray(msg.mentions)) {
             for (const mention of msg.mentions) {
@@ -6625,9 +6713,9 @@ return false;
         if (typeof rs.hasUnreadOrMentions === 'function' && rs.hasUnreadOrMentions(channelId)) return true;
         return !!rs.hasUnread?.(channelId);
     }
-    patchBefore(target, method, callback) { this._patcher?.before(target, method, callback); }
-    patchInstead(target, method, callback) { this._patcher?.instead(target, method, callback); }
-    patchAfter(target, method, callback) { this._patcher?.after(target, method, callback); }
+    patchBefore(target, method, callback) { return this._patcher?.before(target, method, callback); }
+    patchInstead(target, method, callback) { return this._patcher?.instead(target, method, callback); }
+    patchAfter(target, method, callback) { return this._patcher?.after(target, method, callback); }
     _retryGuardEnter(name, attempt) {
         if (attempt !== 0) return true;
         if (!this._retryInFlight) this._retryInFlight = {};
@@ -6775,6 +6863,7 @@ return false;
                     const authorId = msg?.author?.id;
                     const channelId = msg?.channel_id;
                     if (!authorId || !channelId) return;
+                    if (msg?.id) self._recordMessageAuthor(msg.id, authorId);
                     let parentId = null;
                     try {
                         parentId = self.modules.ChannelStore?.getChannel?.(channelId)?.parent_id || null;
@@ -6914,13 +7003,43 @@ return false;
             return false;
         }
     }
-    _startShortLivedMessageObserver() {
+    _startShortLivedMessageObserver(tryFn, onSuccess) {
+        this._stopShortLivedMessageObserver();
+        if (typeof tryFn !== "function") return;
+        const DEBOUNCE_MS = 150;
+        const MAX_LIFETIME_MS = 30000;
+        let debounceTimer = null;
+        const attempt = () => {
+            try {
+                if (tryFn()) {
+                    this._stopShortLivedMessageObserver();
+                    onSuccess?.();
+                }
+            } catch (_) {}
+        };
+        try {
+            this._shortLivedMsgObserver = new MutationObserver(() => {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(attempt, DEBOUNCE_MS);
+            });
+            this._shortLivedMsgObserver.observe(document.body, { childList: true, subtree: true });
+            this._shortLivedMsgObserverTimeout = setTimeout(() => {
+                this._stopShortLivedMessageObserver();
+            }, MAX_LIFETIME_MS);
+        } catch (_) {
+            this._stopShortLivedMessageObserver();
+        }
+    }
+    _stopShortLivedMessageObserver() {
         try {
             if (this._shortLivedMsgObserver) {
                 this._shortLivedMsgObserver.disconnect();
                 this._shortLivedMsgObserver = null;
             }
             clearTimeout(this._shortLivedMsgObserverTimeout);
+            this._shortLivedMsgObserverTimeout = null;
+            clearTimeout(this._blockedGroupObserverRenewTimeout);
+            this._blockedGroupObserverRenewTimeout = null;
         } catch (_) {}
     }
     _startChannelSwitchWatcher() {
@@ -6939,6 +7058,7 @@ return false;
                     try {
                         if (this.settings.places.messages) {
                             this.hideForumPosts();
+                            if (!this._blockedMsgGroupPatched) this.patchBlockedMessageGroup(0);
                         }
                         if (this.settings.places.memberList) this.hideMemberRows();
                         if (this.settings.places.groupDms || this.settings.places.messages) this.hidePrivateChannels();
@@ -7264,7 +7384,7 @@ return false;
             () => {
                 if (!this.settings.places?.voiceChannels) return true;
                 try {
-                    const els = document.querySelectorAll('[class*="stageUser_"], [class*="stageListener_"], [class*="stageSpeaker_"], [class*="stageSection_"] [class*="user_"]');
+                    const els = document.querySelectorAll(this.constructor.STAGE_USER_SELECTOR);
                     let sample = 0;
                     for (let i = 0; i < els.length && sample < 40; i++) {
                         const el = els[i];
@@ -7295,9 +7415,11 @@ return false;
             "stageRenderPatch",
             () => {
                 if (!this.settings.places?.voiceChannels) return true;
+                if (this._stageRenderComponentUnavailable) return true;
                 return !!this._stageRenderComponentPatched;
             },
             () => {
+                if (this._stageRenderComponentUnavailable) return;
                 this.logger.warn("The stage render patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
                 try { this._stageRenderComponentPatched = false; this.patchStageRenderComponent(); } catch (_) {}
             }
@@ -9752,7 +9874,7 @@ return false;
         return false;
     }
     hideStageUsers() {
-        const els = document.querySelectorAll('[class*="stageUser_"], [class*="stageListener_"], [class*="stageSpeaker_"], [class*="participantRow_"], [class*="stageSection_"] [class*="user_"], [class*="stageSection_"] [data-list-item-id]');
+        const els = document.querySelectorAll(this.constructor.STAGE_USER_SELECTOR);
         for (let i = 0; i < els.length; i++) {
             const el = els[i];
             if (el.dataset?.hiddenBlocked === "true") continue;
@@ -12391,8 +12513,8 @@ return false;
         }
     }
     getRawVoiceStatesForChannel(channelId) {
-        const gatewayStates = this._getRawVoiceStatesForChannelViaGateway(channelId);
         const rtcIds = this._getRtcParticipantIdsForChannel(channelId);
+        const gatewayStates = this._getRawVoiceStatesForChannelViaGateway(channelId, rtcIds);
         if (!rtcIds) return gatewayStates;
 
         const gatewayIds = new Set((gatewayStates || []).map(s => this.extractUserId(s)));
@@ -12403,21 +12525,23 @@ return false;
             .map(id => ({ userId: id, channelId }));
         return [...(gatewayStates || []), ...synthesized];
     }
-    _getRawVoiceStatesForChannelViaGateway(channelId) {
+    _getRawVoiceStatesForChannelViaGateway(channelId, knownRtcIds = null) {
         const fn = this.originalVoiceMethods.getVoiceStatesForChannel || this.modules.SortedVoiceStateStore?.getVoiceStatesForChannel?.bind(this.modules.SortedVoiceStateStore);
         const normalize = raw => {
             const states = Array.isArray(raw) ? raw : Object.values(raw || {});
             return states;
         };
         const VOICE_SIG_FAILURE_THRESHOLD = 30;
+        const hasKnownParticipants = Array.isArray(knownRtcIds) && knownRtcIds.length > 0;
         const noteLearnedSigMiss = () => {
+            if (!hasKnownParticipants) return;
             this._voiceStateCallSigMisses = (this._voiceStateCallSigMisses || 0) + 1;
             if (this._voiceStateCallSigMisses >= VOICE_SIG_FAILURE_THRESHOLD) {
                 const staleSig = this._voiceStateCallSig;
                 this._voiceStateCallSig = null;
                 this._voiceStateCallSigMisses = 0;
                 try {
-                    this.logger?.warn(`Voice state lookup (call signature ${staleSig}) returned empty ${VOICE_SIG_FAILURE_THRESHOLD} times in a row - Discord may have changed its internals. Re-learning the correct call signature.`);
+                    this.logger?.warn(`Voice state lookup (call signature ${staleSig}) returned empty ${VOICE_SIG_FAILURE_THRESHOLD} times in a row despite known RTC participants - Discord may have changed its internals. Re-learning the correct call signature.`);
                 } catch (_) {}
             }
         };
@@ -12593,9 +12717,16 @@ return false;
     }
     getReferencedMessage(message) {
         try {
-            const ref = message?.messageReference;
+            const ref = message?.messageReference || message?.message_reference;
             if (!ref) return null;
-            return this.modules.MessageStore?.getMessage?.(ref.channel_id, ref.message_id);
+            const refChannelId = ref.channel_id || ref.channelId || message?.channel_id;
+            const refMessageId = ref.message_id || ref.messageId;
+            if (!refMessageId) return null;
+            const fromStore = this.modules.MessageStore?.getMessage?.(refChannelId, refMessageId);
+            if (fromStore) return fromStore;
+            const inlineRef = message?.referenced_message || message?.referencedMessage;
+            if (inlineRef && (inlineRef.id === refMessageId || !inlineRef.id)) return inlineRef;
+            return null;
         } catch (_) {
             return null;
         }
