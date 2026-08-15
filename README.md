@@ -2,7 +2,9 @@
   <img src="assets/B.png" width="900" alt="Banner">
 </div>
 
-<br>
+
+<p align="center"><b>Blocked. Ignored. Gone.</b></p>
+
 
 <div align="center">
 
