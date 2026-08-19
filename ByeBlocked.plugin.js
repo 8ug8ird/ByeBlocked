@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.7.2
+ * @version 2.7.3
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -250,9 +250,10 @@ function _findCloseButton(dialog) {
 (function byeBlockedBootGuard() {
     let rowAtRequireTime = null;
     try {
-        try {
-            rowAtRequireTime = document.querySelector('[data-list-item-id*="private-channels"][data-list-item-id*="___"]');
-        } catch (_) {}
+        try { if (!BdApi?.Plugins?.isEnabled?.('ByeBlocked')) return; } catch (_) { return; }
+        rowAtRequireTime = document.querySelector('[data-list-item-id*="private-channels"][data-list-item-id*="___"]');
+    } catch (_) {}
+    try {
         if (document.getElementById('ByeBlocked-bootguard')) return;
         let groupDmsEnabled = true;
         try {
@@ -277,6 +278,7 @@ function _findCloseButton(dialog) {
 (function byeBlockedUnreadBadgeBootGuard() {
     try {
         if (document.getElementById('ByeBlocked-unreadbadge-bootguard')) return;
+        try { if (!BdApi?.Plugins?.isEnabled?.('ByeBlocked')) return; } catch (_) { return; }
         let messagesEnabled = true;
         try {
             const stored = BdApi?.Data?.load?.('ByeBlocked', 'settings');
@@ -294,23 +296,47 @@ function _findCloseButton(dialog) {
             }
         `;
         (document.head || document.documentElement).appendChild(style);
-        setTimeout(() => {
-            try {
-                const inst = window.__byeBlocked;
-                if (inst && typeof inst._bootstrapBlockedUnreadSuppression === 'function') {
-                    inst._bootstrapBlockedUnreadSuppression(0);
+        const removeGuard = () => {
+            try { document.getElementById('ByeBlocked-unreadbadge-bootguard')?.remove(); } catch (_) {}
+        };
+        const POLL_INTERVAL_MS = 250;
+        const HARD_TIMEOUT_MS = 20000;
+        const startedAt = Date.now();
+        const poll = () => {
+            let inst = null;
+            try { inst = window.__byeBlocked; } catch (_) {}
+            const elapsed = Date.now() - startedAt;
+            if (inst && typeof inst._bootstrapBlockedUnreadSuppression === 'function') {
+                try {
+                    const stillPending = inst._bootstrapBlockedUnreadSuppression(0);
                     try { inst._forceReadStateRecheck?.(true); } catch (_) {}
                     try { inst._refreshTaskbarBadge?.(); } catch (_) {}
+                    if (!stillPending || elapsed >= HARD_TIMEOUT_MS) {
+                        removeGuard();
+                        return;
+                    }
+                } catch (_) {
+                    if (elapsed >= HARD_TIMEOUT_MS) { removeGuard(); return; }
                 }
-            } catch (_) {}
-            try { document.getElementById('ByeBlocked-unreadbadge-bootguard')?.remove(); } catch (_) {}
-        }, 8000);
+            } else if (elapsed >= HARD_TIMEOUT_MS) {
+                removeGuard();
+                return;
+            }
+            setTimeout(poll, POLL_INTERVAL_MS);
+        };
+        setTimeout(poll, POLL_INTERVAL_MS);
     } catch (_) {}
 })();
 
 (function byeBlockedTaskbarBadgeBootRace() {
     const BOOT_RACE_PATCH_ID = 'ByeBlockedTaskbarBadgeBootRace';
+    const PLUGIN_NAME = 'ByeBlocked';
     try {
+        const isPluginEnabled = () => {
+            try { return !!BdApi?.Plugins?.isEnabled?.(PLUGIN_NAME); } catch (_) { return false; }
+        };
+        if (!isPluginEnabled()) return;
+
         let messagesEnabled = true;
         let suppressTaskbarBadge = true;
         try {
@@ -332,6 +358,7 @@ function _findCloseButton(dialog) {
             try {
                 if (typeof DiscordNative !== "undefined" && typeof DiscordNative?.app?.setBadgeCount === "function") {
                     BdApi.Patcher.before(BOOT_RACE_PATCH_ID, DiscordNative.app, "setBadgeCount", (_, args) => {
+                        if (!isPluginEnabled()) return;
                         args[0] = 0;
                     });
                     patchedNative = true;
@@ -347,10 +374,12 @@ function _findCloseButton(dialog) {
                     || BdApi?.Webpack?.getByKeys?.("setBadge");
                 if (electron?.setBadge) {
                     BdApi.Patcher.before(BOOT_RACE_PATCH_ID, electron, "setBadge", (_, args) => {
+                        if (!isPluginEnabled()) return;
                         args[0] = 0;
                     });
                     if (typeof electron.setSystemTrayIcon === "function") {
                         BdApi.Patcher.before(BOOT_RACE_PATCH_ID, electron, "setSystemTrayIcon", (_, args) => {
+                            if (!isPluginEnabled()) return;
                             if (args[0] === "UNREAD") args[0] = "DEFAULT";
                         });
                     }
@@ -376,6 +405,10 @@ function _findCloseButton(dialog) {
         const maxAttempts = 20;
         const tick = () => {
             attempts++;
+            if (!isPluginEnabled()) {
+                try { BdApi.Patcher.unpatchAll(BOOT_RACE_PATCH_ID); } catch (_) {}
+                return;
+            }
             const nativeDone = tryPatchNative();
             const electronDone = tryPatchElectron();
             if ((!nativeDone || !electronDone) && attempts < maxAttempts) {
@@ -443,7 +476,7 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.7.2";
+    static VERSION="2.7.3";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -1920,10 +1953,10 @@ module.exports = class ByeBlocked {
     _guildHasVisibleUnread(guildId) {
         if (!guildId) return false;
         const gcs = this.modules.GuildChannelStore;
-        if (!gcs) return true;
+        if (!gcs) return false;
         try {
             const groups = gcs.getChannels?.(guildId);
-            if (!groups || typeof groups !== "object") return true;
+            if (!groups || typeof groups !== "object") return false;
             for (const list of Object.values(groups)) {
                 if (!Array.isArray(list)) continue;
                 for (const entry of list) {
@@ -1933,7 +1966,7 @@ module.exports = class ByeBlocked {
                 }
             }
         } catch (_) {
-            return true;
+            return false;
         }
         return false;
     }
@@ -2248,11 +2281,16 @@ module.exports = class ByeBlocked {
             if (lastId && cachedForSet) {
                 if (String(lastId) === String(cachedForSet)) return true;
                 this._blockedOnlyReadChannels.delete(id);
+                this._clearBlockedOnlyReadActivity(id);
             } else {
                 return true;
             }
         }
         const cached = this._blockedReadCache?.[id];
+        if (lastId && cached && String(lastId) !== String(cached)) {
+            this._clearBlockedOnlyReadActivity(id);
+            return false;
+        }
         return !!(lastId && cached && String(lastId) === String(cached));
     }
     _resolveUnreadFromBlockedOnly(channelId, store, helpers) {
@@ -3525,6 +3563,26 @@ module.exports = class ByeBlocked {
         this._soundboardPatched = false;
         this._callGridPatchInFlight = false;
         this._soundPatchedFn = null;
+        this._readStatePatchesRegistered = false;
+        this._notificationDispatcherPatched = false;
+        this._taskbarBadgePatched = false;
+        this._readStatePatched = false;
+        this._activePostsPopoverPatched = false;
+        this._channelPinsStorePatched = false;
+        this._pinFluxPatched = false;
+        this._forumPostComponentPatched = false;
+        this._guildScheduledEventStorePatched = false;
+        this._mentionAutocompletePatched = false;
+        this._messageLoadDispatchPatched = false;
+        this._privateChannelStorePatched = false;
+        this._relationshipUpdatesPatched = false;
+        this._inviteSuggestionsPatched = false;
+        this._callGridJoinWatcherPatched = false;
+        this._callGridPatched = false;
+        this._callUiPatched = false;
+        this._groupDMPrototypePatched = false;
+        this._privateChannelRowPatched = false;
+        this._taskbarElectronPatched = false;
         try {
             this._unpatchRingtoneAudio();
         } catch (_) {}
