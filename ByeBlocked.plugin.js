@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.7.4
+ * @version 2.7.5
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -476,7 +476,7 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.7.4";
+    static VERSION="2.7.5";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -552,20 +552,6 @@ module.exports = class ByeBlocked {
         't\u00f3pic',
         'topic'
     );
-    static get INVITE_LABELS() {
-        return [
-            'Invite to Voice',
-            'Convidar para',
-            'Invitar a',
-            'Invitar al canal',
-            'Inviter au',
-            'Sprachkanal beitreten',
-            'In den Sprachkanal',
-            'Invita al canale',
-            'Uitnodigen voor'
-        ];
-    }
-    static get INVITE_LABEL_SEL() { return ByeBlocked.INVITE_LABELS.map(l => '[aria-label*="' + l + '" i]').join(', '); }
     static STAGE_LOCALE = _makeDict(
         { title: 'Sem pedidos', body: 'Os pedidos para falar ser\u00e3o mostrados aqui.' },
         { title: 'No requests', body: 'Requests to speak will show up here.' }
@@ -669,7 +655,7 @@ module.exports = class ByeBlocked {
         this.pluginName = 'ByeBlocked';
         this.isRunning = false;
         this.logger = new Logger(this.pluginName);
-        
+
         this._r = new ModuleResolver();
         this.modules = {};
         this.hiddenElements = new Set;
@@ -3806,6 +3792,8 @@ module.exports = class ByeBlocked {
     }
     _resolveRelationshipMethods() {
         const store = this.modules.RelationshipStore;
+        const previousIsBlockedFn = this._relIsBlockedFn;
+        const previousIsIgnoredFn = this._relIsIgnoredFn;
         this._relIsBlockedFn = null;
         this._relIsIgnoredFn = null;
         if (!store) { return; }
@@ -3820,6 +3808,9 @@ module.exports = class ByeBlocked {
         this._relIsIgnoredFn = bind(names.isIgnored);
         if (!this._relIsBlockedFn || !this._relIsIgnoredFn) {
             try {
+                const relMap = this._getRelationshipTypeMap(store);
+                const BLOCKED_TYPE = 2;
+
                 const candidateKeys = new Set(Object.keys(store));
                 let proto = Object.getPrototypeOf(store);
                 let depth = 0;
@@ -3828,14 +3819,25 @@ module.exports = class ByeBlocked {
                     proto = Object.getPrototypeOf(proto);
                     depth++;
                 }
+
+                const blockedCandidates = [];
+                const ignoredCandidates = [];
                 for (const key of candidateKeys) {
                     if (key === "constructor" || typeof store[key] !== "function" || store[key].length !== 1) continue;
                     const lower = key.toLowerCase();
-                    if (!this._relIsBlockedFn && lower.includes("block") && lower.startsWith("is")) {
-                        this._relIsBlockedFn = store[key].bind(store);
-                    } else if (!this._relIsIgnoredFn && (lower.includes("ignor") || lower.includes("mute")) && lower.startsWith("is")) {
-                        this._relIsIgnoredFn = store[key].bind(store);
+                    if (/^is[A-Z_]?.*block(ed)?$/i.test(key) || (lower.startsWith("is") && lower.includes("block"))) {
+                        blockedCandidates.push(key);
+                    } else if (lower.startsWith("is") && (lower.includes("ignor") || lower.includes("mute"))) {
+                        ignoredCandidates.push(key);
                     }
+                }
+
+                if (!this._relIsBlockedFn) {
+                    this._relIsBlockedFn = this._pickValidatedCandidate(store, blockedCandidates, relMap, id => relMap.get(id) === BLOCKED_TYPE);
+                }
+                if (!this._relIsIgnoredFn) {
+                    const key = ignoredCandidates[0];
+                    if (key) this._relIsIgnoredFn = store[key].bind(store);
                 }
             } catch (_) {}
         }
@@ -3844,6 +3846,38 @@ module.exports = class ByeBlocked {
             this._patcher?._warn("_resolveRelationshipMethods", new Error("Could not resolve RelationshipStore.isBlocked (or an alternate) - ByeBlocked cannot detect blocked users until this is fixed. Discord may have renamed this method; update the plugin."));
             this.toast?.("ByeBlocked couldn't find Discord's block-list method - the plugin may not hide blocked users until it's updated.", "error");
         }
+        if (this._relIsBlockedFn !== previousIsBlockedFn || this._relIsIgnoredFn !== previousIsIgnoredFn) {
+            this._shouldHideCache = new Map();
+        }
+    }
+    _getRelationshipTypeMap(store) {
+        try {
+            const raw = typeof store.getRelationships === "function" ? store.getRelationships() : null;
+            if (!raw || typeof raw !== "object") return new Map();
+            return new Map(Object.entries(raw).map(([id, type]) => [id, Number(type)]));
+        } catch (_) {
+            return new Map();
+        }
+    }
+    _pickValidatedCandidate(store, candidateKeys, relMap, expectedFn) {
+        if (!candidateKeys.length) return null;
+        if (relMap.size > 0) {
+            const sampleIds = [...relMap.keys()].slice(0, 50);
+            for (const key of candidateKeys) {
+                try {
+                    const fn = store[key].bind(store);
+                    let agree = 0, total = 0;
+                    for (const id of sampleIds) {
+                        total++;
+                        if (!!fn(id) === expectedFn(id)) agree++;
+                    }
+                    if (total > 0 && agree === total) return fn;
+                } catch (_) {}
+            }
+            this._patcher?._warn("_pickValidatedCandidate", new Error("Found block-method candidates but none matched RelationshipStore.getRelationships() - refusing to guess to avoid hiding non-blocked users' content."));
+            return null;
+        }
+        try { return store[candidateKeys[0]].bind(store); } catch (_) { return null; }
     }
     _resolveSoundUtils() {
         const getModuleRaw = (filter, label) => this._wpGetModule(filter, { defaultExport: false }, label);
@@ -7918,7 +7952,7 @@ return false;
         if (result instanceof Map) {
             const filtered = new Map;
             for (const [key, value] of result) {
-                const userId = /^\d{17,20}$/.test(String(key)) ? String(key) : value?.id;
+                const userId = value?.id ?? (/^\d{17,20}$/.test(String(key)) ? String(key) : null);
                 if (userId && this.shouldHide(userId)) continue;
                 filtered.set(key, value);
             }
@@ -7951,11 +7985,9 @@ return false;
         if (!store || !channelId || !messageId) return null;
         try {
             let users = store.getReactions(channelId, messageId, emoji, undefined, burstType);
-            users = this._filterReactionUsers(users);
             if (this._reactionUsersSize(users) === 0) {
                 const burstUsers = store.getReactions(channelId, messageId, emoji, undefined, 1);
-                const filteredBurst = this._filterReactionUsers(burstUsers);
-                if (this._reactionUsersSize(filteredBurst) > 0) users = filteredBurst;
+                if (this._reactionUsersSize(burstUsers) > 0) users = burstUsers;
             }
             if (!this._reactionUsersComputable(users)) this._warnUncomputableReactions(emoji, "unrecognized-shape");
             return users;
@@ -8111,7 +8143,7 @@ return false;
             if (!messageId) return true;
             const container = document.getElementById(`message-reactions-${messageId}`);
             if (!container) return true;
-            this.fixReactionCounts();
+            this._fixReactionCountsNow();
             if (container.dataset.nmbZeroReaction === "true") return false;
             const rows = container.querySelectorAll('[class*="reactionInner"]');
             if (!rows.length) return false;
@@ -9019,42 +9051,11 @@ return false;
                         try { this.hideVoiceUsers(); } catch (_) {}
                     }
                 }
-                this._removeVoiceInviteSuggestion(node);
             }
         }
         if (messagesHidden && places.messages) {
             try { this.hideOrphanedDividers(); } catch (_) {}
         }
-    }
-    _removeVoiceInviteSuggestion(node) {
-        try {
-            const INVITE_LABEL_SEL = ByeBlocked.INVITE_LABEL_SEL;
-            const isInviteRow = el => el.matches?.(INVITE_LABEL_SEL);
-            let target = null;
-            if (isInviteRow(node)) {
-                target = node;
-            } else if (node.querySelector) {
-                target = node.querySelector(INVITE_LABEL_SEL);
-            }
-            if (!target) return;
-            const wrapper = target.closest('[class*="animation_"]') || target;
-            if (!wrapper.matches?.(INVITE_LABEL_SEL) && !wrapper.querySelector?.(INVITE_LABEL_SEL)) return;
-            if (wrapper.dataset?.hiddenBlocked === "true") return;
-            this.hideElement(wrapper, "voice-invite-suggestion", false);
-        } catch (_) {}
-    }
-    _removeAllVoiceInviteSuggestions() {
-        try {
-            const INVITE_LABEL_SEL = ByeBlocked.INVITE_LABEL_SEL;
-            const rows = document.querySelectorAll(INVITE_LABEL_SEL);
-            for (let i = 0; i < rows.length; i++) {
-                const row = rows[i];
-                const wrapper = row.closest('[class*="animation_"]') || row;
-                if (!wrapper.matches?.(INVITE_LABEL_SEL) && !wrapper.querySelector?.(INVITE_LABEL_SEL)) continue;
-                if (wrapper.dataset?.hiddenBlocked === "true") continue;
-                this.hideElement(wrapper, "voice-invite-suggestion", false);
-            }
-        } catch (_) {}
     }
     _fastHideNode(el) {
         if (!el || el.nodeType !== 1) return;
@@ -9258,7 +9259,6 @@ return false;
         try {
             const navCooldown = this._navStartedAt && (Date.now() - this._navStartedAt < 1200);
             if (!this._isNavigating && !navCooldown) this.restoreUnhiddenElements();
-            this._removeAllVoiceInviteSuggestions();
             if (fromMutation) {
                 this.hideMentionsEverywhere();
                 this.fixMemberGroupCounts();
@@ -13975,6 +13975,15 @@ return false;
         this._retryGuardExit("patchReactions");
     }
     fixReactionCounts() {
+        if (this._fixReactionCountsPending) return;
+        this._fixReactionCountsPending = true;
+        requestAnimationFrame(() => {
+            this._fixReactionCountsPending = false;
+            if (this.isRunning) this._fixReactionCountsNow();
+        });
+    }
+    _fixReactionCountsNow() {
+        this._fixReactionCountsPending = false;
         const store = this.modules.ReactionsStore;
         if (!store || typeof store.getReactions !== "function") return;
         const SelectedChannelStore = this.modules.SelectedChannelStore;
@@ -14014,6 +14023,10 @@ return false;
                 }
                 const realCount = this._reactionUsersSize(users);
                 if (realCount <= 0) {
+                    if (displayedCount > 0) {
+                        visibleReactionCount++;
+                        continue;
+                    }
                     if (row.dataset.nmbZeroReaction !== "true") {
                         row.dataset.nmbZeroReaction = "true";
                     }
