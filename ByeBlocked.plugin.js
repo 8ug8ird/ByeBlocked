@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.7.3
+ * @version 2.7.4
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -476,7 +476,7 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.7.3";
+    static VERSION="2.7.4";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -743,6 +743,7 @@ module.exports = class ByeBlocked {
         this._pinFluxPatched = false;
         
         this._blockedOnlyReadChannels = new Set;
+        this._unresolvedDmRecipientWarned = new Set;
         this._blockedReadCache = this.loadBlockedReadCache();
         this._readStateRecheckScheduled = false;
         this._readStateRecheckInFlight = false;
@@ -1943,6 +1944,28 @@ module.exports = class ByeBlocked {
             } catch (_) {}
         }
     }
+    _resolveDmRecipientId(channel) {
+        if (!channel) return null;
+        if (channel.recipient?.id) return channel.recipient.id;
+        if (channel.recipientId) return channel.recipientId;
+        if (Array.isArray(channel.recipients) && channel.recipients[0]) {
+            const first = channel.recipients[0];
+            return (typeof first === "string") ? first : (first?.id || null);
+        }
+        try {
+            const rs = this.modules.ChannelStore?.getChannel?.(channel.id);
+            if (rs && rs !== channel) return this._resolveDmRecipientId(rs);
+        } catch (_) {}
+        if (channel.id && !this._unresolvedDmRecipientWarned.has(channel.id)) {
+            this._unresolvedDmRecipientWarned.add(channel.id);
+            this.logger?.warn?.(
+                `_resolveDmRecipientId: DM channel ${channel.id} has no resolvable recipient ID ` +
+                `via recipient, recipientId, or recipients[]. Likely an orphaned channel (e.g. ` +
+                `deleted account). Its unread badge cannot be suppressed even if the user is blocked.`
+            );
+        }
+        return null;
+    }
     _channelHasVisibleUnread(channelId) {
         const rs = this.modules.ReadStateStore;
         if (!rs || !channelId) return false;
@@ -1962,7 +1985,11 @@ module.exports = class ByeBlocked {
                 for (const entry of list) {
                     const id = entry?.channel?.id;
                     if (!id || !this._channelHasRawUnread(id)) continue;
-                    if (!this._hasBlockedOnlyReadActivity(id)) return true;
+                    if (this._hasBlockedOnlyReadActivity(id)) continue;
+                    if (this._resolveChannelVisibleUnread(id, true)) {
+                        if (this._debugBadge) console.log("[ByeBlocked DEBUG] _guildHasVisibleUnread: TRUE via channel", id, entry?.channel?.name, "in guild", guildId);
+                        return true;
+                    }
                 }
             }
         } catch (_) {
@@ -1988,17 +2015,28 @@ module.exports = class ByeBlocked {
             try {
                 if (!grs?.hasUnread?.(guildId)) continue;
                 if (!this._guildAllowsUnreadBadge(guildId)) continue;
-                if (this._guildHasVisibleUnread(guildId)) return true;
+                if (this._guildHasVisibleUnread(guildId)) {
+                    if (this._debugBadge) console.log("[ByeBlocked DEBUG] _filteredHasAnyUnread: TRUE via guild", guildId, this.modules.GuildStore?.getGuild?.(guildId)?.name);
+                    return true;
+                }
             } catch (_) {}
         }
         let foundPrivate = false;
+        let debugFoundChannelId = null;
         this._forEachKnownChannel((channelId, channel) => {
             if (foundPrivate) return;
             if (channel?.guild_id) return;
-            if (channel?.isDM?.() && this.shouldHide(channel.recipient?.id || channel.recipientId)) return;
+            if (channel?.isDM?.() && this.shouldHide(this._resolveDmRecipientId(channel))) return;
             if (this._hasBlockedOnlyReadActivity(channelId)) return;
-            if (this._channelHasVisibleUnread(channelId)) foundPrivate = true;
+            if (this._channelHasVisibleUnread(channelId)) {
+                foundPrivate = true;
+                debugFoundChannelId = channelId;
+            }
         });
+        if (foundPrivate && this._debugBadge) {
+            const ch = this.modules.ChannelStore?.getChannel?.(debugFoundChannelId);
+            console.log("[ByeBlocked DEBUG] _filteredHasAnyUnread: TRUE via private channel", debugFoundChannelId, "isDM:", ch?.isDM?.(), "recipient:", ch?.recipient?.id || ch?.recipientId, "name:", ch?.name);
+        }
         return foundPrivate;
     }
     _filteredTotalMentionCount() {
@@ -2011,7 +2049,7 @@ module.exports = class ByeBlocked {
                 let count = rs.getMentionCount(channelId) || 0;
                 if (count <= 0) return;
                 const ch = cs?.getChannel?.(channelId);
-                if (ch?.isDM?.() && this.shouldHide(ch.recipient?.id || ch.recipientId)) return;
+                if (ch?.isDM?.() && this.shouldHide(this._resolveDmRecipientId(ch))) return;
                 if (ch?.guild_id && !this._channelHasVisibleUnread(channelId)) return;
                 if (!ch?.guild_id && !ch?.isDM?.() && this._hasBlockedOnlyReadActivity(channelId)) return;
                 total += count;
@@ -2299,7 +2337,10 @@ module.exports = class ByeBlocked {
         if (!lastMessageId) return null;
         const getMessage = this.modules.MessageStore?.getMessage;
         const directMsg = getMessage ? getMessage(channelId, lastMessageId) : null;
-        if (directMsg && helpers.isBlockedMessage(directMsg)) return false;
+        if (directMsg) {
+            if (helpers.isBlockedMessage(directMsg)) return false;
+            return true;
+        }
         const ownerId = helpers.resolveForumActivityOwnerId?.(channelId, lastMessageId);
         if (ownerId && this.shouldHide(ownerId)) return false;
         try {
@@ -2311,25 +2352,65 @@ module.exports = class ByeBlocked {
         try {
             const ackId = store.ackMessageId ? store.ackMessageId(channelId) : null;
             const messages = helpers.getChannelMessages(channelId);
-            if (ackId && messages.length) {
+            const cacheHasLatest = messages.length && String(messages[messages.length - 1]?.id) === String(lastMessageId);
+            if (ackId && cacheHasLatest) {
                 const unread = messages.filter(m => m?.id && this._snowflakeGreater(m.id, ackId));
                 if (unread.length) {
                     const anyVisible = unread.some(m => !helpers.isBlockedMessage(m));
                     if (!anyVisible) return false;
                     return true;
                 }
+                return true;
             }
-            if (ackId && messages.length) return true;
-            if (messages.length) {
+            if (cacheHasLatest) {
                 const newest = messages[messages.length - 1];
-                if (newest && helpers.isBlockedMessage(newest)) return false;
-                if (newest) return true;
+                if (helpers.isBlockedMessage(newest)) return false;
+                return true;
             }
             if (this._fetchedUnresolvedChannels?.has(String(channelId))) {
                 return true;
             }
         } catch (_) {}
         return null;
+    }
+    _resolveChannelVisibleUnread(channelId, rawRet) {
+        if (!rawRet) return rawRet;
+        if (!this.settings.places?.messages) return rawRet;
+        if (!channelId) return rawRet;
+        try {
+            if (this._isForumParentChannel(channelId)) {
+                const forumResult = this._hasVisibleForumActivity(channelId);
+                if (forumResult !== null) return forumResult;
+            }
+            const store = this.modules.ReadStateStore;
+            const oldestUnreadId = store.getOldestUnreadMessageId ? store.getOldestUnreadMessageId(channelId) : null;
+            const messages = this._getChannelMessages(channelId);
+            if (!messages.length) {
+                const forumResult = this._hasVisibleForumActivity(channelId);
+                if (forumResult !== null) return forumResult;
+                const blockedOnly = this._resolveUnreadFromBlockedOnly(channelId, store, this._getReadStateHelpers());
+                if (blockedOnly === false) return false;
+                return rawRet;
+            }
+            if (oldestUnreadId) {
+                const idx = messages.findIndex(m => m?.id === oldestUnreadId);
+                if (idx !== -1) {
+                    const unreadSlice = messages.slice(idx);
+                    return unreadSlice.some(m => !this._isBlockedMessage(m));
+                }
+            }
+            const lastMessageId = store.lastMessageId ? store.lastMessageId(channelId) : null;
+            const lastMessage = lastMessageId ? messages.find(m => m?.id === lastMessageId) : null;
+            if (lastMessage && this._isBlockedMessage(lastMessage)) {
+                const anyVisibleUnread = messages.some(m => !this._isBlockedMessage(m));
+                if (!anyVisibleUnread) return false;
+            }
+            const blockedOnly = this._resolveUnreadFromBlockedOnly(channelId, store, this._getReadStateHelpers());
+            if (blockedOnly === false) return false;
+            return rawRet;
+        } catch (_) {
+            return rawRet;
+        }
     }
     _guildHasBlockedOnlyUnread(guildId) {
         if (!guildId) return false;
@@ -5231,6 +5312,7 @@ return false;
         this.queueRefresh();
         this._shouldHideCache = new Map;
         this._invalidateTaskbarBadgeCache();
+        this._refreshTaskbarBadge();
         this._voiceStateFilterCache = new WeakMap;
         if (this.settings.places.groupDms) {
             setTimeout(() => {
@@ -6452,44 +6534,7 @@ return false;
             const channelId = args?.[0];
             if (channelId && self._hasBlockedOnlyReadActivity(channelId)) return false;
             const ret = orig.apply(ctx, args);
-            if (!ret) return ret;
-            if (!self.settings.places?.messages) return ret;
-            if (!channelId) return ret;
-            try {
-                if (self._isForumParentChannel(channelId)) {
-                    const forumResult = self._hasVisibleForumActivity(channelId);
-                    if (forumResult !== null) return forumResult;
-                }
-                const store = self.modules.ReadStateStore;
-                const oldestUnreadId = store.getOldestUnreadMessageId ? store.getOldestUnreadMessageId(channelId) : null;
-                const messages = self._getChannelMessages(channelId);
-                if (!messages.length) {
-                    const forumResult = self._hasVisibleForumActivity(channelId);
-                    if (forumResult !== null) return forumResult;
-                    const blockedOnly = self._resolveUnreadFromBlockedOnly(channelId, store, self._getReadStateHelpers());
-                    if (blockedOnly === false) return false;
-                    return ret;
-                }
-                if (oldestUnreadId) {
-                    const idx = messages.findIndex(m => m?.id === oldestUnreadId);
-                    if (idx !== -1) {
-                        const unreadSlice = messages.slice(idx);
-                        const anyVisibleUnread = unreadSlice.some(m => !self._isBlockedMessage(m));
-                        return anyVisibleUnread;
-                    }
-                }
-                const lastMessageId = store.lastMessageId ? store.lastMessageId(channelId) : null;
-                const lastMessage = lastMessageId ? messages.find(m => m?.id === lastMessageId) : null;
-                if (lastMessage && self._isBlockedMessage(lastMessage)) {
-                    const anyVisibleUnread = messages.some(m => !self._isBlockedMessage(m));
-                    if (!anyVisibleUnread) return false;
-                }
-                const blockedOnly = self._resolveUnreadFromBlockedOnly(channelId, store, self._getReadStateHelpers());
-                if (blockedOnly === false) return false;
-                return ret;
-            } catch (_) {
-                return ret;
-            }
+            return self._resolveChannelVisibleUnread(channelId, ret);
         });
         for (const methodName of [ "hasUnreadOrMentions", "hasTrackedUnread" ]) {
             if (typeof this.modules.ReadStateStore[methodName] !== "function") continue;
@@ -6497,26 +6542,7 @@ return false;
                 const channelId = args?.[0];
                 if (channelId && self._hasBlockedOnlyReadActivity(channelId)) return false;
                 const ret = orig.apply(ctx, args);
-                if (!ret) return ret;
-                if (!self.settings.places?.messages) return ret;
-                if (!channelId) return ret;
-                try {
-                    if (self._isForumParentChannel(channelId)) {
-                        const forumResult = self._hasVisibleForumActivity(channelId);
-                        if (forumResult !== null) return forumResult;
-                    }
-                    const messages = self._getChannelMessages(channelId);
-                    if (!messages.length) {
-                        const forumResult = self._hasVisibleForumActivity(channelId);
-                        if (forumResult !== null) return forumResult;
-                        const store = self.modules.ReadStateStore;
-                        const blockedOnly = self._resolveUnreadFromBlockedOnly(channelId, store, self._getReadStateHelpers());
-                        if (blockedOnly === false) return false;
-                    }
-                    return ret;
-                } catch (_) {
-                    return ret;
-                }
+                return self._resolveChannelVisibleUnread(channelId, ret);
             });
         }
         this.patchInstead(this.modules.GuildReadStateStore, "hasUnread", function(ctx, args, orig) {
@@ -6936,6 +6962,7 @@ return false;
                     } else {
                         self._clearBlockedOnlyReadActivity(channelId);
                         if (parentId) self._clearBlockedOnlyReadActivity(parentId);
+                        scheduleRefresh();
                     }
                     return;
                 }
