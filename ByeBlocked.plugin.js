@@ -2,7 +2,8 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.7.6
+ * @version 2.8.0
+ * @invite Kn2S9s6mt4
  * @description Hides and silences blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -86,9 +87,44 @@ class ModuleResolver {
 }
 class PatchManager {
     constructor(p) { this.p = p; this.failCounts = {}; }
-    before(t, m, fn) { try { if (!t?.[m]) return; return BdApi.Patcher.before(this.p.pluginName, t, m, fn); } catch (_) {} }
-    after(t, m, fn) { try { if (!t?.[m]) return; return BdApi.Patcher.after(this.p.pluginName, t, m, fn); } catch (_) {} }
-    instead(t, m, fn) { try { if (!t?.[m]) return; return BdApi.Patcher.instead(this.p.pluginName, t, m, fn); } catch (_) {} }
+    _isWritable(t, m) {
+        try {
+            let obj = t;
+            while (obj) {
+                const desc = Object.getOwnPropertyDescriptor(obj, m);
+                if (desc) return !!(desc.set || desc.writable !== false && !("get" in desc && !desc.set));
+                obj = Object.getPrototypeOf(obj);
+            }
+            return true;
+        } catch (_) { return true; }
+    }
+    _recordSilently(l) {
+        try { this.failCounts[l] = (this.failCounts[l] || 0) + 1; } catch (_) {}
+    }
+    before(t, m, fn) {
+        try {
+            if (!t?.[m]) return false;
+            if (!this._isWritable(t, m)) { this._recordSilently(`patch:before:${m}`); return false; }
+            BdApi.Patcher.before(this.p.pluginName, t, m, fn);
+            return true;
+        } catch (e) { this._warn(`patch:before:${m}`, e); return false; }
+    }
+    after(t, m, fn) {
+        try {
+            if (!t?.[m]) return false;
+            if (!this._isWritable(t, m)) { this._recordSilently(`patch:after:${m}`); return false; }
+            BdApi.Patcher.after(this.p.pluginName, t, m, fn);
+            return true;
+        } catch (e) { this._warn(`patch:after:${m}`, e); return false; }
+    }
+    instead(t, m, fn) {
+        try {
+            if (!t?.[m]) return false;
+            if (!this._isWritable(t, m)) { this._recordSilently(`patch:instead:${m}`); return false; }
+            BdApi.Patcher.instead(this.p.pluginName, t, m, fn);
+            return true;
+        } catch (e) { this._warn(`patch:instead:${m}`, e); return false; }
+    }
     safe(l, fn) { try { fn(); return true; } catch (e) { this._warn(l, e); return false; } }
     cleanup() { try { BdApi.Patcher.unpatchAll(this.p.pluginName); } catch (_) {} }
     _logFail(l, err) { this._warn(l, err); }
@@ -490,7 +526,7 @@ class ScrollManager {
 }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.7.6";
+    static VERSION="2.8.0";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
     static ASSET_FILENAME="ByeBlocked.plugin.js";
@@ -675,6 +711,11 @@ module.exports = class ByeBlocked {
         this.modules = {};
         this.hiddenElements = new Set;
         this.hiddenParents = new Set;
+        this._ghostedElements = new Set;
+        this._hiddenReactorRows = new Set;
+        this._hiddenReactorRemoveBtns = new Set;
+        this._pinsEmptyPlaceholders = new Set;
+        this._pinsEmptyFooters = new Set;
         this.observer = null;
         this._patchedStoreMethods = new WeakMap();
         this._scrollManager = new ScrollManager();
@@ -687,6 +728,7 @@ module.exports = class ByeBlocked {
         this._lastNotifiedVersion = null;
         this._periodicCheckInterval = null;
         this._hiddenElementsPruneInterval = null;
+        this._blockedReadCachePruneInterval = null;
         this._updateResetTimer = null;
         this._lastCheckTimestamp = this.loadLastCheck();
         
@@ -770,7 +812,7 @@ module.exports = class ByeBlocked {
         this._roleSettingsClickHandler = null;
         this._reactionClickHandler = null;
         this._contextMenuHandler = null;
-        this._menuPortalObserver = null;
+        this._menuPortalActive = false;
         this._threadsStoreChangeHandler = null;
         this._threadStoreChangeHandler = null;
         this._channelStoreChangeHandler = null;
@@ -919,14 +961,14 @@ module.exports = class ByeBlocked {
                     : (typeof raw.default === "function") ? "default"
                     : "render";
             }
-            self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
+            const ok = self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
                 try {
                     const props = getProps ? getProps(ctx, args) : args?.[0] || ctx?.props;
                     if (shouldSuppress(props, ctx, args)) return null;
                 } catch (_) {}
                 return orig.apply(ctx, args);
             });
-            return true;
+            return !!ok;
         };
         const srcFilter = m => {
             const fn = unwrapComponent(m);
@@ -997,7 +1039,11 @@ module.exports = class ByeBlocked {
             }
         } catch (_) {}
         if (label) {
-            this.logger.warn(`${label}: source-heuristic lookup failed. Best candidate matched ${bestHitCount}/${requiredMatches} required strings (${bestHitStrings.join(", ") || "none"}) out of [${matchingStrings.join(", ")}]. Discord likely renamed something in this component - this diagnostic is meant to help pin down which term to update.`);
+            this._heuristicWarned = this._heuristicWarned || new Set();
+            if (!this._heuristicWarned.has(label)) {
+                this._heuristicWarned.add(label);
+                this.logger.warn(`${label}: source-heuristic lookup failed. Best candidate matched ${bestHitCount}/${requiredMatches} required strings (${bestHitStrings.join(", ") || "none"}) out of [${matchingStrings.join(", ")}]. Discord likely renamed something in this component - this diagnostic is meant to help pin down which term to update.`);
+            }
         }
         return false;
     }
@@ -1555,7 +1601,7 @@ module.exports = class ByeBlocked {
             this.toast(`ByeBlocked updated to v${remoteVersion}!`, "success");
             const epochAtWrite = this._instanceEpoch = (this._instanceEpoch || 0) + 1;
             setTimeout(() => {
-                if (this._instanceEpoch !== epochAtWrite) return;
+                if (!this.isRunning || this._instanceEpoch !== epochAtWrite) return;
                 try {
                     if (BdApi.Plugins.isEnabled(this.pluginName)) BdApi.Plugins.disable(this.pluginName);
                     BdApi.Plugins.enable(this.pluginName);
@@ -1863,7 +1909,13 @@ module.exports = class ByeBlocked {
     }
     saveBlockedReadCache() {
         try {
-            BdApi.Data.save(this.pluginName, "blockedReadCache", this._blockedReadCache || {});
+            const MAX_TRACKED = 500;
+            const cache = this._blockedReadCache || {};
+            const keys = Object.keys(cache);
+            if (keys.length > MAX_TRACKED) {
+                for (const key of keys.slice(0, keys.length - MAX_TRACKED)) delete cache[key];
+            }
+            BdApi.Data.save(this.pluginName, "blockedReadCache", cache);
         } catch (_) {}
     }
     _markMessagePinnedByBlocked(messageId) {
@@ -1917,21 +1969,23 @@ module.exports = class ByeBlocked {
         } catch (_) {}
         return [];
     }
-    _forEachKnownChannel(callback) {
+    _forEachKnownChannel(callback, { guildChannels = true } = {}) {
         if (typeof callback !== "function") return;
-        const gcs = this.modules.GuildChannelStore;
-        for (const guildId of this._getGuildIds()) {
-            try {
-                const groups = gcs?.getChannels?.(guildId);
-                if (!groups || typeof groups !== "object") continue;
-                for (const list of Object.values(groups)) {
-                    if (!Array.isArray(list)) continue;
-                    for (const entry of list) {
-                        const channel = entry?.channel || entry;
-                        if (channel?.id) callback(channel.id, channel);
+        if (guildChannels) {
+            const gcs = this.modules.GuildChannelStore;
+            for (const guildId of this._getGuildIds()) {
+                try {
+                    const groups = gcs?.getChannels?.(guildId);
+                    if (!groups || typeof groups !== "object") continue;
+                    for (const list of Object.values(groups)) {
+                        if (!Array.isArray(list)) continue;
+                        for (const entry of list) {
+                            const channel = entry?.channel || entry;
+                            if (channel?.id) callback(channel.id, channel);
+                        }
                     }
-                }
-            } catch (_) {}
+                } catch (_) {}
+            }
         }
         const pcs = this.modules.PrivateChannelStore;
         const privateIds = new Set;
@@ -1960,6 +2014,11 @@ module.exports = class ByeBlocked {
             if (rs && rs !== channel) return this._resolveDmRecipientId(rs);
         } catch (_) {}
         if (channel.id && !this._unresolvedDmRecipientWarned.has(channel.id)) {
+            const UNRESOLVED_DM_WARNED_MAX_SIZE = 300;
+            if (this._unresolvedDmRecipientWarned.size >= UNRESOLVED_DM_WARNED_MAX_SIZE) {
+                const oldestKey = this._unresolvedDmRecipientWarned.values().next().value;
+                if (oldestKey !== undefined) this._unresolvedDmRecipientWarned.delete(oldestKey);
+            }
             this._unresolvedDmRecipientWarned.add(channel.id);
             this.logger?.warn?.(
                 `_resolveDmRecipientId: DM channel ${channel.id} has no resolvable recipient ID ` +
@@ -2028,14 +2087,13 @@ module.exports = class ByeBlocked {
         let debugFoundChannelId = null;
         this._forEachKnownChannel((channelId, channel) => {
             if (foundPrivate) return;
-            if (channel?.guild_id) return;
             if (channel?.isDM?.() && this.shouldHide(this._resolveDmRecipientId(channel))) return;
             if (this._hasBlockedOnlyReadActivity(channelId)) return;
             if (this._channelHasVisibleUnread(channelId)) {
                 foundPrivate = true;
                 debugFoundChannelId = channelId;
             }
-        });
+        }, { guildChannels: false });
         if (foundPrivate && this._debugBadge) {
             const ch = this.modules.ChannelStore?.getChannel?.(debugFoundChannelId);
             console.log("[ByeBlocked DEBUG] _filteredHasAnyUnread: TRUE via private channel", debugFoundChannelId, "isDM:", ch?.isDM?.(), "recipient:", ch?.recipient?.id || ch?.recipientId, "name:", ch?.name);
@@ -2046,9 +2104,12 @@ module.exports = class ByeBlocked {
         const rs = this.modules.ReadStateStore;
         if (!rs?.getMentionCount) return 0;
         const cs = this.modules.ChannelStore;
+        const grs = this.modules.GuildReadStateStore;
         let total = 0;
-        this._forEachKnownChannel(channelId => {
+        this._forEachKnownChannel((channelId, channel) => {
             try {
+                const guildId = channel?.guild_id;
+                if (guildId && !grs?.hasUnread?.(guildId)) return;
                 let count = rs.getMentionCount(channelId) || 0;
                 if (count <= 0) return;
                 const ch = cs?.getChannel?.(channelId);
@@ -2613,6 +2674,11 @@ module.exports = class ByeBlocked {
         if (!this.isRunning) return;
         this._cancelAllNavTimers();
         this._observerFramePending = false;
+        if (Array.isArray(this._navigationRetryHooks)) {
+            for (const hook of this._navigationRetryHooks) {
+                try { hook(); } catch (_) {}
+            }
+        }
         const currentGuildId = this.modules.SelectedGuildStore?.getGuildId?.() || null;
         this._lastSeenGuildId = currentGuildId;
         this._isNavigating = true;
@@ -2720,22 +2786,38 @@ module.exports = class ByeBlocked {
         try {
             const scroller = this._findMessagesScroller();
             if (!scroller) return;
+            if (this._scrollWatchListeners) {
+                this._scrollWatchListeners = this._scrollWatchListeners.filter(entry => {
+                    if (document.contains(entry.scroller)) return true;
+                    try {
+                        for (const [type, handler] of entry.bindings) entry.scroller.removeEventListener(type, handler, entry.opts);
+                    } catch (_) {}
+                    return false;
+                });
+            }
             if (scroller.dataset.nmbScrollWatchBound === "true") return;
             scroller.dataset.nmbScrollWatchBound = "true";
             const opts = { passive: true };
-            const mark = () => { this._userScrolledSinceNav = true; };
-            scroller.addEventListener("wheel", mark, opts);
-            scroller.addEventListener("touchstart", mark, opts);
-            scroller.addEventListener("pointerdown", mark, opts);
-            scroller.addEventListener("keydown", mark, opts);
-            scroller.addEventListener("scroll", mark, opts);
-            const markManual = () => { this._lastManualScrollAt = Date.now(); };
-            scroller.addEventListener("wheel", markManual, opts);
-            scroller.addEventListener("touchstart", markManual, opts);
-            scroller.addEventListener("touchmove", markManual, opts);
-            scroller.addEventListener("pointerdown", markManual, opts);
-            scroller.addEventListener("keydown", markManual, opts);
+            const mark = () => { if (!this.isRunning) return; this._userScrolledSinceNav = true; };
+            const markManual = () => { if (!this.isRunning) return; this._lastManualScrollAt = Date.now(); };
+            const bindings = [
+                ["wheel", mark], ["touchstart", mark], ["pointerdown", mark], ["keydown", mark], ["scroll", mark],
+                ["wheel", markManual], ["touchstart", markManual], ["touchmove", markManual], ["pointerdown", markManual], ["keydown", markManual]
+            ];
+            for (const [type, handler] of bindings) scroller.addEventListener(type, handler, opts);
+            if (!this._scrollWatchListeners) this._scrollWatchListeners = [];
+            this._scrollWatchListeners.push({ scroller, opts, bindings });
         } catch (_) {}
+    }
+    _stopWatchForUserScrollInteraction() {
+        if (!this._scrollWatchListeners) return;
+        for (const { scroller, opts, bindings } of this._scrollWatchListeners) {
+            try {
+                for (const [type, handler] of bindings) scroller.removeEventListener(type, handler, opts);
+                if (scroller?.dataset?.nmbScrollWatchBound) delete scroller.dataset.nmbScrollWatchBound;
+            } catch (_) {}
+        }
+        this._scrollWatchListeners = [];
     }
     _findMessagesScroller() {
         const isScrollable = el => {
@@ -2977,6 +3059,15 @@ module.exports = class ByeBlocked {
         }
     }
     _isRelevantMutation(mutations) {
+        return this._classifyMutationAreas(mutations).hasRelevantNode;
+    }
+    _classifyMutationAreas(mutations) {
+        const areas = { memberList: false, messages: false, voiceChannels: false, reactions: false, hasRelevantNode: false };
+        const memberSel = '[class*="memberRow"], [data-list-id^="members-"], [class*="membersGroup"]';
+        const messageSel = 'li[class*="messageListItem"], [class*="messageListItem"], [class*="mention"], [data-list-item-id^="pins__"]';
+        const voiceSel = '[class*="voiceUser"], [class*="stageUser_"], [class*="stageSection_"], [class*="activityPanel"], [class*="streamPreview_"], [class*="callContainer_"], [class*="channelStatus" i], [class*="voiceChannelStatus" i]';
+        const reactionSel = '[id^="message-reactions-"], [class*="reactionInner"]';
+        const chromeContainerSel = '[role="menu"]';
         for (let m = 0; m < mutations.length; m++) {
             const added = mutations[m].addedNodes;
             for (let n = 0; n < added.length; n++) {
@@ -2985,30 +3076,14 @@ module.exports = class ByeBlocked {
                 const tag = node.tagName;
                 if (tag === 'LINK' || tag === 'STYLE' || tag === 'SCRIPT' || tag === 'META' || tag === 'TITLE') continue;
                 if (node.childElementCount === 0 && !node.hasAttributes() && !(node.textContent && node.textContent.trim())) continue;
-                return true;
-            }
-        }
-        return false;
-    }
-    _classifyMutationAreas(mutations) {
-        const areas = { memberList: false, messages: false, voiceChannels: false, reactions: false };
-        const memberSel = '[class*="memberRow"], [data-list-id^="members-"], [class*="membersGroup"]';
-        const messageSel = 'li[class*="messageListItem"], [class*="messageListItem"], [class*="mention"], [data-list-item-id^="pins__"]';
-        const voiceSel = '[class*="voiceUser"], [class*="stageUser_"], [class*="stageSection_"], [class*="activityPanel"], [class*="streamPreview_"], [class*="callContainer_"], [class*="channelStatus" i], [class*="voiceChannelStatus" i]';
-        const reactionSel = '[id^="message-reactions-"], [class*="reactionInner"]';
-        for (let m = 0; m < mutations.length; m++) {
-            const added = mutations[m].addedNodes;
-            for (let n = 0; n < added.length; n++) {
-                const node = added[n];
-                if (node.nodeType !== 1) continue;
-                const tag = node.tagName;
-                if (tag === 'LINK' || tag === 'STYLE' || tag === 'SCRIPT' || tag === 'META' || tag === 'TITLE') continue;
+                areas.hasRelevantNode = true;
                 if (!areas.memberList && (node.matches?.(memberSel) || node.querySelector?.(memberSel))) areas.memberList = true;
                 if (!areas.messages && (node.matches?.(messageSel) || node.querySelector?.(messageSel))) areas.messages = true;
                 if (!areas.voiceChannels && (node.matches?.(voiceSel) || node.querySelector?.(voiceSel))) areas.voiceChannels = true;
                 if (!areas.reactions && (node.matches?.(reactionSel) || node.querySelector?.(reactionSel))) areas.reactions = true;
                 if (!areas.memberList && !areas.messages && !areas.voiceChannels && !areas.reactions
-                    && node.childElementCount >= 8) {
+                    && node.childElementCount >= 8
+                    && !(node.matches?.(chromeContainerSel) || node.closest?.(chromeContainerSel))) {
                     areas.memberList = areas.messages = areas.voiceChannels = areas.reactions = true;
                 }
                 if (areas.memberList && areas.messages && areas.voiceChannels && areas.reactions) return areas;
@@ -3093,7 +3168,17 @@ module.exports = class ByeBlocked {
         }
         this._observerFramePending = false;
         this.observer = new MutationObserver(mutations => {
-            if (!this._isRelevantMutation(mutations)) return;
+            if (this._menuPortalActive) {
+                try { this._handleMenuPortalMutationBatch(mutations); } catch (_) {}
+                try { this._handleStatusModalMutationBatch(mutations); } catch (_) {}
+            }
+            let areas;
+            try {
+                areas = this._classifyMutationAreas(mutations);
+            } catch (_) {
+                areas = { memberList: true, messages: true, voiceChannels: true, reactions: true, hasRelevantNode: true };
+            }
+            if (!areas.hasRelevantNode) return;
             if (this.isRunning && this.settings?.places?.voiceChannels) {
                 try { this._fastHideChannelStatusFromMutations(mutations); } catch (_) {}
             }
@@ -3103,18 +3188,13 @@ module.exports = class ByeBlocked {
             if (this.isRunning && (this.settings.places?.messages || this.settings.places?.memberList)) {
                 try { this._fastHideFromMutations(mutations); } catch (_) {}
             }
-            try {
-                const areas = this._classifyMutationAreas(mutations);
-                if (!this._pendingScanAreas) {
-                    this._pendingScanAreas = areas;
-                } else {
-                    this._pendingScanAreas.memberList = this._pendingScanAreas.memberList || areas.memberList;
-                    this._pendingScanAreas.messages = this._pendingScanAreas.messages || areas.messages;
-                    this._pendingScanAreas.voiceChannels = this._pendingScanAreas.voiceChannels || areas.voiceChannels;
-                    this._pendingScanAreas.reactions = this._pendingScanAreas.reactions || areas.reactions;
-                }
-            } catch (_) {
-                this._pendingScanAreas = { memberList: true, messages: true, voiceChannels: true, reactions: true };
+            if (!this._pendingScanAreas) {
+                this._pendingScanAreas = areas;
+            } else {
+                this._pendingScanAreas.memberList = this._pendingScanAreas.memberList || areas.memberList;
+                this._pendingScanAreas.messages = this._pendingScanAreas.messages || areas.messages;
+                this._pendingScanAreas.voiceChannels = this._pendingScanAreas.voiceChannels || areas.voiceChannels;
+                this._pendingScanAreas.reactions = this._pendingScanAreas.reactions || areas.reactions;
             }
             if (this._observerFramePending) return;
             this._observerFramePending = true;
@@ -3372,7 +3452,6 @@ module.exports = class ByeBlocked {
         this.removeStyles();
         this._injectGuildSwitchGuard();
         this._patcher.safe('resolveModules', () => this.resolveModules());
-        this._runEarlyPatches();
         if (this._relationshipStoreJustAppeared) {
             this._relationshipStoreJustAppeared = false;
             try { this._onRelationshipChanged(); } catch (_) {}
@@ -3444,7 +3523,7 @@ module.exports = class ByeBlocked {
         this._registerModuleRefresh();
         if (this.settings.behavior.autoCheckUpdates) {
             trackedTimeout(() => this.checkForUpdatesAuto(), 5e3);
-            this._periodicCheckInterval = setInterval(() => this.checkForUpdatesAuto(), 72e5);
+            this._periodicCheckInterval = setInterval(() => this.checkForUpdatesAuto(), 18e5);
         }
         trackedTimeout(() => this._runBootCanaryCheck(), 8000);
         this._hiddenElementsPruneInterval = setInterval(() => {
@@ -3457,6 +3536,24 @@ module.exports = class ByeBlocked {
                 }
             } catch (_) {}
         }, 60000);
+        this._blockedReadCachePruneInterval = setInterval(() => {
+            try {
+                const cache = this._blockedReadCache;
+                const cs = this.modules.ChannelStore;
+                if (!cache || !cs || typeof cs.getChannel !== "function") return;
+                let changed = false;
+                for (const channelId of Object.keys(cache)) {
+                    try {
+                        if (!cs.getChannel(channelId)) {
+                            delete cache[channelId];
+                            this._blockedOnlyReadChannels?.delete(channelId);
+                            changed = true;
+                        }
+                    } catch (_) {}
+                }
+                if (changed) this.saveBlockedReadCache();
+            } catch (_) {}
+        }, 6e5);
         trackedTimeout(() => {
             p.safe('patchInviteSuggestions', () => this.patchInviteSuggestions());
             p.safe('patchMentionAutocomplete', () => this.patchMentionAutocomplete());
@@ -3519,8 +3616,18 @@ module.exports = class ByeBlocked {
             for (const id of this._startupTimers) clearTimeout(id);
         }
         this._startupTimers = [];
+        if (this._visibilityRetryListener) {
+            document.removeEventListener("visibilitychange", this._visibilityRetryListener);
+            this._visibilityRetryListener = null;
+        }
+        if (this._navigationRetryHooks) {
+            this._navigationRetryHooks = [];
+            this._navigationRetryHookMap = {};
+        }
         this._filteredChannelCache?.clear();
         this._filteredGroupDmChannelCache = null;
+        this._reactorNameCache = null;
+        this._shouldHideCache = null;
         document.getElementById('ByeBlocked-bootguard')?.remove();
         document.getElementById('ByeBlocked-unreadbadge-bootguard')?.remove();
         this._stopDomGuardHeartbeat();
@@ -3549,6 +3656,9 @@ module.exports = class ByeBlocked {
         this._suppressGroupAddSoundMessageId = null;
         this._suppressMentionSoundCredits = [];
         this._messageStoreUnpatchFns = null;
+        this._messagesWrapUnpatchFns = null;
+        this._activityPanelUnpatchFns = null;
+        this._stageRenderUnpatchFns = null;
         clearTimeout(this._moduleRetryTimeout);
         this._moduleRetryTimeout = null;
         clearTimeout(this._taskbarBadgeRelationshipRetryTimeout);
@@ -3557,6 +3667,10 @@ module.exports = class ByeBlocked {
         this._unresolvedBlockedUnreadRetryTimeout = null;
         this._unresolvedBlockedUnreadHighestAttempt = 0;
         this._fetchedUnresolvedChannels = null;
+        clearTimeout(this._blockedGroupObserverRenewTimeout);
+        this._blockedGroupObserverRenewTimeout = null;
+        clearTimeout(this._reactorIdPendingRetryTimer);
+        this._reactorIdPendingRetryTimer = null;
         if (window.__byeBlocked === this) delete window.__byeBlocked;
         if (this._updateResetTimer) {
             clearTimeout(this._updateResetTimer);
@@ -3569,6 +3683,10 @@ module.exports = class ByeBlocked {
         if (this._hiddenElementsPruneInterval) {
             clearInterval(this._hiddenElementsPruneInterval);
             this._hiddenElementsPruneInterval = null;
+        }
+        if (this._blockedReadCachePruneInterval) {
+            clearInterval(this._blockedReadCachePruneInterval);
+            this._blockedReadCachePruneInterval = null;
         }
         if (this._refreshDebounce) {
             clearTimeout(this._refreshDebounce);
@@ -3597,6 +3715,8 @@ module.exports = class ByeBlocked {
         }
         this._scrollLoopActive = false;
         this._isNavigating = false;
+        try { this._stopWatchForUserScrollInteraction(); } catch (_) {}
+        this._userScrolledSinceNav = false;
         if (this._readStateRecheckTimer) {
             clearTimeout(this._readStateRecheckTimer);
             this._readStateRecheckTimer = null;
@@ -3625,15 +3745,12 @@ module.exports = class ByeBlocked {
             document.removeEventListener("click", this._roleSettingsClickHandler, true);
             this._roleSettingsClickHandler = null;
         }
-        this._menuPortalObserver?.disconnect();
-        this._menuPortalObserver = null;
+        this._menuPortalActive = false;
         try { this._stopInviteClickListener(); } catch (e) { try { this.logger?.error('stop:stopInviteClickListener threw', e); } catch (_) {} }
         if (this._statusModalClickHandler) {
             document.removeEventListener("click", this._statusModalClickHandler, true);
             this._statusModalClickHandler = null;
         }
-        this._statusModalObserver?.disconnect();
-        this._statusModalObserver = null;
         this._groupDMUnreadSectionObserver?.disconnect();
         this._groupDMUnreadSectionObserver = null;
         this._groupDMUnreadSectionObserverPatched = false;
@@ -3748,10 +3865,6 @@ module.exports = class ByeBlocked {
         try { BdApi.Patcher.unpatchAll('ByeBlockedTaskbarBadgeBootRace'); } catch (_) {}
         this._patchedStoreMethods = new WeakMap();
         this._migrateGroupDMInstanceValue = null;
-        try {
-            if (this._groupDMPrototypeRef && this._groupDMRecipientsSyms) {
-            }
-        } catch (_) {}
         this.restoreAllElements();
         this.removeStyles();
         this._removeNotice();
@@ -3781,6 +3894,7 @@ module.exports = class ByeBlocked {
             this['_' + flag + 'Patched'] = false;
         }
         if (this._blockedOnlyReadChannels) this._blockedOnlyReadChannels.clear();
+        this._unresolvedDmRecipientWarned?.clear();
         this._rawGetMessages = null;
         this.modules.ElectronModule = null;
         this._oldUnblockedConnectedUsers = new Set;
@@ -3797,6 +3911,27 @@ module.exports = class ByeBlocked {
         this._eventsSidebarUnreadPatched = false;
         this._memberListRowPatched = false;
         this._teardownGroupDMPrototypeWatch();
+        try {
+            if (this._groupDMPrototypeRef && this._groupDMOrigDescriptors) {
+                const proto = this._groupDMPrototypeRef;
+                for (const key of Object.keys(this._groupDMOrigDescriptors)) {
+                    try {
+                        const currentDesc = Object.getOwnPropertyDescriptor(proto, key);
+                        if (!currentDesc || !currentDesc.get || !currentDesc.get.__nmbPatched) continue;
+                        const origDesc = this._groupDMOrigDescriptors[key];
+                        if (origDesc) {
+                            Object.defineProperty(proto, key, origDesc);
+                        } else {
+                            delete proto[key];
+                        }
+                    } catch (e) { try { this.logger?.error(`stop:restoreGroupDMPrototype:${key} threw`, e); } catch (_) {} }
+                }
+            }
+        } catch (_) {}
+        this._groupDMOrigDescriptors = null;
+        this._groupDMPrototypeRef = null;
+        this._groupDMRecipientsSyms = null;
+        this._groupDMGetterResolvingIds = null;
         this._groupDMPrototypeSlowRetryWarned = false;
         this._stageRenderComponentPatched = false;
         this._activityPanelComponentPatched = false;
@@ -4713,6 +4848,7 @@ module.exports = class ByeBlocked {
         if (!this.settings.places.messages || this._activePostsPopoverPatched) return;
         if (!this._retryGuardEnter("patchActivePostsPopoverComponent", attempt)) return;
         const self = this;
+        const diagnosticLabel = this._isThreadOwnerFilteringCovered() ? null : "patchActivePostsPopoverComponent";
         const patched = this._wpPatchRenderBySourceHeuristic(props => {
             if (!self.settings.places.messages) return false;
             const thread = props?.thread || props?.item?.thread || props?.data?.thread;
@@ -4725,7 +4861,7 @@ module.exports = class ByeBlocked {
                 if (oid && self.shouldHide(oid)) return true;
             }
 return false;
-            }, ["row__", "thread", "active", "ownerId", "recipients", "activePost", "threadId", "forumPost", "postRow", "lastMessageId"], 2, "patchActivePostsPopoverComponent");
+            }, ["row__", "thread", "active", "ownerId", "recipients", "activePost", "threadId", "forumPost", "postRow", "lastMessageId"], 2, diagnosticLabel);
         if (patched) {
             this._activePostsPopoverPatched = true;
             this._retryGuardExit("patchActivePostsPopoverComponent");
@@ -4734,8 +4870,13 @@ return false;
         if (attempt < 6) {
             this._scheduleRetry(() => this.patchActivePostsPopoverComponent(attempt + 1), this._retryDelay(attempt, 5000));
         } else {
-            this._patcher?._warn("patchActivePostsPopoverComponent", new Error("ran out of attempts to locate the active posts popover module"));
             this._retryGuardExit("patchActivePostsPopoverComponent");
+            try {
+                const popoverOpen = document.querySelector('[class*="activePostsPopout_"], [class*="activePostsWrapper_"]');
+                if (popoverOpen && !this._isThreadOwnerFilteringCovered()) {
+                    this._patcher?._warn("patchActivePostsPopoverComponent", new Error("ran out of attempts to locate the active posts popover module"));
+                }
+            } catch (_) {}
         }
     }
     patchGuildMembersPageRow(attempt = 0) {
@@ -4761,6 +4902,7 @@ return false;
     }
     patchMemberListRow(attempt = 0) {
         if (!this.settings.places.memberList || this._memberListRowPatched) return;
+        this._ensureMemberListRowRetryListener();
         const self = this;
         const suppressByProps = props => {
             if (!self.settings.places.memberList) return false;
@@ -4837,6 +4979,9 @@ return false;
             return;
         }
         if (!hadCandidateRows) {
+            if (!this._isMemberListOpen()) {
+                return;
+            }
             if (this._memberListRowWaitCycles === undefined) this._memberListRowWaitCycles = 0;
             this._memberListRowWaitCycles++;
             if (this._memberListRowWaitCycles < 750) {
@@ -5253,7 +5398,14 @@ return false;
         if (attempt === 0) {
             if (this._stageRenderComponentPatchInProgress) return;
             this._stageRenderComponentPatchInProgress = true;
+            if (Array.isArray(this._stageRenderUnpatchFns) && this._stageRenderUnpatchFns.length) {
+                for (const unpatch of this._stageRenderUnpatchFns) {
+                    try { unpatch?.(); } catch (_) {}
+                }
+                this._stageRenderUnpatchFns = [];
+            }
         }
+        if (!Array.isArray(this._stageRenderUnpatchFns)) this._stageRenderUnpatchFns = [];
         const self = this;
         const unwrapComponent = v => {
             if (typeof v === "function") return v;
@@ -5288,7 +5440,7 @@ return false;
                 patchTarget = raw;
                 patchKey = (typeof raw.type === "function") ? "type" : "render";
             }
-            self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
+            const unpatch = self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
                 try {
                     const props = args?.[0] || ctx?.props;
                     if (!props) return orig.apply(ctx, args);
@@ -5298,6 +5450,7 @@ return false;
                 } catch (_) {}
                 return orig.apply(ctx, args);
             });
+            if (typeof unpatch === "function") self._stageRenderUnpatchFns.push(unpatch);
             return true;
         };
         try {
@@ -5334,6 +5487,13 @@ return false;
     }
     patchActivityPanelComponent(attempt = 0) {
         if (this._activityPanelComponentPatched) return;
+        if (attempt === 0 && Array.isArray(this._activityPanelUnpatchFns) && this._activityPanelUnpatchFns.length) {
+            for (const unpatch of this._activityPanelUnpatchFns) {
+                try { unpatch?.(); } catch (_) {}
+            }
+            this._activityPanelUnpatchFns = [];
+        }
+        if (!Array.isArray(this._activityPanelUnpatchFns)) this._activityPanelUnpatchFns = [];
         const self = this;
         const unwrapComponent = v => {
             if (typeof v === "function") return v;
@@ -5368,7 +5528,7 @@ return false;
                 patchTarget = raw;
                 patchKey = (typeof raw.type === "function") ? "type" : "render";
             }
-            self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
+            const unpatch = self.patchInstead(patchTarget, patchKey, function(ctx, args, orig) {
                 try {
                     const props = args?.[0] || ctx?.props;
                     if (!props) return orig.apply(ctx, args);
@@ -5377,6 +5537,7 @@ return false;
                 } catch (_) {}
                 return orig.apply(ctx, args);
             });
+            if (typeof unpatch === "function") self._activityPanelUnpatchFns.push(unpatch);
             return true;
         };
         try {
@@ -5474,6 +5635,7 @@ return false;
         if (!this.settings.places.messages) return;
         if (this._forumPostComponentPatched) return;
         if (!this._retryGuardEnter("patchForumPostComponent", attempt)) return;
+        this._ensureForumPostRetryListener();
         const self = this;
         const authorIdFromThreadId = threadId => {
             if (!threadId) return null;
@@ -5587,6 +5749,10 @@ return false;
             return;
         }
         if (!hadCandidateEl) {
+            if (!this._isCurrentChannelForum()) {
+                this._retryGuardExit("patchForumPostComponent");
+                return;
+            }
             if (this._forumPostWaitCycles === undefined) this._forumPostWaitCycles = 0;
             this._forumPostWaitCycles++;
             if (this._forumPostWaitCycles < 750) {
@@ -5608,10 +5774,136 @@ return false;
         this._patcher?._warn("patchForumPostComponent", new Error("ran out of attempts to locate the forum row-list component - this patch only works while a forum channel's post list is open, so it may simply not have been mounted yet during any attempt"));
         this._retryGuardExit("patchForumPostComponent");
     }
+    _findMessageListAnchorEl() {
+        try {
+            const listRoot = document.querySelector('[data-list-id*="chat-messages"]');
+            if (listRoot) {
+                const item = listRoot.querySelector('li[data-list-item-id*="chat-messages"]') || listRoot.querySelector('li[class*="messageListItem"]');
+                if (item) return item;
+            }
+        } catch (_) {}
+        try {
+            return document.querySelector('li[class*="messageListItem"]') || document.querySelector('[class*="message_"]');
+        } catch (_) {
+            return null;
+        }
+    }
+    _isOnDmListScreen() {
+        try {
+            return /^\/channels\/@me(\/|$)/.test(location.pathname);
+        } catch (_) {
+            return false;
+        }
+    }
+    _isMemberListOpen() {
+        try {
+            return !!document.querySelector('[data-list-id^="members-"]');
+        } catch (_) {
+            return false;
+        }
+    }
+    _isCurrentChannelForum() {
+        try {
+            const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+            if (!channelId) return false;
+            return this._isForumParentChannel(channelId);
+        } catch (_) {
+            return false;
+        }
+    }
+    _isOnChatlessScreen() {
+        try {
+            const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+            if (channelId) return false;
+            if (this._findMessageListAnchorEl()) return false;
+            try {
+                if (/^\/channels\/@me\/?$/.test(location.pathname)) return true;
+            } catch (_) {}
+            const onFriendsOrEmptyDm = document.querySelector('[class*="friendsContainer"]') || document.querySelector('[class*="noFriendsText"]');
+            if (onFriendsOrEmptyDm) return true;
+            try {
+                const hasChannelInUrl = /\/channels\/(?:@me|\d+)\/\d{15,25}/.test(location.pathname);
+                if (!hasChannelInUrl) return true;
+            } catch (_) {}
+            return false;
+        } catch (_) {
+            return false;
+        }
+    }
+    _ensureVisibilityRetryListener() {
+        if (this._visibilityRetryListener) return;
+        this._visibilityRetryListener = () => {
+            if (document.visibilityState !== "visible") return;
+            if (!this.isRunning) return;
+            if (!this._blockedMsgGroupPatched && this._blockedGroupWaitCycles >= 750) {
+                this._blockedGroupWaitCycles = 0;
+                this.patchBlockedMessageGroup(1);
+            }
+            if (!this._messagesWrapPatched && this._messagesWrapWaitCycles >= 750) {
+                this._messagesWrapWaitCycles = 0;
+                this.patchMessagesWrapComponent(1);
+            }
+        };
+        document.addEventListener("visibilitychange", this._visibilityRetryListener);
+    }
+    _registerNavigationRetryHook(key, fn) {
+        if (!this._navigationRetryHookMap) this._navigationRetryHookMap = {};
+        if (this._navigationRetryHookMap[key]) return;
+        this._navigationRetryHookMap[key] = fn;
+        if (!Array.isArray(this._navigationRetryHooks)) this._navigationRetryHooks = [];
+        this._navigationRetryHooks.push(fn);
+    }
+    _ensureRouteChangeRetryListener() {
+        const self = this;
+        this._registerNavigationRetryHook("messagesAndBlockedGroup", () => {
+            if (!self.isRunning) return;
+            if (!self._blockedMsgGroupPatched) {
+                self._blockedGroupWaitCycles = 0;
+                self.patchBlockedMessageGroup(1);
+            }
+            if (!self._messagesWrapPatched) {
+                self._messagesWrapWaitCycles = 0;
+                self.patchMessagesWrapComponent(1);
+            }
+        });
+    }
+    _ensureForumPostRetryListener() {
+        const self = this;
+        this._registerNavigationRetryHook("forumPost", () => {
+            if (!self.isRunning) return;
+            if (!self._forumPostComponentPatched) {
+                self._forumPostWaitCycles = 0;
+                self.patchForumPostComponent(1);
+            }
+        });
+    }
+    _ensureMemberListRowRetryListener() {
+        const self = this;
+        this._registerNavigationRetryHook("memberListRow", () => {
+            if (!self.isRunning) return;
+            if (!self._memberListRowPatched) {
+                self._memberListRowWaitCycles = 0;
+                self.patchMemberListRow(0);
+            }
+        });
+    }
+    _ensurePrivateChannelRowRetryListener() {
+        const self = this;
+        this._registerNavigationRetryHook("privateChannelRow", () => {
+            if (!self.isRunning) return;
+            if (!self._privateChannelRowPatched && !self._rowPatchInFlight) {
+                self._rowPatchWaitCycles = 0;
+                self.patchPrivateChannelRowComponent(0);
+            }
+        });
+    }
     patchBlockedMessageGroup(attempt = 0) {
         if (!this.settings.places.messages) return;
         if (this._blockedMsgGroupPatched) return;
         if (!this._retryGuardEnter("patchBlockedMessageGroup", attempt)) return;
+        if (attempt === 0) this._blockedGroupWaitCycles = 0;
+        this._ensureVisibilityRetryListener();
+        this._ensureRouteChangeRetryListener();
         const BLOCKED_STRINGS = ["filterAfterTimestamp", "messageGroupSpacing", "showNewMessagesBar", "messageDisplayCompact", "channelStream", "permissionVersion", "editingMessageId", "keyboardModeEnabled", "showingQuarantineBanner", "hideSummaries", "typingGradient", "isGameInvitesPost"];
         const BLOCKED_REQUIRED = 3;
         const extractMessages = props => {
@@ -5642,7 +5934,7 @@ return false;
         let lastTryReason = "no-match";
         const tryPatchOnce = () => {
             try {
-                const msgEl = document.querySelector('[class*="message_"]');
+                const msgEl = this._findMessageListAnchorEl();
                 if (!msgEl) { lastTryReason = "no-element"; return false; }
                 const Comp = this.findComponentViaFiber(msgEl, (type, props) => {
                     if (!props || typeof props !== "object") return false;
@@ -5714,14 +6006,19 @@ return false;
             });
         }
         if (lastTryReason === "no-element") {
+            if (this._isOnChatlessScreen()) {
+                this._stopShortLivedMessageObserver();
+                this._retryGuardExit("patchBlockedMessageGroup");
+                return;
+            }
             if (this._blockedGroupWaitCycles === undefined) this._blockedGroupWaitCycles = 0;
-            this._blockedGroupWaitCycles++;
+            if (document.visibilityState === "visible") this._blockedGroupWaitCycles++;
             if (this._blockedGroupWaitCycles < 750) {
                 this._scheduleRetry(() => this.patchBlockedMessageGroup(attempt || 1), 400);
                 return;
             }
             this._stopShortLivedMessageObserver();
-            this._patcher?._warn("patchBlockedMessageGroup", new Error("gave up waiting for any message list to appear on screen after ~5 minutes"));
+            this._patcher?._warn("patchBlockedMessageGroup", new Error("gave up waiting for any message list to appear on screen after ~5 minutes of the tab being visible"));
             this._retryGuardExit("patchBlockedMessageGroup");
             return;
         }
@@ -5834,6 +6131,16 @@ return false;
         if (!this.settings.places.messages) return;
         if (this._messagesWrapPatched) return;
         if (!this._retryGuardEnter("patchMessagesWrapComponent", attempt)) return;
+        if (attempt === 0) this._messagesWrapWaitCycles = 0;
+        this._ensureVisibilityRetryListener();
+        this._ensureRouteChangeRetryListener();
+        if (attempt === 0 && Array.isArray(this._messagesWrapUnpatchFns) && this._messagesWrapUnpatchFns.length) {
+            for (const unpatch of this._messagesWrapUnpatchFns) {
+                try { unpatch?.(); } catch (_) {}
+            }
+            this._messagesWrapUnpatchFns = [];
+        }
+        if (!Array.isArray(this._messagesWrapUnpatchFns)) this._messagesWrapUnpatchFns = [];
         const self = this;
         const applyFilterToProps = props => {
             self._health?.heartbeat("messages");
@@ -5894,7 +6201,7 @@ return false;
         };
         let msgElPresent = false;
         try {
-            const msgEl = document.querySelector('li[class*="messageListItem"]');
+            const msgEl = this._findMessageListAnchorEl();
             if (msgEl) {
                 msgElPresent = true;
                 const Comp = findWrapComponentFromEl(msgEl);
@@ -5909,7 +6216,8 @@ return false;
                                 }
                             });
                             const container = { Comp };
-                            this.patchInstead(container, "Comp", () => wrapper);
+                            const unpatch = this.patchInstead(container, "Comp", () => wrapper);
+                            if (typeof unpatch === "function") self._messagesWrapUnpatchFns.push(unpatch);
                             patched = true;
                         } catch (_) {}
                     } else if (Comp.__byeblockedWrapPatched) {
@@ -5917,13 +6225,15 @@ return false;
                         this._retryGuardExit("patchMessagesWrapComponent");
                         return;
                     } else if (Comp.prototype && typeof Comp.prototype.render === "function") {
-                        this.patchBefore(Comp.prototype, "render", context => applyFilterToProps(context?.props));
+                        const unpatch = this.patchBefore(Comp.prototype, "render", context => applyFilterToProps(context?.props));
+                        if (typeof unpatch === "function") self._messagesWrapUnpatchFns.push(unpatch);
                         patched = true;
                     } else {
                         const found = findModuleHolding(Comp);
                         if (found) {
                             const [moduleObj, key] = found;
-                            this.patchBefore(moduleObj, key, (_, args) => applyFilterToProps(args?.[0]));
+                            const unpatch = this.patchBefore(moduleObj, key, (_, args) => applyFilterToProps(args?.[0]));
+                            if (typeof unpatch === "function") self._messagesWrapUnpatchFns.push(unpatch);
                             patched = true;
                         } else {
                             const inner = Comp.type || Comp.render;
@@ -5931,7 +6241,8 @@ return false;
                                 const innerFound = findModuleHolding(inner);
                                 if (innerFound) {
                                     const [moduleObj, key] = innerFound;
-                                    this.patchBefore(moduleObj, key, (_, args) => applyFilterToProps(args?.[0]));
+                                    const unpatch = this.patchBefore(moduleObj, key, (_, args) => applyFilterToProps(args?.[0]));
+                                    if (typeof unpatch === "function") self._messagesWrapUnpatchFns.push(unpatch);
                                     patched = true;
                                 }
                             }
@@ -5947,13 +6258,17 @@ return false;
             }
         } catch (_) {}
         if (!msgElPresent) {
+            if (this._isOnChatlessScreen()) {
+                this._retryGuardExit("patchMessagesWrapComponent");
+                return;
+            }
             if (this._messagesWrapWaitCycles === undefined) this._messagesWrapWaitCycles = 0;
-            this._messagesWrapWaitCycles++;
+            if (document.visibilityState === "visible") this._messagesWrapWaitCycles++;
             if (this._messagesWrapWaitCycles < 750) {
                 this._scheduleRetry(() => this.patchMessagesWrapComponent(attempt || 1), 400);
                 return;
             }
-            this._patcher?._warn("patchMessagesWrapComponent", new Error("gave up waiting for any message list to appear on screen after ~5 minutes"));
+            this._patcher?._warn("patchMessagesWrapComponent", new Error("gave up waiting for any message list to appear on screen after ~5 minutes of the tab being visible"));
             this._retryGuardExit("patchMessagesWrapComponent");
             return;
         }
@@ -5984,6 +6299,7 @@ return false;
     patchPrivateChannelRowComponent(attempt = 0) {
         if (!this.settings.places.groupDms) return;
         if (this._privateChannelRowPatched) return;
+        this._ensurePrivateChannelRowRetryListener();
         if (attempt === 0) {
             if (this._rowPatchInFlight) return;
             this._rowPatchInFlight = true;
@@ -6025,6 +6341,11 @@ return false;
                 }
                 const clone = Object.create(Object.getPrototypeOf(channel));
                 Object.assign(clone, channel, { recipients: filteredRecipients, rawRecipients: filteredRaw });
+                const FILTERED_CHANNEL_CACHE_MAX_SIZE = 200;
+                if (self._filteredChannelCache.size >= FILTERED_CHANNEL_CACHE_MAX_SIZE && !self._filteredChannelCache.has(channel.id)) {
+                    const oldestKey = self._filteredChannelCache.keys().next().value;
+                    if (oldestKey !== undefined) self._filteredChannelCache.delete(oldestKey);
+                }
                 self._filteredChannelCache.set(channel.id, { sig, clone });
                 return clone;
             } catch (_) {
@@ -6099,6 +6420,11 @@ return false;
             this._patcher._logFail("patchPrivateChannelRowComponent:domScan", err);
         }
         if (!hadCandidateRows) {
+            if (!this._isOnDmListScreen()) {
+                clearTimeout(this._rowPatchRetryTimeout);
+                this._rowPatchInFlight = false;
+                return;
+            }
             if (this._rowPatchWaitCycles === undefined) this._rowPatchWaitCycles = 0;
             this._rowPatchWaitCycles++;
             if (this._rowPatchWaitCycles < 750) {
@@ -6627,7 +6953,7 @@ return false;
             return null;
         } catch (_) { return null; }
     }
-    patchReadState() {
+    patchReadState(attempt = 0) {
         this._ensureTaskbarElectronPatch();
         if (!this.modules.ReadStateStore) return;
         if (this._readStatePatchesRegistered) {
@@ -6637,6 +6963,16 @@ return false;
             if (relationshipStoreReady) {
                 this._readStatePatched = true;
                 this._refreshTaskbarBadge();
+            }
+            return;
+        }
+        const essentialMethodsPresent = typeof this.modules.ReadStateStore.getUnreadCount === "function"
+            && typeof this.modules.ReadStateStore.hasUnread === "function";
+        if (!essentialMethodsPresent) {
+            if (attempt < 15) {
+                this._scheduleRetry(() => this.patchReadState(attempt + 1), this._retryDelay(attempt, 2000));
+            } else {
+                this._patcher?._warn("patchReadState", new Error("ReadStateStore is missing getUnreadCount/hasUnread after 15 attempts - Discord likely renamed these methods; unread counts for blocked users will not be filtered until the plugin is updated."));
             }
             return;
         }
@@ -6961,6 +7297,18 @@ return false;
             fn();
         }, delay);
     }
+    _isThreadStoreOwnerFilterActive() {
+        try {
+            const store = this.modules.ThreadStore;
+            if (!store) return false;
+            const methodSet = this._patchedStoreMethods?.get(store);
+            if (!methodSet) return false;
+            return methodSet.has("getThreadsForParent") || methodSet.has("getThreadsForChannel");
+        } catch (_) { return false; }
+    }
+    _isThreadOwnerFilteringCovered() {
+        return !!(this._forumPostComponentPatched || this._isThreadStoreOwnerFilterActive());
+    }
     _patchStoreMethodOnce(store, method, callback, kind = "after") {
         if (!store || typeof store[method] !== "function") return;
         let methodSet = this._patchedStoreMethods.get(store);
@@ -7279,6 +7627,7 @@ return false;
                         if (this.settings.places.messages) {
                             this.hideForumPosts();
                             if (!this._blockedMsgGroupPatched) this.patchBlockedMessageGroup(0);
+                            if (!this._messagesWrapPatched) this.patchMessagesWrapComponent(0);
                         }
                         if (this.settings.places.memberList) this.hideMemberRows();
                         if (this.settings.places.groupDms || this.settings.places.messages) this.hidePrivateChannels();
@@ -7577,6 +7926,27 @@ return false;
                 this.logger.warn("The forum post card patch appears inactive - Discord may have changed the component's structure. Consider updating the plugin.");
                 try { this.patchForumPostComponent(); } catch (_) {}
             }
+        );
+
+        this._health.register(
+            "activePostsPopover",
+            () => {
+                if (!this.settings.places?.messages) return true;
+                if (this._activePostsPopoverPatched) return true;
+                if (this._isThreadOwnerFilteringCovered()) return true;
+                try {
+                    const popoverOpen = document.querySelector('[class*="activePostsPopout_"], [class*="activePostsWrapper_"]');
+                    if (!popoverOpen) return true;
+                } catch (_) { return true; }
+                return false;
+            },
+            () => {
+                if (!this._isThreadOwnerFilteringCovered()) {
+                    try { this.patchActivePostsPopoverComponent(); } catch (_) {}
+                }
+            },
+            2,
+            () => this._isThreadOwnerFilteringCovered()
         );
 
         this._health.register(
@@ -7934,16 +8304,7 @@ return false;
         }
     }
     _startMenuPortalObserver() {
-        if (this._menuPortalObserver) return;
-        this._menuPortalObserver = new MutationObserver(mutations => {
-            try { this._handleMenuPortalMutationBatch(mutations); } catch (_) {}
-            try { this._handleStatusModalMutationBatch(mutations); } catch (_) {}
-        });
-        this._menuPortalObserver.observe(document.body, {
-            childList: true,
-            subtree: true
-        });
-        this._statusModalObserver = this._menuPortalObserver;
+        this._menuPortalActive = true;
     }
     _startChannelStatusModalWatcher() {
         if (this._statusModalClickHandler) return;
@@ -7959,8 +8320,7 @@ return false;
         };
         document.addEventListener("click", this._statusModalClickHandler, true);
 
-        if (!this._menuPortalObserver) this._startMenuPortalObserver();
-        this._statusModalObserver = this._menuPortalObserver;
+        if (!this._menuPortalActive) this._startMenuPortalObserver();
     }
     _maybeClearBlockedStatusEditor(editor) {
         try {
@@ -8186,14 +8546,17 @@ return false;
         const removeSel = '[class*="reactionRemove"], [class*="removeReaction"], button[aria-label*="Remove"], button[aria-label*="Remover"]';
         entry.querySelectorAll(removeSel).forEach(btn => {
             if (btn.dataset?.nmbReactorRemoveHidden !== "true") btn.dataset.nmbReactorRemoveHidden = "true";
+            this._hiddenReactorRemoveBtns.add(btn);
         });
     }
     _hideReactorEntry(row) {
         if (!row) return;
         if (row.dataset?.nmbReactorHidden !== "true") row.dataset.nmbReactorHidden = "true";
+        this._hiddenReactorRows.add(row);
         const entry = this._getReactorEntryRoot(row);
         if (entry && entry !== row && this._countReactorClickables(entry) === 1) {
             if (entry.dataset?.nmbReactorHidden !== "true") entry.dataset.nmbReactorHidden = "true";
+            this._hiddenReactorRows.add(entry);
             this._hideReactorRemoveButtons(entry);
             return;
         }
@@ -8285,8 +8648,12 @@ return false;
             const userId = this.resolveReactorIdFromRemoveButton(btn);
             if (userId && this.shouldHide(userId)) {
                 btn.dataset.nmbReactorRemoveHidden = "true";
+                this._hiddenReactorRemoveBtns.add(btn);
                 const entry = this._getReactorEntryRoot(btn);
-                if (entry && this._countReactorClickables(entry) <= 1) entry.dataset.nmbReactorHidden = "true";
+                if (entry && this._countReactorClickables(entry) <= 1) {
+                    entry.dataset.nmbReactorHidden = "true";
+                    this._hiddenReactorRows.add(entry);
+                }
                 return;
             }
             const entry = this._getReactorEntryRoot(btn);
@@ -8298,7 +8665,11 @@ return false;
             const clickableHidden = clickable?.dataset?.nmbReactorHidden === "true";
             if (!clickable || clickableHidden && !hasIdentity) {
                 btn.dataset.nmbReactorRemoveHidden = "true";
-                if (this._countReactorClickables(entry) <= 1) entry.dataset.nmbReactorHidden = "true";
+                this._hiddenReactorRemoveBtns.add(btn);
+                if (this._countReactorClickables(entry) <= 1) {
+                    entry.dataset.nmbReactorHidden = "true";
+                    this._hiddenReactorRows.add(entry);
+                }
             }
         });
     }
@@ -8425,6 +8796,8 @@ return false;
     }
     hideForumPosts() {
         try {
+            const channelId = this.modules.SelectedChannelStore?.getChannelId?.();
+            if (!channelId || !this._isForumParentChannel(channelId)) return;
             const forumLists = document.querySelectorAll('[data-list-id^="forum-channel-list-"]');
             for (const list of forumLists) {
                 let cards = Array.from(list.querySelectorAll('[class*="card_"]')).filter(card => {
@@ -9036,16 +9409,32 @@ return false;
             delete listRoot.dataset.nmbPrevListStyle;
         }
     }
-    _wireTopicPanelEmptyButton(emptyRoot) {
+    _wireTopicPanelEmptyButton(emptyRoot, scrollerContent) {
         const button = emptyRoot?.querySelector("button");
         if (!button || button.dataset.nmbTopicCreateWired === "true") return;
         button.dataset.nmbTopicCreateWired = "true";
         button.addEventListener("click", () => {
-            const allButtons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(btn => btn !== button && !emptyRoot.contains(btn) && btn.offsetParent !== null);
-            const normalize = el => (el.textContent || "").trim().toLowerCase();
-            let target = allButtons.find(btn => normalize(btn) === "create thread") || allButtons.find(btn => normalize(btn) === "create") || allButtons.find(btn => normalize(btn) === "criar") || allButtons.find(btn => normalize(btn) === "criar tópico");
+            let target = null;
+            if (scrollerContent) {
+                const nativeButtons = Array.from(scrollerContent.querySelectorAll('button, [role="button"]'));
+                if (nativeButtons.length === 1) {
+                    target = nativeButtons[0];
+                }
+            }
             if (!target) {
-                this._patcher?._warn('_wireTopicPanelEmptyButton', new Error('No matching "create thread" button found by text - Discord may have renamed the label or changed locale strings. Click was not forwarded.'));
+                const allButtons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(btn => btn !== button && !emptyRoot.contains(btn) && btn.offsetParent !== null);
+                const normalize = el => (el.textContent || "").trim().toLowerCase();
+                const CREATE_THREAD_LABELS = [
+                    "create thread", "create", "criar tópico", "criar", "crear hilo", "crear",
+                    "créer un fil de discussion", "créer", "thread erstellen", "erstellen",
+                    "crea thread", "crea", "onderwerp maken", "maken", "utwórz wątek", "utwórz",
+                    "создать ветку", "создать", "konu oluştur", "oluştur", "建立討論串", "建立",
+                    "创建帖子", "创建", "スレッドを作成", "作成", "스레드 생성", "생성"
+                ];
+                target = CREATE_THREAD_LABELS.map(label => allButtons.find(btn => normalize(btn) === label)).find(Boolean);
+            }
+            if (!target) {
+                this._patcher?._warn('_wireTopicPanelEmptyButton', new Error('No matching "create thread" button found by structure or text - Discord may have changed the empty-state markup. Click was not forwarded.'));
                 return;
             }
             try {
@@ -9068,6 +9457,7 @@ return false;
     }
     fixEmptyTopicPanelState() {
         try {
+            if (!this._isCurrentChannelForumOrThread()) return;
             const headers = document.querySelectorAll('[class*="sectionHeader_"]');
             for (const header of headers) {
                 const textContent = (header.textContent || "").toLowerCase();
@@ -9093,7 +9483,7 @@ return false;
                     } else if (existingSkeleton.parentElement !== listRoot) {
                         listRoot.appendChild(existingSkeleton);
                     }
-                    this._wireTopicPanelEmptyButton(existingSkeleton);
+                    this._wireTopicPanelEmptyButton(existingSkeleton, scrollerContent);
                 } else if (visibleCount > 0) {
                     this.restoreElement(header);
                     this._restoreTopicPanelListLayout(listRoot, scrollerContent);
@@ -9146,14 +9536,21 @@ return false;
         this.hideBlockedReactors();
     }
     _fastHideChannelStatusFromMutations(mutations) {
-        const sel = '[class*="channelStatus" i], [class*="voiceChannelStatus" i], [class*="statusText" i], [data-list-item-id*="channels"] [class*="subtitle" i], [data-list-item-id*="channels"] [role="button"]:has([class*="status" i])';
+        const sel = '[class*="channelStatus" i], [class*="voiceChannelStatus" i], [data-list-item-id*="channels"] [class*="statusText" i], [data-list-item-id*="channels"] [class*="subtitle" i], [data-list-item-id*="channels"] [role="button"]:has([class*="status" i])';
+        const exclude = '[class*="activityStatusText" i], [class*="accountProfile" i] *, [class*="panels" i] *';
+        const isEligible = (el) => {
+            if (!el || el.matches?.(exclude)) return false;
+            if (el.closest?.(exclude)) return false;
+            if (!el.closest?.('[data-list-item-id*="channels"]')) return false;
+            return true;
+        };
         for (let m = 0; m < mutations.length; m++) {
             const added = mutations[m].addedNodes;
             for (let n = 0; n < added.length; n++) {
                 const node = added[n];
                 if (node.nodeType !== 1) continue;
                 if (node.matches?.(sel)) {
-                    if (!node.dataset?.nmbStatusSafe && !node.dataset?.nmbStatusOverridden) {
+                    if (isEligible(node) && !node.dataset?.nmbStatusSafe && !node.dataset?.nmbStatusOverridden) {
                         node.dataset.nmbStatusOverridden = "true";
                     }
                     continue;
@@ -9162,7 +9559,7 @@ return false;
                     const els = node.querySelectorAll(sel);
                     for (let e = 0; e < els.length; e++) {
                         const el = els[e];
-                        if (!el.dataset?.nmbStatusSafe && !el.dataset?.nmbStatusOverridden) {
+                        if (isEligible(el) && !el.dataset?.nmbStatusSafe && !el.dataset?.nmbStatusOverridden) {
                             el.dataset.nmbStatusOverridden = "true";
                         }
                     }
@@ -9180,6 +9577,7 @@ return false;
                 if (node.nodeType !== 1) continue;
                 const tag = node.tagName;
                 if (tag === 'LINK' || tag === 'STYLE' || tag === 'SCRIPT' || tag === 'META' || tag === 'TITLE') continue;
+                if (node.matches?.('[role="menu"]')) continue;
                 const wasHidden = this.hiddenElements.size;
                 this._fastHideNode(node);
                 if (this.hiddenElements.size > wasHidden) messagesHidden = true;
@@ -9488,8 +9886,10 @@ return false;
                 this.fixEmptyTopicPanelState();
                 this.fixPinNotificationBadge();
             }
-            if (p.groupDms || p.messages) this.hidePrivateChannels();
-            this.enforceEmptyDmSkeleton();
+            if (p.groupDms || p.messages) {
+                this.hidePrivateChannels();
+                this.enforceEmptyDmSkeleton();
+            }
             if (p.autocomplete) this.hideAutocompleteRows();
             if (p.reactions) {
                 this.fixReactionCounts();
@@ -9501,12 +9901,16 @@ return false;
                 this.hideBlockedStageChannelNotice();
                 this.hideBlockedGuildStageBadge();
             }
-            this.hideMentionsEverywhere();
-            this.fixMemberGroupCounts();
-            this.fixVoiceChannelIconColors();
-            this._resyncBlockedChannelStatuses();
-            this.hideOrphanedDividers();
-            this.promoteOrphanedMessages();
+            if (p.messages) {
+                this.hideMentionsEverywhere();
+                this.hideOrphanedDividers();
+                this.promoteOrphanedMessages();
+            }
+            if (p.memberList) this.fixMemberGroupCounts();
+            if (p.voiceChannels) {
+                this.fixVoiceChannelIconColors();
+                this._resyncBlockedChannelStatuses();
+            }
         } catch (e) {
             this._logThrottled("scanDom", e);
         }
@@ -9539,7 +9943,8 @@ return false;
     }
     hideMentionsEverywhere() {
         try {
-            const mentions = document.querySelectorAll('[class*="mention"]:not([data-nmb-mention-hidden="true"])');
+            const scope = document.querySelector('[class*="chatContent"]') || document;
+            const mentions = scope.querySelectorAll('[class*="mention"]:not([data-nmb-mention-hidden="true"])');
             for (const mention of mentions) {
                 this._hideSingleMention(mention);
             }
@@ -9627,6 +10032,7 @@ return false;
         if (!el.hasAttribute("data-nmb-prev-ghost-style")) {
             el.setAttribute("data-nmb-prev-ghost-style", el.getAttribute("style") || "");
         }
+        this._ghostedElements.add(el);
     }
     hidePinnedMessages() {
         if (!this.settings.places?.messages) return;
@@ -9733,6 +10139,12 @@ return false;
                 }
                 continue;
             }
+            if (reason === "pinned-panel-residue") {
+                const pinCards = Array.from(el.querySelectorAll('[data-list-item-id^="pins__"]'));
+                const stillAllHidden = pinCards.length > 0 && pinCards.every(card => card.dataset?.hiddenBlocked === "true");
+                if (!stillAllHidden) this.restoreElement(el);
+                continue;
+            }
             const userId = el.dataset?.nmbUserId;
             if (userId && !this.shouldHide(userId)) this.restoreElement(el);
         }
@@ -9746,36 +10158,52 @@ return false;
                 this.restoreParent(parent);
             }
         }
-        document.querySelectorAll('[data-nmb-ghost="true"]').forEach(slot => {
+        for (const slot of Array.from(this._ghostedElements)) {
+            if (!document.contains(slot)) {
+                this._ghostedElements.delete(slot);
+                continue;
+            }
             const prev = slot.getAttribute("data-nmb-prev-ghost-style");
             if (prev) slot.setAttribute("style", prev); else slot.removeAttribute("style");
             delete slot.dataset.nmbGhost;
             slot.removeAttribute("data-nmb-prev-ghost-style");
-        });
-        document.querySelectorAll('[data-nmb-reactor-hidden="true"]').forEach(el => {
+            this._ghostedElements.delete(slot);
+        }
+        for (const el of Array.from(this._hiddenReactorRows)) {
+            if (!document.contains(el)) {
+                this._hiddenReactorRows.delete(el);
+                continue;
+            }
             const clickable = el.matches?.('[class*="reactorClickable_"]') ? el : el.querySelector('[class*="reactorClickable_"]');
             const userId = this.findUserId(clickable || el) || this.resolveReactorIdByName(clickable || el);
-            if (!userId || !this.shouldHide(userId)) delete el.dataset.nmbReactorHidden;
-        });
-        document.querySelectorAll('[data-nmb-reactor-remove-hidden="true"]').forEach(btn => {
+            if (!userId || !this.shouldHide(userId)) {
+                delete el.dataset.nmbReactorHidden;
+                this._hiddenReactorRows.delete(el);
+            }
+        }
+        for (const btn of Array.from(this._hiddenReactorRemoveBtns)) {
+            if (!document.contains(btn)) {
+                this._hiddenReactorRemoveBtns.delete(btn);
+                continue;
+            }
             const userId = this.resolveReactorIdFromRemoveButton(btn);
-            if (!userId || !this.shouldHide(userId)) delete btn.dataset.nmbReactorRemoveHidden;
-        });
-        document.querySelectorAll('[data-nmb-reason="pinned-panel-residue"]').forEach(wrapper => {
-            const pinCards = Array.from(wrapper.querySelectorAll('[data-list-item-id^="pins__"]'));
-            const stillAllHidden = pinCards.length > 0 && pinCards.every(card => card.dataset?.hiddenBlocked === "true");
-            if (!stillAllHidden) this.restoreElement(wrapper);
-        });
-        document.querySelectorAll(".nmb-pins-empty-placeholder").forEach(placeholder => {
+            if (!userId || !this.shouldHide(userId)) {
+                delete btn.dataset.nmbReactorRemoveHidden;
+                this._hiddenReactorRemoveBtns.delete(btn);
+            }
+        }
+        for (const placeholder of Array.from(this._pinsEmptyPlaceholders)) {
             if (!document.contains(placeholder) || !document.contains(placeholder.parentElement)) {
                 placeholder.remove();
+                this._pinsEmptyPlaceholders.delete(placeholder);
             }
-        });
-        document.querySelectorAll(".nmb-pins-empty-footer, .nmb-injected-tip-footer").forEach(footer => {
+        }
+        for (const footer of Array.from(this._pinsEmptyFooters)) {
             if (!document.contains(footer) || !document.contains(footer.parentElement)) {
                 footer.remove();
+                this._pinsEmptyFooters.delete(footer);
             }
-        });
+        }
     }
     restoreAllElements() {
         document.querySelectorAll('[data-nmb-fake-timer="true"]').forEach(el => el.remove());
@@ -9899,6 +10327,11 @@ return false;
         });
         this.hiddenElements.clear();
         this.hiddenParents.clear();
+        this._ghostedElements.clear();
+        this._hiddenReactorRows.clear();
+        this._hiddenReactorRemoveBtns.clear();
+        this._pinsEmptyPlaceholders.clear();
+        this._pinsEmptyFooters.clear();
     }
     _reapOrphanedVoiceWrappers() {
         const hiddenInner = document.querySelectorAll('[class*="voiceUser"][data-hidden-blocked="true"]');
@@ -11650,6 +12083,7 @@ return false;
                 placeholder = document.createElement("div");
                 placeholder.className = "nmb-pins-empty-placeholder";
                 listRoot.appendChild(placeholder);
+                this._pinsEmptyPlaceholders.add(placeholder);
             }
             {
                 const bodyText = this._findLocalizedPinsEmptyText() || "This channel doesn't have<br>any pinned messages... yet.";
@@ -11697,6 +12131,7 @@ return false;
                     injectedTip = document.createElement("div");
                     injectedTip.className = "nmb-injected-tip-footer";
                     scrollingFooterWrap.appendChild(injectedTip);
+                    this._pinsEmptyFooters.add(injectedTip);
                 }
                 injectedTip.innerHTML = `\n                    <div style="width: 100%; padding: 10px 16px; box-sizing: border-box;">\n                        <div style="color: var(--text-feedback-positive); font-size: 14px; font-weight: 600; line-height: 18px;">${tip.label}</div>\n                        <div style="color: var(--text-default); font-size: 14px; font-weight: 400; line-height: 18px;">${tip.text}</div>\n                    </div>\n                `;
                 injectedTip.style.cssText = "display: block !important; width: 100% !important; box-sizing: border-box !important; margin-top: 16px !important; background: var(--background-secondary) !important;";
@@ -11729,7 +12164,10 @@ return false;
                 nativeFooter.removeAttribute("data-nmb-prev-footer-html");
             }
             const injectedTip = scrollingFooterWrap ? scrollingFooterWrap.querySelector(":scope > .nmb-injected-tip-footer") : null;
-            if (injectedTip) injectedTip.remove();
+            if (injectedTip) {
+                injectedTip.remove();
+                this._pinsEmptyFooters.delete(injectedTip);
+            }
             if (scrollingFooterWrap && scrollingFooterWrap.hasAttribute("data-nmb-prev-wrap-style")) {
                 const prevWrapStyle = scrollingFooterWrap.getAttribute("data-nmb-prev-wrap-style");
                 if (prevWrapStyle) scrollingFooterWrap.setAttribute("style", prevWrapStyle); else scrollingFooterWrap.removeAttribute("style");
@@ -12062,8 +12500,8 @@ return false;
         if (!this._retryGuardEnter("patchVoiceMute", attempt)) return;
         const Dispatcher = this.modules.Dispatcher;
         if (!Dispatcher || typeof Dispatcher.dispatch !== "function") {
-            if (attempt < 20) { setTimeout(() => this.patchVoiceMute(attempt + 1), 2000); return; }
-            this._patcher?._warn("patchVoiceMute", new Error("Dispatcher unavailable after several attempts — audio mute for blocked users may not react to real-time call joins/leaves"));
+            if (attempt < 20) { this._scheduleRetry(() => this.patchVoiceMute(attempt + 1), 2000); return; }
+            this._patcher?._warn("patchVoiceMute", new Error("Dispatcher unavailable after several attempts - audio mute for blocked users may not react to real-time call joins/leaves"));
             this._retryGuardExit("patchVoiceMute");
             return;
         }
@@ -13326,6 +13764,13 @@ return false;
         if (previous !== null) el.textContent = previous;
         el.removeAttribute("data-nmb-prev-text");
     }
+    _restoreOverwrittenTextForPlace(placeKey) {
+        if (placeKey === "memberList") {
+            document.querySelectorAll("[data-nmb-prev-text]").forEach(el => this.restoreTemporaryText(el));
+        } else if (placeKey === "voiceChannels") {
+            document.querySelectorAll("[data-nmb-muted-voice]").forEach(row => this.restoreVoiceChannelIcon(row));
+        }
+    }
     patchSound(retryCount = 0) {
 
         const MAX_SOUND_PATCH_RETRIES = 10;
@@ -13671,6 +14116,7 @@ return false;
     _isChannelStatusPlaceholder(statusEl) {
         if (!statusEl) return true;
 
+        if (statusEl.matches?.('[class*="activityStatusText" i]') || statusEl.closest?.('[class*="accountProfile" i], [class*="panels" i]')) return true;
         if (statusEl.dataset?.nmbStatusOverridden === "true") return false;
         try {
 
@@ -13863,10 +14309,16 @@ return false;
             this._groupDMUnreadGhostSignature = signature;
             const previouslyGhosted = section.querySelectorAll('[data-nmb-ghost="true"]');
             for (const el of previouslyGhosted) {
-                if (!suppressedWrappers.has(el)) delete el.dataset.nmbGhost;
+                if (!suppressedWrappers.has(el)) {
+                    delete el.dataset.nmbGhost;
+                    this._ghostedElements.delete(el);
+                }
             }
             for (const wrapper of suppressedWrappers) {
-                if (wrapper.dataset.nmbGhost !== "true") wrapper.dataset.nmbGhost = "true";
+                if (wrapper.dataset.nmbGhost !== "true") {
+                    wrapper.dataset.nmbGhost = "true";
+                    this._ghostedElements.add(wrapper);
+                }
             }
         } catch (_) {}
     }
@@ -13874,6 +14326,7 @@ return false;
         try {
             document.querySelectorAll('#guild-list-unread-dms [data-nmb-ghost="true"]').forEach(el => {
                 delete el.dataset.nmbGhost;
+                this._ghostedElements.delete(el);
             });
             this._groupDMUnreadGhostSignature = null;
         } catch (_) {}
@@ -14177,7 +14630,7 @@ return false;
                 this._patcher._logFail("patchReactions", new Error("ran out of attempts - ReactionsStore.getReactions was not found; Discord likely renamed something and blocked-user reaction filtering will not work until the plugin is updated"));
                 return;
             }
-            setTimeout(() => {
+            this._scheduleRetry(() => {
                 const getStore = (...names) => this._wpGetStore(...names);
                 this.modules.ReactionsStore = getStore(...ByeBlocked.STORE_NAMES.REACTIONS);
                 this.patchReactions(attempt + 1);
@@ -14241,10 +14694,6 @@ return false;
                 }
                 const realCount = this._reactionUsersSize(users);
                 if (realCount <= 0) {
-                    if (displayedCount > 0) {
-                        visibleReactionCount++;
-                        continue;
-                    }
                     if (row.dataset.nmbZeroReaction !== "true") {
                         row.dataset.nmbZeroReaction = "true";
                     }
@@ -14444,6 +14893,7 @@ return false;
             const REACTOR_NAME_CACHE_TTL_MS = 60000;
             const REACTOR_NAME_CACHE_MISS_TTL_MS = 2000;
             const now = Date.now();
+            const REACTOR_NAME_CACHE_MAX_SIZE = 300;
             if (!this._reactorNameCache) this._reactorNameCache = new Map();
             const cached = this._reactorNameCache.get(displayName);
             if (cached) {
@@ -14463,6 +14913,10 @@ return false;
             if (resolved === null && matches.length > 1) {
                 const blockedMatch = matches.find(id => this.shouldHide?.(id));
                 if (blockedMatch) resolved = blockedMatch;
+            }
+            if (this._reactorNameCache.size >= REACTOR_NAME_CACHE_MAX_SIZE && !this._reactorNameCache.has(displayName)) {
+                const oldestKey = this._reactorNameCache.keys().next().value;
+                if (oldestKey !== undefined) this._reactorNameCache.delete(oldestKey);
             }
             this._reactorNameCache.set(displayName, { id: resolved, ts: now });
             return resolved;
@@ -14574,6 +15028,9 @@ return false;
         if (section === "types") {
             this._shouldHideCache = new Map;
             this._invalidateTaskbarBadgeCache();
+        }
+        if (section === "places" && !next && (key === "memberList" || key === "voiceChannels")) {
+            try { this._restoreOverwrittenTextForPlace(key); } catch (_) {}
         }
         if (section === "behavior" && key === "muteVoiceJoinLeaveSound") {
             if (next) {
