@@ -12,7 +12,6 @@
 [![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=flat-square&label=Latest%20Release)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=flat-square&label=Downloads)](https://github.com/8ug8ird/ByeBlocked/releases)
 [![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=flat-square&label=License)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
-[![Support Server](https://img.shields.io/badge/Discord-Support%20Server-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/Kn2S9s6mt4)
 
 
 <img src="assets/Discord_ubFapzaaLs-output.gif" width="800" alt="ByeBlocked Preview">
