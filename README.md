@@ -13,6 +13,7 @@
 [![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=flat-square&label=Downloads)](https://github.com/8ug8ird/ByeBlocked/releases)
 [![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=flat-square&label=License)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
+<p>Want to support the project? A ⭐ on GitHub helps more people discover ByeBlocked.</p>
 
 <img src="assets/Discord_ubFapzaaLs-output.gif" width="800" alt="ByeBlocked Preview">
 </div>
