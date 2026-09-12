@@ -1,9 +1,6 @@
 <div align="center">
-  <img src="assets/B.png" width="900" alt="Banner">
+  <img src="assets/b.png" width="900" alt="Banner">
 </div>
-
-
-<p align="center"><b>Blocked. Ignored. Gone.</b></p>
 
 
 <div align="center">
