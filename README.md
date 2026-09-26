@@ -6,7 +6,7 @@
 
 **Take control of your Discord experience.**
 
-A BetterDiscord plugin that hides, silences, and ignores users you've blocked, across chat, voice, calls, member lists, notifications, and more.
+A BetterDiscord plugin that hides and silences blocked users across Discord.
 
 <br>
 
