@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/img.png" alt="ByeBlocked" width="180">
+<img src="assets/2.png" alt="ByeBlocked" width="180">
 
 # ByeBlocked
 
@@ -10,24 +10,25 @@ A BetterDiscord plugin that hides and silences blocked users across Discord.
 
 <br>
 
-[![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-5865F2?style=flat-square&logo=discord&logoColor=white)](https://betterdiscord.app)
-[![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=flat-square&label=Latest%20Release&color=007EC6)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=flat-square&label=Downloads&color=67AC09)](https://github.com/8ug8ird/ByeBlocked/releases)
-[![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=flat-square&label=License&color=67AC09)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
+[![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-555555?style=flat\&logo=discord\&logoColor=white)](https://betterdiscord.app)
+[![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=flat\&label=Release\&color=555555)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=flat\&label=Downloads\&color=555555)](https://github.com/8ug8ird/ByeBlocked/releases)
+[![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=flat\&label=License\&color=555555)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
+
 
 <p>
-  <a href="https://github.com/8ug8ird/ByeBlocked/releases">⬇️Download</a>
+  <a href="https://github.com/8ug8ird/ByeBlocked/releases">Download</a>
   •
-  <a href="https://github.com/8ug8ird/ByeBlocked/issues">🐛Report a bug</a>
+  <a href="https://github.com/8ug8ird/ByeBlocked/issues">Report a bug</a>
   •
-  <a href="https://github.com/8ug8ird/ByeBlocked/discussions">💬Discussion</a>
+  <a href="https://github.com/8ug8ird/ByeBlocked/discussions">Discussion</a>
 </p>
 
 </div>
 
 <br>
 
-## 👋 What is ByeBlocked?
+## What is ByeBlocked?
 
 ByeBlocked makes Discord's block feature actually feel like a block.
 
@@ -35,7 +36,7 @@ Instead of simply preventing direct interaction, it removes blocked users from t
 
 <br>
 
-## ✨ Features
+## Features
 
 - **Chat & Forum** - Hides messages, replies, mentions, forum posts, reactions, and pins from blocked users
 - **Voice** - Hides blocked users in real-time, mutes their mic audio, and silences their join/leave sounds
@@ -52,7 +53,7 @@ Instead of simply preventing direct interaction, it removes blocked users from t
 </p>
 
 
-## 📦 Installation
+## Installation
 
 Requires [BetterDiscord](https://betterdiscord.app).
 
@@ -63,7 +64,7 @@ Requires [BetterDiscord](https://betterdiscord.app).
 
 <br>
 
-## 🤝 Feedback
+## Feedback
 
 Found a bug, weird edge case, or something that doesn't behave as expected?
 
@@ -73,7 +74,7 @@ Feature requests and implementation ideas are welcome too.
 
 <br>
 
-## ⭐ Support the project
+## Support the project
 
 If ByeBlocked is useful to you, consider leaving a ⭐ on GitHub.
 
