@@ -1,25 +1,38 @@
 # Contributing to ByeBlocked
 
-Thanks for taking the time to contribute! This is a solo-maintained project, so response times may vary, but every bit of help is appreciated.
+ByeBlocked is maintained independently. Contributions are accepted through issues and pull requests.
 
-## Found a bug?
+## Bug Reports
 
-Open a [Bug Report](https://github.com/8ug8ird/ByeBlocked/issues/new?template=bug_report.yml). Try to include:
+Open a [Bug Report](https://github.com/8ug8ird/ByeBlocked/issues/new?template=bug_report.yml).
+Include, when applicable:
 
-- The ByeBlocked and BetterDiscord versions you're using
+- ByeBlocked version
+- BetterDiscord version
 - Steps to reproduce the issue
-- Any errors from the DevTools console (Ctrl+Shift+I)
+- Relevant errors from the DevTools console ("Ctrl+Shift+I")
 
-## Have an idea or suggestion?
+Incomplete reports may be difficult to investigate.
 
-Open a [Feature Request](https://github.com/8ug8ird/ByeBlocked/issues/new?template=feature_request.yml). Half-formed ideas are welcome too. It's easier to discuss and refine a suggestion than to guess what would be useful.
+## Feature Requests
 
-## Want to contribute code?
+Open a [Feature Request](https://github.com/8ug8ird/ByeBlocked/issues/new?template=feature_request.yml).
+Describe the proposed feature, the problem it addresses, and any relevant use cases.
 
-You're welcome to fork the repository, make your changes, and open a pull request describing what you changed and why.
+## Code Contributions
 
-Since I maintain this project alone, please keep pull requests focused on a single change when possible. For larger changes, it's a good idea to open an issue first to discuss the approach before investing time in the implementation.
+Fork the repository, make the required changes, and open a pull request.
 
-## Code style
+Pull requests should:
 
-Try to match the existing code style and structure of the plugin as closely as possible. If you're unsure about something, feel free to ask in an issue before submitting a pull request.
+- Address a single change or closely related set of changes
+- Clearly describe what was changed and why
+- Avoid unrelated modifications
+
+For larger changes, open an issue before submitting a pull request to discuss the proposed approach.
+
+## Code Style
+
+Follow the existing code style, structure, and conventions used by the plugin.
+
+Changes that introduce unnecessary restructuring, unrelated formatting changes, or inconsistent patterns may be rejected.
