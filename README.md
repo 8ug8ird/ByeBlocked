@@ -1,35 +1,31 @@
+<h1 align="center">
+  <a href="https://github.com/8ug8ird/ByeBlocked">
+    <img src="assets/0.png" alt="ByeBlocked" width="900">
+  </a>
+</h1>
+
 <div align="center">
 
-<img src="assets/img.png" alt="ByeBlocked" width="180">
-
-# ByeBlocked
+[![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-007BFF?style=for-the-badge&logo=discord&logoColor=white)](https://betterdiscord.app)
+[![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=for-the-badge&label=Latest%20Release&color=007BFF)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=for-the-badge&label=Downloads&color=007BFF)](https://github.com/8ug8ird/ByeBlocked/releases)
+[![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=for-the-badge&label=License&color=007BFF)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
 A BetterDiscord plugin for hiding and silencing blocked users across Discord.
 
-<br>
-
-[![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-5865F2?style=flat-square&logo=discord&logoColor=white)](https://betterdiscord.app)
-[![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=flat-square&label=Latest%20Release&color=007EC6)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=flat-square&label=Downloads&color=67AC09)](https://github.com/8ug8ird/ByeBlocked/releases)
-[![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=flat-square&label=License&color=67AC09)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
-
-<p>
-  <a href="https://github.com/8ug8ird/ByeBlocked/releases">Download</a>
-  •
-  <a href="https://github.com/8ug8ird/ByeBlocked/issues">Report a bug</a>
-  •
-  <a href="https://github.com/8ug8ird/ByeBlocked/discussions">Discussion</a>
-</p>
+<a href="https://github.com/8ug8ird/ByeBlocked/releases/latest">Download</a>
+•
+<a href="https://github.com/8ug8ird/ByeBlocked/issues">Report a bug</a>
+•
+<a href="https://github.com/8ug8ird/ByeBlocked/discussions">Discussion</a>
 
 </div>
 
-<br>
 
 ## Overview
 
-ByeBlocked extends Discord's built-in blocking behavior by hiding blocked users from additional areas of the client, including messages, voice channels, group DMs, member lists, mentions, notifications, and other user-related interface elements.
+ByeBlocked extends Discord's built-in blocking behavior by hiding blocked users from additional areas of the client, including messages, voice channels, group DMs, member lists, mentions, notifications, and other interface elements.
 
-<br>
 
 ## Features
 
@@ -56,7 +52,6 @@ Requires [BetterDiscord](https://betterdiscord.app).
 3. Move `ByeBlocked.plugin.js` into the folder
 4. Enable **ByeBlocked** in BetterDiscord
 
-<br>
 
 ## Feedback
 
@@ -67,7 +62,7 @@ Feature requests and implementation-related changes can be submitted through [Pu
 <br>
 
 > [!WARNING]
-> BetterDiscord modifies the Discord client and technically violates Discord's Terms of Service. Account action against individual users is uncommon in practice, but possible. Use at your own risk.
+> BetterDiscord modifies the Discord client, which is not permitted under Discord's Terms of Service. Use at your own risk.
 
 <br>
 
