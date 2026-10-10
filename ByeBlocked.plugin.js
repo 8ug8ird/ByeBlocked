@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.9.0
+ * @version 2.10.0
  * @description Hides blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -11338,7 +11338,7 @@ function _settingsOnChange(section, key, value) {
     }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.9.0";
+    static VERSION="2.10.0";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static UPDATE_CHECK_INTERVAL_MS = 18e5;
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
