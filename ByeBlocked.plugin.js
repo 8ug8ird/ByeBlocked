@@ -2973,7 +2973,7 @@ class GroupDmSurface {
     hidePrivateChannels() {
         try {
             const channelListOn = this.api.settings.channelListEnabled !== false;
-            const groupDmsOn = !!this.api.settings.groupDmsEnabled;
+            const groupDmsOn = !!this.api.settings.groupDmsOrMessagesEnabled;
             if (!channelListOn && !groupDmsOn) return;
             const dmRows = document.querySelectorAll('[data-list-item-id*="private-channels"][data-list-item-id*="___"]:not([data-hidden-blocked="true"]), [class*="privateChannels"] [class*="channel"]:not([data-hidden-blocked="true"])');
             for (let i = 0; i < dmRows.length; i++) {
@@ -4962,9 +4962,12 @@ class MessageSurface {
             const roots = document.querySelectorAll(
                 '[data-list-id*="recent-mentions"], [data-list-id*="inbox"], [class*="recentMentions"], [class*="inboxList"], [class*="messagesPopout"]'
             );
+            let budget = 400;
             for (const root of roots) {
+                if (budget <= 0) break;
                 const items = root.querySelectorAll('[data-list-item-id]:not([data-hidden-blocked="true"]), [class*="messageContainer"]:not([data-hidden-blocked="true"]), li:not([data-hidden-blocked="true"])');
                 for (const item of items) {
+                    if (--budget < 0) break;
                     const userId = this.api.identity.findUserId(item);
                     if (userId && this.api.visibility.shouldHide(userId)) {
                         this.api.dom.hideElement(item, "inbox-blocked", userId);
@@ -11295,6 +11298,14 @@ function _settingsOnChange(section, key, value) {
         if (section === "places" && (key === "recentDms" || key === "pins" || key === "threads" || key === "channelList" || key === "mentions" || key === "inbox")) {
             this._surfaces.badge.invalidateTaskbarBadgeCache();
         }
+        if (section === "places" && !next && (key === "replies" || key === "repliesToBlocked" || key === "inbox")) {
+            try {
+                const reasons = key === "replies" ? ["reply-preview"] : key === "inbox" ? ["inbox-blocked"] : ["fast-reply-to-blocked"];
+                document.querySelectorAll('[data-hidden-blocked="true"]').forEach(el => {
+                    if (reasons.includes(el.dataset?.nmbReason)) this.restoreElement(el);
+                });
+            } catch (_) {}
+        }
         if (section === "places" && !next && (key === "memberList" || key === "voiceChannels")) {
             try { this._restoreOverwrittenTextForPlace(key); } catch (_) {}
         }
@@ -11547,9 +11558,9 @@ module.exports = class ByeBlocked {
         autocomplete: 'Mentions and the invite picker.',
         threads: 'Thread lists and thread entries owned by filtered users.',
         channelList: 'Private channel / group list rows for filtered users.',
-        recentDms: 'Group notification / recent DM activity from filtered users.',
+        recentDms: 'Taskbar unread badge for DMs from filtered users (also needs "Hide unread badge for blocked users" in Behavior).',
         events: 'Hides events created by blocked users.',
-        notifMessages: 'Suppress unread/message notification counting for filtered users.',
+        notifMessages: 'Taskbar unread badge counting for filtered users (also needs "Hide unread badge for blocked users" in Behavior). Does not mute message sounds.',
         notifVoiceChat: 'Suppress voice join/leave/stream notification sounds for filtered users. Does not change Stage or voice participant visibility.',
         autoCheckUpdates: 'Checks every 30 minutes and notifies you when a new version is out.',
         muteVoiceJoinLeaveSound: 'For blocked users.',
@@ -15257,8 +15268,7 @@ module.exports = class ByeBlocked {
                     }
                     if (this._placeEnabled("replies")) {
                         try {
-                            replyBar.style.setProperty("display", "none", "important");
-                            replyBar.dataset.nmbReplyBarHidden = "true";
+                            this.hideElement(replyBar, "reply-preview", referencedAuthorId || replyUserId || null);
                         } catch (_) {}
                     }
                 }
