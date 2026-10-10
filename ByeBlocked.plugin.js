@@ -2,8 +2,8 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.9.0
- * @description Hides blocked and ignored users
+ * @version 2.10.0
+ * @description Hides blocked, ignored, and spam users with granular place toggles
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
@@ -2270,7 +2270,7 @@ function createGroupDmSurfaceApi(plugin) {
     return Object.freeze({
         settings: Object.freeze({
             get groupDmsEnabled() { return !!plugin.settings.places?.groupDms; },
-            get groupDmsOrMessagesEnabled() { const pl = plugin.settings?.places; return !!(pl?.groupDms || pl?.messages); },
+            get groupDmsOrMessagesEnabled() { const pl = plugin.settings?.places; return !!(pl?.groupDms || pl?.messages || pl?.channelList); }, get channelListEnabled() { return !!plugin.settings.places?.channelList; },
         }),
         stores: Object.freeze({
             get ChannelStore() { return plugin.modules.ChannelStore; },
@@ -3500,7 +3500,7 @@ class GroupDmSurface {
 }
 function createForumSurfaceApi(plugin) {
     return Object.freeze({
-        settings: Object.freeze({ get messagesEnabled() { return !!plugin.settings?.places?.messages; } }),
+        settings: Object.freeze({ get messagesEnabled() { return !!(plugin.settings?.places?.threads || plugin.settings?.places?.messages); }, get threadsEnabled() { return !!plugin.settings?.places?.threads; } }),
         stores: Object.freeze({
             get ChannelStore() { return plugin.modules.ChannelStore; },
             get SelectedChannelStore() { return plugin.modules.SelectedChannelStore; },
@@ -4166,7 +4166,7 @@ class ForumSurface {
 }
 function createPinSurfaceApi(plugin) {
     return Object.freeze({
-        settings: Object.freeze({ get messagesEnabled() { return !!plugin.settings?.places?.messages; } }),
+        settings: Object.freeze({ get messagesEnabled() { return !!plugin.settings?.places?.pins; }, get pinsEnabled() { return !!plugin.settings?.places?.pins; } }),
         constants: Object.freeze({
             get ACTIONS() { return plugin.constructor.ACTIONS; },
             get PINS_LOCALE() { return plugin.constructor.PINS_LOCALE; },
@@ -4862,7 +4862,7 @@ class PinSurface {
 
 function createMessageSurfaceApi(plugin) {
     return Object.freeze({
-        settings: Object.freeze({ get messagesEnabled() { return !!plugin.settings?.places?.messages; } }),
+        settings: Object.freeze({ get messagesEnabled() { return !!plugin.settings?.places?.messages; }, get mentionsEnabled() { return !!plugin.settings?.places?.mentions; }, get inboxEnabled() { return !!plugin.settings?.places?.inbox; }, get threadsEnabled() { return !!plugin.settings?.places?.threads; } }),
         identity: Object.freeze({
             findUserId: element => plugin.findUserId(element),
             walkFiberShallow: (element, visitor) => plugin._identity.walkFiberShallow(element, visitor),
@@ -4944,6 +4944,7 @@ class MessageSurface {
     hideMentionsEverywhere() {
         try {
             const scope = document.querySelector('[class*="chatContent"]') || document;
+            if (this.api.settings?.mentionsEnabled === false) return;
             const mentions = scope.querySelectorAll('[class*="mention"]:not([data-nmb-mention-hidden="true"])');
             for (const mention of mentions) {
                 this.hideSingleMention(mention);
@@ -8242,7 +8243,7 @@ class StageSurface {
 function createBadgeSurfaceApi(plugin) {
     return Object.freeze({
         get enabled() {
-            return !!(plugin.settings.places?.messages && plugin.settings.behavior?.suppressTaskbarBadge);
+            return !!(plugin.settings.places?.messages && plugin.settings.behavior?.suppressTaskbarBadge && plugin.settings.notifications?.notifMessages !== false && plugin.settings.places?.recentDms !== false);
         },
         stores: Object.freeze({
             get RelationshipStore() { return plugin.modules.RelationshipStore; },
@@ -9462,6 +9463,10 @@ function createReadStateSurfaceApi(plugin) {
     return Object.freeze({
         get pluginName() { return plugin.pluginName; },
         get messagesEnabled() { return !!plugin.settings.places?.messages; },
+        get threadsEnabled() { return !!plugin.settings.places?.threads; },
+        get channelListEnabled() { return !!plugin.settings.places?.channelList; },
+        get recentDmsEnabled() { return !!plugin.settings.places?.recentDms; },
+        get inboxEnabled() { return !!plugin.settings.places?.inbox; },
         stores: Object.freeze({
             get ActiveJoinedThreadsStore() { return plugin.modules.ActiveJoinedThreadsStore; },
             get ChannelPinsStore() { return plugin.modules.ChannelPinsStore; },
@@ -10403,7 +10408,7 @@ class ReadStateSurface {
         const threadsStore = this.api.stores.ActiveJoinedThreadsStore;
         if (threadsStore) {
             const getThreadOwnerId = thread => thread?.ownerId || thread?.owner_id || thread?.thread?.ownerId || thread?.thread?.owner_id;
-            const isBlockedThreadEntry = entry => !!(getThreadOwnerId(entry) && self.api.visibility.shouldHide(getThreadOwnerId(entry)));
+            const isBlockedThreadEntry = entry => !!(self.api.settings?.threadsEnabled !== false && getThreadOwnerId(entry) && self.api.visibility.shouldHide(getThreadOwnerId(entry)));
             const filterThreadList = list => {
                 if (Array.isArray(list)) return list.filter(e => !isBlockedThreadEntry(e));
                 if (list && typeof list === 'object') {
@@ -11242,6 +11247,7 @@ function _settingsGetPanel() {
             settings: [
                 category("types", "Who to hide"),
                 category("places", "Where to hide"),
+                category("notifications", "Notifications"),
                 category("behavior", "Behavior")
             ],
             onChange: (section, key, value) => this._onSettingsChange(section, key, value)
@@ -11255,6 +11261,13 @@ function _settingsOnChange(section, key, value) {
         this.saveSettings();
         if (section === "types") {
             this._resetShouldHideCache();
+            this._surfaces.badge.invalidateTaskbarBadgeCache();
+        }
+        if (section === "notifications") {
+            this._surfaces.badge.invalidateTaskbarBadgeCache();
+            this._surfaces.badge.refreshTaskbarBadge();
+        }
+        if (section === "places" && (key === "recentDms" || key === "pins" || key === "threads" || key === "channelList" || key === "mentions" || key === "inbox")) {
             this._surfaces.badge.invalidateTaskbarBadgeCache();
         }
         if (section === "places" && !next && (key === "memberList" || key === "voiceChannels")) {
@@ -11300,7 +11313,7 @@ function _settingsOnChange(section, key, value) {
     }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.9.0";
+    static VERSION="2.10.0";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static UPDATE_CHECK_INTERVAL_MS = 18e5;
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
@@ -11475,13 +11488,24 @@ module.exports = class ByeBlocked {
     static SETTINGS_LABELS = {
         blocked: 'Blocked users',
         ignored: 'Ignored users',
+        spammers: 'Spamming users',
         messages: 'Messages',
+        pins: 'Pinned messages',
+        inbox: 'Inbox messages',
+        replies: 'Message preview in replies',
+        repliesToBlocked: 'Replies to blocked messages',
+        mentions: 'Mentions',
         memberList: 'Member list',
         voiceChannels: 'Voice & Stage channels',
         groupDms: 'Group DMs',
         autocomplete: 'Autocomplete',
         reactions: 'Message reactions',
+        threads: 'Threads',
+        channelList: 'Channel / group list',
+        recentDms: 'Group notifications',
         events: 'Scheduled events',
+        notifMessages: 'Message notifications',
+        notifVoiceChat: 'Voice chat notifications',
         autoCheckUpdates: 'Check for updates automatically',
         muteVoiceJoinLeaveSound: 'Mute join/leave sounds',
         muteBlockedVoiceAudio: 'Mute blocked users\' voice audio',
@@ -11489,10 +11513,21 @@ module.exports = class ByeBlocked {
         suppressTaskbarBadge: 'Hide unread badge for blocked users'
     };
     static SETTINGS_NOTES = {
+        spammers: 'Also hides Discord spam / flagged spam message groups.',
+        pins: 'Pinned messages panel and pin badges.',
+        inbox: 'Inbox / mentions inbox style surfaces when available.',
+        replies: 'Hide reply previews authored by filtered users.',
+        repliesToBlocked: 'Hide messages that reply to a filtered user\'s message.',
+        mentions: 'Hide messages that mention filtered users (and mention chips).',
         memberList: 'Also covers the Members page.',
         voiceChannels: 'Includes the activity panel and streams.',
         autocomplete: 'Mentions and the invite picker.',
+        threads: 'Thread lists and thread entries owned by filtered users.',
+        channelList: 'Private channel / group list rows for filtered users.',
+        recentDms: 'Group notification / recent DM activity from filtered users.',
         events: 'Hides events created by blocked users.',
+        notifMessages: 'Suppress unread/message notification counting for filtered users.',
+        notifVoiceChat: 'Suppress voice-related notification noise for filtered users.',
         autoCheckUpdates: 'Checks every 30 minutes and notifies you when a new version is out.',
         muteVoiceJoinLeaveSound: 'For blocked users.',
         muteBlockedVoiceAudio: 'In calls.',
@@ -11974,16 +12009,29 @@ module.exports = class ByeBlocked {
         return {
             types: {
                 blocked: true,
-                ignored: true
+                ignored: true,
+                spammers: true
             },
             places: {
                 messages: true,
+                pins: true,
+                inbox: true,
+                replies: true,
+                repliesToBlocked: true,
+                mentions: true,
                 memberList: true,
                 voiceChannels: true,
                 groupDms: true,
                 autocomplete: true,
                 reactions: true,
+                threads: true,
+                channelList: true,
+                recentDms: true,
                 events: true
+            },
+            notifications: {
+                notifMessages: true,
+                notifVoiceChat: true
             },
             behavior: {
                 autoCheckUpdates: true,
@@ -12311,22 +12359,31 @@ module.exports = class ByeBlocked {
     }
     _messageWouldBeHidden(message) {
         if (!message) return false;
+        if (!this.settings.places?.messages) return false;
         const authorId = message.author?.id || null;
         if (authorId && this.shouldHide(authorId)) return true;
         try {
-            if (message.messageReference) {
+            if (message.messageReference && this.settings.places?.repliesToBlocked) {
                 const ref = this.getReferencedMessage(message);
                 const refAuthorId = ref?.author?.id || null;
                 if (refAuthorId && this.shouldHide(refAuthorId)) return true;
             }
+            if (message.messageReference && this.settings.places?.replies) {
+                const ref = this.getReferencedMessage(message);
+                const refAuthorId = ref?.author?.id || null;
+                // Reply preview authored by filtered user
+                if (refAuthorId && this.shouldHide(refAuthorId)) return true;
+            }
         } catch (_) {}
         try {
-            const mentions = message.mentions;
-            if (mentions) {
-                const list = Array.isArray(mentions) ? mentions : Array.from(mentions);
-                for (const u of list) {
-                    const id = typeof u === "string" ? u : u?.id;
-                    if (id && this.shouldHide(id)) return true;
+            if (this.settings.places?.mentions) {
+                const mentions = message.mentions;
+                if (mentions) {
+                    const list = Array.isArray(mentions) ? mentions : Array.from(mentions);
+                    for (const u of list) {
+                        const id = typeof u === "string" ? u : u?.id;
+                        if (id && this.shouldHide(id)) return true;
+                    }
                 }
             }
         } catch (_) {}
@@ -14590,9 +14647,16 @@ module.exports = class ByeBlocked {
     _resetShouldHideCache() {
         this._shouldHideCache = this._cacheManager.reset("shouldHide", 5000);
     }
+
+    _placeEnabled(place) {
+        return this.settings.places?.[place] !== false;
+    }
+    _notifEnabled(key) {
+        return this.settings.notifications?.[key] !== false;
+    }
     shouldHide(userId, isSpammer = false) {
         if (!userId) return false;
-        if (isSpammer) return true;
+        if (isSpammer) return !!this.settings.types?.spammers;
         if (!this._relIsBlockedFn) return false;
         if (this._shouldHideCache?.has(userId)) return this._shouldHideCache.get(userId);
         try {
