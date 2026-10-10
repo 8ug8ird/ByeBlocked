@@ -3,7 +3,7 @@
  * @author 8ug8ird
  * @authorId 698947564459917343
  * @version 2.9.0
- * @description Hides blocked, ignored, and spam users with granular place toggles
+ * @description Hides blocked and ignored users with granular place toggles
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
@@ -4907,8 +4907,9 @@ class MessageSurface {
                 for (let i = 0; i < els.length && sample < 40; i++) {
                     sample++;
                     const info = this.api.identity.getMessageInfo(els[i]);
-                    if (info?.isSpammer) return !this.api.visibility.shouldHide(info?.authorId || "0", true);
-                    if (info?.isBlockedGroup) return false;
+                    // Match main: only fail when a visible author/spam-group still leaks.
+                    // Do not treat Discord's already-collapsed blocked groups as failures
+                    // (that would fail every cycle and re-trigger recovery).
                     if (this.api.visibility.shouldHide(info?.authorId, info?.isSpammer)) return false;
                 }
                 return true;
@@ -7461,7 +7462,6 @@ function createStageSurfaceApi(plugin) {
     return Object.freeze({
         settings: Object.freeze({
             get voiceChannelsEnabled() { return !!plugin.settings?.places?.voiceChannels; },
-            get voiceNotificationsEnabled() { return plugin._notifEnabled("notifVoiceChat"); },
         }),
         constants: Object.freeze({
             get STAGE_USER_SELECTOR() { return plugin.constructor.STAGE_USER_SELECTOR; },
@@ -7592,7 +7592,9 @@ class StageSurface {
                         if (!props) return orig.apply(ctx, args);
                         const p = props.participant;
                         const uid = p?.userId || p?.user?.id || props.user?.id || props.userId;
-                        if (uid && self.api.settings.voiceChannelsEnabled && self.api.settings.voiceNotificationsEnabled !== false && self.api.visibility.shouldHide(uid)) return null;
+                        // Stage seat visibility follows places.voiceChannels only.
+                        // notifications.notifVoiceChat must not unhide Stage participants.
+                        if (uid && self.api.settings.voiceChannelsEnabled && self.api.visibility.shouldHide(uid)) return null;
                     } catch (_) { _recordPatchCatch("patchStageRenderComponent.callback"); }
                     return orig.apply(ctx, args);
                 });
@@ -10794,7 +10796,10 @@ function _patchSound(retryCount = 0) {
         }
         function _byeBlockedSoundInterceptor(context, args, originalMethod) {
             if (!self.isRunning) return originalMethod.apply(context, args);
-            const voiceSoundsEnabled = self.settings.behavior.muteVoiceJoinLeaveSound || self.settings.behavior.muteBlockedVoiceAudio;
+            // notifVoiceChat gates voice *notification* sounds only (join/leave/stream toasts).
+            // Stage/voice participant hiding uses places.voiceChannels separately.
+            const notifVoiceChat = self._notifEnabled("notifVoiceChat");
+            const voiceSoundsEnabled = notifVoiceChat && (self.settings.behavior.muteVoiceJoinLeaveSound || self.settings.behavior.muteBlockedVoiceAudio);
             try {
                 const soundType = args[0];
                 if (soundType === "message1") {
@@ -11518,7 +11523,6 @@ module.exports = class ByeBlocked {
     static SETTINGS_LABELS = {
         blocked: 'Blocked users',
         ignored: 'Ignored users',
-        spammers: 'Spamming users',
         messages: 'Messages',
         pins: 'Pinned messages',
         inbox: 'Inbox messages',
@@ -11543,7 +11547,6 @@ module.exports = class ByeBlocked {
         suppressTaskbarBadge: 'Hide unread badge for blocked users'
     };
     static SETTINGS_NOTES = {
-        spammers: 'Also hides Discord spam / flagged spam message groups.',
         pins: 'Pinned messages panel and pin badges.',
         inbox: 'Inbox / mentions inbox style surfaces when available.',
         replies: 'Hide reply previews authored by filtered users.',
@@ -11557,7 +11560,7 @@ module.exports = class ByeBlocked {
         recentDms: 'Group notification / recent DM activity from filtered users.',
         events: 'Hides events created by blocked users.',
         notifMessages: 'Suppress unread/message notification counting for filtered users.',
-        notifVoiceChat: 'Suppress voice-related notification noise for filtered users.',
+        notifVoiceChat: 'Suppress voice join/leave/stream notification sounds for filtered users. Does not change Stage or voice participant visibility.',
         autoCheckUpdates: 'Checks every 30 minutes and notifies you when a new version is out.',
         muteVoiceJoinLeaveSound: 'For blocked users.',
         muteBlockedVoiceAudio: 'In calls.',
@@ -12039,8 +12042,7 @@ module.exports = class ByeBlocked {
         return {
             types: {
                 blocked: true,
-                ignored: true,
-                spammers: true
+                ignored: true
             },
             places: {
                 messages: true,
@@ -12388,9 +12390,32 @@ module.exports = class ByeBlocked {
         return this._messageWouldBeHidden(lastMessage);
     }
     _messageWouldBeHidden(message) {
+        // Keep unread-feed parity with main under default settings (all places on).
+        // Place toggles only narrow this when the user turns a place off.
         if (!message) return false;
         if (!this._placeEnabled("messages")) return false;
-        return this.isBlockedMessageData(message);
+        const authorId = message.author?.id || null;
+        if (authorId && this.shouldHide(authorId)) return true;
+        try {
+            if (this._placeEnabled("repliesToBlocked") && message.messageReference) {
+                const ref = this.getReferencedMessage(message);
+                const refAuthorId = ref?.author?.id || null;
+                if (refAuthorId && this.shouldHide(refAuthorId)) return true;
+            }
+        } catch (_) {}
+        try {
+            if (this._placeEnabled("mentions")) {
+                const mentions = message.mentions;
+                if (mentions) {
+                    const list = Array.isArray(mentions) ? mentions : Array.from(mentions);
+                    for (const u of list) {
+                        const id = typeof u === "string" ? u : u?.id;
+                        if (id && this.shouldHide(id)) return true;
+                    }
+                }
+            }
+        } catch (_) {}
+        return false;
     }
     _domConfirmsChannelEmpty() {
         try {
@@ -14065,29 +14090,13 @@ module.exports = class ByeBlocked {
             this._startPersistentBlockedGroupObserver(tryFn, onSuccess, _cyclesLeft - 1);
         }, 30000);
     }
-    _isDiscordSpamMessage(message) {
-        if (!message || typeof message !== "object") return false;
-        // Client collapsed-group type string (same SPAMMER signal used by getMessageInfo).
-        const msgType = String(message.type ?? message.messageType ?? "");
-        if (/SPAMMER/i.test(msgType)) return true;
-        // UserFlags.Spammer = 1 << 20 (discord-api-types; known client value, not in Discord's public User Flags table).
-        const authorFlags = Number(message.author?.public_flags ?? message.author?.flags ?? 0);
-        return !!(authorFlags & (1 << 20));
-    }
     isBlockedMessageData(message, referencedMessage = null) {
         if (!message || typeof message !== "object") return false;
         try {
             if (!this._placeEnabled("messages")) return false;
+            if (message.blocked === true) return true;
             const authorId = message.author?.id || null;
-            // Relationship blocked/ignored always wins; spam status must not bypass this.
             if (authorId && this.shouldHide(authorId)) return true;
-            const isSpamMessage = this._isDiscordSpamMessage(message);
-            if (message.blocked === true) {
-                // Discord also sets blocked on spam collapses for non-blocked authors.
-                if (isSpamMessage) return !!this.settings.types?.spammers;
-                return true;
-            }
-            if (isSpamMessage && this.settings.types?.spammers) return true;
             if (this._placeEnabled("repliesToBlocked")) {
                 const refId = (message?.messageReference || message?.message_reference)?.message_id
                     || (message?.messageReference || message?.message_reference)?.messageId
@@ -14679,24 +14688,21 @@ module.exports = class ByeBlocked {
         return this.settings.notifications?.[key] !== false;
     }
     shouldHide(userId, isSpammer = false) {
-        if (userId && this._relIsBlockedFn) {
+        if (!userId) return false;
+        // Pre-existing ByeBlocked behavior (main): client SPAMMER collapsed groups hide.
+        // No types.spammers toggle in this PR.
+        if (isSpammer) return true;
+        if (!this._relIsBlockedFn) return false;
+        if (this._shouldHideCache?.has(userId)) return this._shouldHideCache.get(userId);
+        try {
             let result = false;
-            if (this._shouldHideCache?.has(userId)) {
-                result = this._shouldHideCache.get(userId);
-            } else {
-                try {
-                    if (this.settings.types.blocked && this._relIsBlockedFn(userId)) result = true;
-                    else if (this.settings.types.ignored && this._relIsIgnoredFn?.(userId)) result = true;
-                    if (this._shouldHideCache) this._cacheManager.set("shouldHide", userId, result);
-                } catch (_) {
-                    result = false;
-                }
-            }
-            if (result) return true;
+            if (this.settings.types.blocked && this._relIsBlockedFn(userId)) result = true;
+            else if (this.settings.types.ignored && this._relIsIgnoredFn?.(userId)) result = true;
+            if (this._shouldHideCache) this._cacheManager.set("shouldHide", userId, result);
+            return result;
+        } catch (_) {
+            return false;
         }
-        // Spammer flag is additive; never short-circuit past blocked/ignored above.
-        if (isSpammer) return !!this.settings.types?.spammers;
-        return false;
     }
     _startShortLivedMessageObserver(tryFn, onSuccess) {
         this._stopShortLivedMessageObserver();
@@ -15201,28 +15207,21 @@ module.exports = class ByeBlocked {
         }
         const hasBlockedClass = this._placeEnabled("messages") && this._shouldFastHideMessagesInDom() && (el.matches?.(_SEL.blockedMessage) || el.querySelector?.('[class*="messageGroupBlocked"]') || el.querySelector?.('[class*="blockedSystemMessage"]'));
         if (hasBlockedClass) {
-            const spamLike = !!(el.matches?.('[class*="spammer"], [class*="Spammer"]') || el.querySelector?.('[class*="spammer"], [class*="Spammer"]') || /spam/i.test(el.textContent || ""));
-            const authorId = this.findUserId(el);
-            const authorHidden = !!(authorId && this.shouldHide(authorId));
-            // Spammers off: skip hide-for-spam-only; still hide when the author is blocked/ignored.
-            const shouldHideGroup = !spamLike || !!this.settings.types?.spammers || authorHidden;
-            if (shouldHideGroup) {
-                const items = new Set;
-                const collectTargets = node => {
-                    const blocked = node.matches?.(_SEL.blockedMessage) ? [node] : Array.from(node.querySelectorAll?.(_SEL.blockedMessage) || []);
-                    for (const b of blocked) {
-                        let t = b.closest?.(_SEL.messageItem) || b.closest?.('[role="article"]') || b.closest?.('[class*="wrapper_"]') || b;
-                        const gs = t.closest?.('[class*="groupStart"]');
-                        if (gs) t = gs;
-                        items.add(t);
-                    }
-                };
-                collectTargets(el);
-                for (const item of items) {
-                    if (item.dataset?.hiddenBlocked !== "true") this.hideElement(item, spamLike && !authorHidden ? "spam-group-fast" : "blocked-group-fast");
+            const items = new Set;
+            const collectTargets = node => {
+                const blocked = node.matches?.(_SEL.blockedMessage) ? [node] : Array.from(node.querySelectorAll?.(_SEL.blockedMessage) || []);
+                for (const b of blocked) {
+                    let t = b.closest?.(_SEL.messageItem) || b.closest?.('[role="article"]') || b.closest?.('[class*="wrapper_"]') || b;
+                    const gs = t.closest?.('[class*="groupStart"]');
+                    if (gs) t = gs;
+                    items.add(t);
                 }
-                return;
+            };
+            collectTargets(el);
+            for (const item of items) {
+                if (item.dataset?.hiddenBlocked !== "true") this.hideElement(item, "blocked-group-fast");
             }
+            return;
         }
         if (this.settings.places.messages && this._shouldFastHideMessagesInDom() && (el.matches?.(_SEL.messageRow))) {
             const messageRow = el;
