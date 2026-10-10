@@ -7459,7 +7459,10 @@ class VoiceSurface {
 }
 function createStageSurfaceApi(plugin) {
     return Object.freeze({
-        settings: Object.freeze({ get voiceChannelsEnabled() { return !!plugin.settings?.places?.voiceChannels; } }),
+        settings: Object.freeze({
+            get voiceChannelsEnabled() { return !!plugin.settings?.places?.voiceChannels; },
+            get voiceNotificationsEnabled() { return plugin._notifEnabled("notifVoiceChat"); },
+        }),
         constants: Object.freeze({
             get STAGE_USER_SELECTOR() { return plugin.constructor.STAGE_USER_SELECTOR; },
             get STAGE_LOCALE() { return plugin.constructor.STAGE_LOCALE; },
@@ -9934,32 +9937,19 @@ class ReadStateSurface {
         if (typeof actions?.fetchMessages !== "function") {
             return;
         }
-        const REFETCH_COOLDOWN_MS = 30000;
-        const MAX_CONCURRENT_FETCHES = 1;
-        const BATCH_SPACING_MS = 1500;
-        const MAX_FETCHES_PER_PASS = 8;
-        const GLOBAL_MIN_GAP_MS = 750;
+        const REFETCH_COOLDOWN_MS = 2000;
+        const MAX_CONCURRENT_FETCHES = 3;
+        const BATCH_SPACING_MS = 250;
         if (!this._fetchedUnresolvedChannels) this._fetchedUnresolvedChannels = new Map;
-        if (this._unreadFetchRateLimitedUntil && Date.now() < this._unreadFetchRateLimitedUntil) {
-            return;
-        }
         const rs = this.api.stores.ReadStateStore;
         const now = Date.now();
         const eligible = [];
         for (const channelId of channelIds) {
-            if (eligible.length >= MAX_FETCHES_PER_PASS) break;
             const key = String(channelId);
             const lastFetchedAt = this._fetchedUnresolvedChannels.get(key);
             if (lastFetchedAt !== undefined && (now - lastFetchedAt) < REFETCH_COOLDOWN_MS) continue;
             this._fetchedUnresolvedChannels.set(key, now);
             eligible.push(channelId);
-        }
-        if (!eligible.length) return;
-        if (this._fetchedUnresolvedChannels.size > 400) {
-            const cutoff = now - REFETCH_COOLDOWN_MS;
-            for (const [key, ts] of this._fetchedUnresolvedChannels) {
-                if (ts < cutoff) this._fetchedUnresolvedChannels.delete(key);
-            }
         }
         const doFetch = channelId => {
             try {
@@ -9968,30 +9958,18 @@ class ReadStateSurface {
                 if (lastMessageId) {
                     try { afterId = (BigInt(lastMessageId) - 1n).toString(); } catch (_) { afterId = "0"; }
                 }
-                const result = actions.fetchMessages({ channelId, after: afterId, limit: 2 });
-                if (result && typeof result.then === "function") {
-                    result.catch?.(err => {
-                        const status = err?.status || err?.statusCode || err?.body?.code;
-                        if (status === 429) {
-                            this._unreadFetchRateLimitedUntil = Date.now() + 60000;
-                        }
-                    });
-                }
-            } catch (err) {
-                const status = err?.status || err?.statusCode;
-                if (status === 429) this._unreadFetchRateLimitedUntil = Date.now() + 60000;
-            }
+                actions.fetchMessages({ channelId, after: afterId, limit: 2 });
+            } catch (_) {}
         };
         for (let i = 0; i < eligible.length; i += MAX_CONCURRENT_FETCHES) {
             const batch = eligible.slice(i, i + MAX_CONCURRENT_FETCHES);
-            const delay = (BATCH_SPACING_MS * (i / MAX_CONCURRENT_FETCHES)) + (i === 0 ? 0 : GLOBAL_MIN_GAP_MS);
-            if (delay <= 0) {
+            if (i === 0) {
                 batch.forEach(doFetch);
             } else {
+                const delay = BATCH_SPACING_MS * (i / MAX_CONCURRENT_FETCHES);
                 const timerId = this.api.resources.timer('startupTimers', () => {
                     this.api.coordination.removeStartupTimer(timerId);
                     if (!this.api.isRunning) return;
-                    if (this._unreadFetchRateLimitedUntil && Date.now() < this._unreadFetchRateLimitedUntil) return;
                     batch.forEach(doFetch);
                 }, delay);
                 this.api.coordination.addStartupTimer(timerId);
@@ -10003,7 +9981,7 @@ class ReadStateSurface {
         const effectiveAttempt = Math.max(attempt, this._unresolvedBlockedUnreadHighestAttempt || 0);
         this._unresolvedBlockedUnreadHighestAttempt = effectiveAttempt;
         const attemptForThisCall = effectiveAttempt;
-        if (attemptForThisCall >= 4) {
+        if (attemptForThisCall >= 10) {
             this._hasPendingUnreadResolution = false;
             this._releaseUnreadBadgeBootGuard?.();
             return;
@@ -10011,7 +9989,7 @@ class ReadStateSurface {
         if (this._unresolvedBlockedUnreadRetryTimeout) {
             return;
         }
-        const delay = Math.min(2000 * Math.pow(2, attemptForThisCall), 20000);
+        const delay = Math.min(500 * Math.pow(2, attemptForThisCall), 4000);
         this._unresolvedBlockedUnreadRetryTimeout = this.api.resources.timer('unresolvedBlockedUnread', () => {
             this._unresolvedBlockedUnreadRetryTimeout = null;
             try {
@@ -14087,24 +14065,29 @@ module.exports = class ByeBlocked {
             this._startPersistentBlockedGroupObserver(tryFn, onSuccess, _cyclesLeft - 1);
         }, 30000);
     }
+    _isDiscordSpamMessage(message) {
+        if (!message || typeof message !== "object") return false;
+        // Client collapsed-group type string (same SPAMMER signal used by getMessageInfo).
+        const msgType = String(message.type ?? message.messageType ?? "");
+        if (/SPAMMER/i.test(msgType)) return true;
+        // UserFlags.Spammer = 1 << 20 (discord-api-types; known client value, not in Discord's public User Flags table).
+        const authorFlags = Number(message.author?.public_flags ?? message.author?.flags ?? 0);
+        return !!(authorFlags & (1 << 20));
+    }
     isBlockedMessageData(message, referencedMessage = null) {
         if (!message || typeof message !== "object") return false;
         try {
-            const msgType = String(message.type ?? message.messageType ?? "");
-            const isSpamGroup = message.blocked === true && /SPAMMER/i.test(msgType)
-                || /SPAMMER/i.test(msgType)
-                || message.isSpam === true
-                || message.flags === 1 << 22
-                || !!(message.author && message.author.flags & (1 << 20));
-            if (isSpamGroup) {
-                return this._placeEnabled("messages") && !!this.settings.types?.spammers;
-            }
-            if (message.blocked === true) {
-                return this._placeEnabled("messages");
-            }
             if (!this._placeEnabled("messages")) return false;
             const authorId = message.author?.id || null;
+            // Relationship blocked/ignored always wins; spam status must not bypass this.
             if (authorId && this.shouldHide(authorId)) return true;
+            const isSpamMessage = this._isDiscordSpamMessage(message);
+            if (message.blocked === true) {
+                // Discord also sets blocked on spam collapses for non-blocked authors.
+                if (isSpamMessage) return !!this.settings.types?.spammers;
+                return true;
+            }
+            if (isSpamMessage && this.settings.types?.spammers) return true;
             if (this._placeEnabled("repliesToBlocked")) {
                 const refId = (message?.messageReference || message?.message_reference)?.message_id
                     || (message?.messageReference || message?.message_reference)?.messageId
@@ -14696,19 +14679,24 @@ module.exports = class ByeBlocked {
         return this.settings.notifications?.[key] !== false;
     }
     shouldHide(userId, isSpammer = false) {
-        if (isSpammer) return !!this.settings.types?.spammers;
-        if (!userId) return false;
-        if (!this._relIsBlockedFn) return false;
-        if (this._shouldHideCache?.has(userId)) return this._shouldHideCache.get(userId);
-        try {
+        if (userId && this._relIsBlockedFn) {
             let result = false;
-            if (this.settings.types.blocked && this._relIsBlockedFn(userId)) result = true;
-            else if (this.settings.types.ignored && this._relIsIgnoredFn?.(userId)) result = true;
-            if (this._shouldHideCache) this._cacheManager.set("shouldHide", userId, result);
-            return result;
-        } catch (_) {
-            return false;
+            if (this._shouldHideCache?.has(userId)) {
+                result = this._shouldHideCache.get(userId);
+            } else {
+                try {
+                    if (this.settings.types.blocked && this._relIsBlockedFn(userId)) result = true;
+                    else if (this.settings.types.ignored && this._relIsIgnoredFn?.(userId)) result = true;
+                    if (this._shouldHideCache) this._cacheManager.set("shouldHide", userId, result);
+                } catch (_) {
+                    result = false;
+                }
+            }
+            if (result) return true;
         }
+        // Spammer flag is additive; never short-circuit past blocked/ignored above.
+        if (isSpammer) return !!this.settings.types?.spammers;
+        return false;
     }
     _startShortLivedMessageObserver(tryFn, onSuccess) {
         this._stopShortLivedMessageObserver();
@@ -15214,22 +15202,27 @@ module.exports = class ByeBlocked {
         const hasBlockedClass = this._placeEnabled("messages") && this._shouldFastHideMessagesInDom() && (el.matches?.(_SEL.blockedMessage) || el.querySelector?.('[class*="messageGroupBlocked"]') || el.querySelector?.('[class*="blockedSystemMessage"]'));
         if (hasBlockedClass) {
             const spamLike = !!(el.matches?.('[class*="spammer"], [class*="Spammer"]') || el.querySelector?.('[class*="spammer"], [class*="Spammer"]') || /spam/i.test(el.textContent || ""));
-            if (spamLike && !this.settings.types?.spammers) return;
-            const items = new Set;
-            const collectTargets = node => {
-                const blocked = node.matches?.(_SEL.blockedMessage) ? [node] : Array.from(node.querySelectorAll?.(_SEL.blockedMessage) || []);
-                for (const b of blocked) {
-                    let t = b.closest?.(_SEL.messageItem) || b.closest?.('[role="article"]') || b.closest?.('[class*="wrapper_"]') || b;
-                    const gs = t.closest?.('[class*="groupStart"]');
-                    if (gs) t = gs;
-                    items.add(t);
+            const authorId = this.findUserId(el);
+            const authorHidden = !!(authorId && this.shouldHide(authorId));
+            // Spammers off: skip hide-for-spam-only; still hide when the author is blocked/ignored.
+            const shouldHideGroup = !spamLike || !!this.settings.types?.spammers || authorHidden;
+            if (shouldHideGroup) {
+                const items = new Set;
+                const collectTargets = node => {
+                    const blocked = node.matches?.(_SEL.blockedMessage) ? [node] : Array.from(node.querySelectorAll?.(_SEL.blockedMessage) || []);
+                    for (const b of blocked) {
+                        let t = b.closest?.(_SEL.messageItem) || b.closest?.('[role="article"]') || b.closest?.('[class*="wrapper_"]') || b;
+                        const gs = t.closest?.('[class*="groupStart"]');
+                        if (gs) t = gs;
+                        items.add(t);
+                    }
+                };
+                collectTargets(el);
+                for (const item of items) {
+                    if (item.dataset?.hiddenBlocked !== "true") this.hideElement(item, spamLike && !authorHidden ? "spam-group-fast" : "blocked-group-fast");
                 }
-            };
-            collectTargets(el);
-            for (const item of items) {
-                if (item.dataset?.hiddenBlocked !== "true") this.hideElement(item, spamLike ? "spam-group-fast" : "blocked-group-fast");
+                return;
             }
-            return;
         }
         if (this.settings.places.messages && this._shouldFastHideMessagesInDom() && (el.matches?.(_SEL.messageRow))) {
             const messageRow = el;
