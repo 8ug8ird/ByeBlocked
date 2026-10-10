@@ -3,7 +3,7 @@
  * @author 8ug8ird
  * @authorId 698947564459917343
  * @version 2.9.0
- * @description Hides blocked and ignored users with granular place toggles
+ * @description Hides blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
 
@@ -4907,9 +4907,6 @@ class MessageSurface {
                 for (let i = 0; i < els.length && sample < 40; i++) {
                     sample++;
                     const info = this.api.identity.getMessageInfo(els[i]);
-                    // Match main: only fail when a visible author/spam-group still leaks.
-                    // Do not treat Discord's already-collapsed blocked groups as failures
-                    // (that would fail every cycle and re-trigger recovery).
                     if (this.api.visibility.shouldHide(info?.authorId, info?.isSpammer)) return false;
                 }
                 return true;
@@ -7592,8 +7589,6 @@ class StageSurface {
                         if (!props) return orig.apply(ctx, args);
                         const p = props.participant;
                         const uid = p?.userId || p?.user?.id || props.user?.id || props.userId;
-                        // Stage seat visibility follows places.voiceChannels only.
-                        // notifications.notifVoiceChat must not unhide Stage participants.
                         if (uid && self.api.settings.voiceChannelsEnabled && self.api.visibility.shouldHide(uid)) return null;
                     } catch (_) { _recordPatchCatch("patchStageRenderComponent.callback"); }
                     return orig.apply(ctx, args);
@@ -8273,9 +8268,6 @@ function createBadgeSurfaceApi(plugin) {
     return Object.freeze({
         get enabled() {
             return !!(plugin.settings.places?.messages && plugin.settings.behavior?.suppressTaskbarBadge && plugin._notifEnabled("notifMessages") && plugin._placeEnabled("recentDms"));
-        },
-        get voiceNotificationsEnabled() {
-            return plugin._notifEnabled("notifVoiceChat");
         },
         stores: Object.freeze({
             get RelationshipStore() { return plugin.modules.RelationshipStore; },
@@ -10796,8 +10788,6 @@ function _patchSound(retryCount = 0) {
         }
         function _byeBlockedSoundInterceptor(context, args, originalMethod) {
             if (!self.isRunning) return originalMethod.apply(context, args);
-            // notifVoiceChat gates voice *notification* sounds only (join/leave/stream toasts).
-            // Stage/voice participant hiding uses places.voiceChannels separately.
             const notifVoiceChat = self._notifEnabled("notifVoiceChat");
             const voiceSoundsEnabled = notifVoiceChat && (self.settings.behavior.muteVoiceJoinLeaveSound || self.settings.behavior.muteBlockedVoiceAudio);
             try {
@@ -12390,8 +12380,6 @@ module.exports = class ByeBlocked {
         return this._messageWouldBeHidden(lastMessage);
     }
     _messageWouldBeHidden(message) {
-        // Keep unread-feed parity with main under default settings (all places on).
-        // Place toggles only narrow this when the user turns a place off.
         if (!message) return false;
         if (!this._placeEnabled("messages")) return false;
         const authorId = message.author?.id || null;
@@ -14689,8 +14677,6 @@ module.exports = class ByeBlocked {
     }
     shouldHide(userId, isSpammer = false) {
         if (!userId) return false;
-        // Pre-existing ByeBlocked behavior (main): client SPAMMER collapsed groups hide.
-        // No types.spammers toggle in this PR.
         if (isSpammer) return true;
         if (!this._relIsBlockedFn) return false;
         if (this._shouldHideCache?.has(userId)) return this._shouldHideCache.get(userId);
