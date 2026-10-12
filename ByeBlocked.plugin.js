@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.10.0
+ * @version 2.10.1
  * @description Hides blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -8336,6 +8336,8 @@ class BadgeSurface {
     }
     _filterBadgeArgs(args) {
         if (!this.taskbarBadgeEnabled()) { return; }
+        const requestedCount = args[0];
+        if (typeof requestedCount !== "number" || !Number.isFinite(requestedCount) || requestedCount === 0) return;
         if (!this.api.readState.isPatched()) {
             args[0] = 0;
             return;
@@ -8345,7 +8347,14 @@ class BadgeSurface {
             return;
         }
         const count = this._recomputeTaskbarBadgeCount();
-        if (count !== null) args[0] = count;
+        if (count === null || !Number.isFinite(count)) return;
+        if (requestedCount < 0) {
+            args[0] = count !== 0 ? requestedCount : 0;
+        } else if (count < 0) {
+            args[0] = -1;
+        } else {
+            args[0] = Math.min(requestedCount, count);
+        }
     }
     ensureTaskbarElectronPatch() {
         if (this._taskbarElectronPatched) return;
@@ -8407,11 +8416,10 @@ class BadgeSurface {
             const electron = this.api.electron.resolved;
             if (!electron?.setBadge) return;
             const count = this._recomputeTaskbarBadgeCount();
-            if (count === null) return;
-            electron.setBadge(count);
+            if (count !== 0) return;
+            electron.setBadge(0);
             if (typeof electron.setSystemTrayIcon === "function") {
-                const showUnreadTray = count !== 0;
-                electron.setSystemTrayIcon(showUnreadTray ? "UNREAD" : "DEFAULT");
+                electron.setSystemTrayIcon("DEFAULT");
             }
         } catch (_) {}
     }
@@ -9708,6 +9716,22 @@ class ReadStateSurface {
         return !!rs.hasUnread?.(channelId);
     }
 
+    _channelAllowsUnreadBadge(channelId, channel = null) {
+        const settings = this.api.stores.UserGuildSettingsStore;
+        if (!settings || !channelId) return true;
+        try {
+            const ch = channel || this.api.stores.ChannelStore?.getChannel?.(channelId);
+            const guildId = ch?.guild_id || null;
+            if (guildId && typeof settings.isGuildOrCategoryOrChannelMuted === "function"
+                && settings.isGuildOrCategoryOrChannelMuted(guildId, channelId)) return false;
+            if (guildId && typeof settings.isMuted === "function" && settings.isMuted(guildId)) return false;
+            if (typeof settings.isChannelMuted === "function" && settings.isChannelMuted(guildId, channelId)) return false;
+            if (guildId && ch?.parent_id && typeof settings.isChannelMuted === "function"
+                && settings.isChannelMuted(guildId, ch.parent_id)) return false;
+        } catch (_) {}
+        return true;
+    }
+
     _guildHasVisibleUnread(guildId) {
         if (!guildId) return false;
         const gcs = this.api.stores.GuildChannelStore;
@@ -9720,6 +9744,7 @@ class ReadStateSurface {
                 for (const entry of list) {
                     const id = entry?.channel?.id;
                     if (!id || !this._channelHasRawUnread(id)) continue;
+                    if (!this._channelAllowsUnreadBadge(id, entry.channel)) continue;
                     if (this.hasBlockedOnlyReadActivity(id)) continue;
                     if (this._resolveChannelVisibleUnread(id, true)) {
                         if (this.api.debugBadge) console.log("[ByeBlocked DEBUG] _guildHasVisibleUnread: TRUE via channel", id, entry?.channel?.name, "in guild", guildId);
@@ -9762,6 +9787,7 @@ class ReadStateSurface {
         let debugFoundChannelId = null;
         this._forEachKnownChannel((channelId, channel) => {
             if (foundPrivate) return;
+            if (!this._channelAllowsUnreadBadge(channelId, channel)) return;
             if (channel?.isDM?.() && this.api.visibility.shouldHide(this._resolveDmRecipientId(channel))) return;
             if (this.hasBlockedOnlyReadActivity(channelId)) return;
             if (this.channelHasVisibleUnread(channelId)) {
@@ -10556,7 +10582,8 @@ class ReadStateSurface {
             if (grs?.getTotalMentionCount) {
                 self.api.patching.after(grs, "getTotalMentionCount", (_, __, ret) => {
                     if (!self.api.surfaces.badge.taskbarBadgeEnabled()) return ret;
-                    return self.filteredTotalMentionCount();
+                    if (typeof ret !== "number" || !Number.isFinite(ret) || ret <= 0) return ret;
+                    return Math.min(ret, Math.max(0, self.filteredTotalMentionCount()));
                 });
             }
             self._taskbarBadgePatched = true;
@@ -11349,7 +11376,7 @@ function _settingsOnChange(section, key, value) {
     }
 
 module.exports = class ByeBlocked {
-    static VERSION="2.10.0";
+    static VERSION="2.10.1";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static UPDATE_CHECK_INTERVAL_MS = 18e5;
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
