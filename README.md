@@ -19,8 +19,16 @@ A BetterDiscord plugin for hiding and silencing blocked users across Discord.
 •
 <a href="https://github.com/8ug8ird/ByeBlocked/discussions">Discussion</a>
 
+
 </div>
 
+---
+
+### Check out my other plugin
+
+I also made [FakeMuteDeafen](https://github.com/8ug8ird/FakeMuteDeafen), a BetterDiscord plugin that lets you customize how your mute/deafen status appears to other users.
+
+---
 
 ## Overview
 
