@@ -7,7 +7,7 @@
 <div align="center">
 
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-007BFF?style=for-the-badge&logo=discord&logoColor=white)](https://betterdiscord.app)
-[![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=for-the-badge&label=Latest%20Release&color=007BFF)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=for-the-badge&label=Latest%20Release&color=007bff)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=for-the-badge&label=Downloads&color=007BFF)](https://github.com/8ug8ird/ByeBlocked/releases)
 [![License](https://img.shields.io/github/license/8ug8ird/ByeBlocked?style=for-the-badge&label=License&color=007BFF)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
