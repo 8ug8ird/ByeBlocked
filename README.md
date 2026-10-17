@@ -20,7 +20,7 @@ A BetterDiscord plugin that extends Discord's blocking behavior to hide and sile
 ## Features
 
 - **Chat & Forums** - Hides messages, replies, mentions, forum posts, reactions, and pins from blocked users.
-- **Voice** - Hides blocked users in real time, mutes their microphone audio, and suppresses their join and leave sounds.
+- **Voice** - Hides blocked users, mutes their audio, and silences join/leave sounds.
 - **Calls & Group DMs** - Ignores calls from blocked users and hides them from group DMs.
 - **Member Lists** - Hides blocked profiles and empty role sections.
 - **Autocomplete** - Excludes blocked users from mention and invite suggestions.
