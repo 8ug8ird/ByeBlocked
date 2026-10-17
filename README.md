@@ -27,6 +27,8 @@ A BetterDiscord plugin that extends Discord's blocking behavior to hide and sile
 - **Events** - Hides blocked users from scheduled events.
 - **Notifications** - Suppresses the taskbar and tray badge when unread activity comes only from blocked users.
 
+<br>
+
 <p align="center">
   <img src="assets/Discord_ubFapzaaLs-output.gif" width="850" alt="ByeBlocked demonstration">
 </p>
