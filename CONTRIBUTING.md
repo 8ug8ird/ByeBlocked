@@ -65,8 +65,6 @@ Pull requests with incomplete testing or unresolved functional issues may be ret
 
 AI coding tools are permitted, but their output must be reviewed, understood, and verified before submission.
 
-If AI tools generate or substantially modify code, disclose this in the pull request description and briefly identify the affected areas. Ordinary autocomplete and minor writing assistance do not need to be disclosed.
-
 Regardless of whether AI tools were used, the contributor is responsible for every line submitted, including its correctness, compatibility, security, and maintenance implications.
 
 Contributors using AI tools are expected to:
