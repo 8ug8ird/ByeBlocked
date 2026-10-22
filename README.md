@@ -8,7 +8,7 @@
 
 [![BetterDiscord](https://img.shields.io/badge/BetterDiscord-Plugin-007BFF?style=for-the-badge&logo=discord&logoColor=white)](https://betterdiscord.app)
 [![Latest Release](https://img.shields.io/github/v/release/8ug8ird/ByeBlocked?style=for-the-badge&label=Latest%20Release&color=007bff)](https://github.com/8ug8ird/ByeBlocked/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=for-the-badge&label=Downloads&color=007BFF)](https://github.com/8ug8ird/ByeBlocked/releases)
+[![Downloads](https://img.shields.io/github/downloads/8ug8ird/ByeBlocked/total?style=for-the-badge&label=Downloads&color=007bff)](https://github.com/8ug8ird/ByeBlocked/releases)
 [![License](https://img.shields.io/badge/License-MIT-007bff?style=for-the-badge)](https://github.com/8ug8ird/ByeBlocked/blob/main/LICENSE)
 
 A BetterDiscord plugin that extends Discord's blocking behavior to hide and silence blocked users.
