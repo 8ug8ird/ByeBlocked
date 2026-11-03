@@ -1,4 +1,4 @@
-<p align="center">
+ <p align="center">
   <a href="https://github.com/8ug8ird/ByeBlocked">
     <img src="assets/0.png" alt="ByeBlocked" width="800">
   </a>
@@ -13,19 +13,16 @@
 
 A BetterDiscord plugin that extends Discord's blocking behavior to hide and silence blocked users.
 
-[Download](https://github.com/8ug8ird/ByeBlocked/releases/latest) · [Report a bug](https://github.com/8ug8ird/ByeBlocked/issues) · [Discussions](https://github.com/8ug8ird/ByeBlocked/discussions) · [Check out Soundboard](https://github.com/8ug8ird/Soundboard)
+[Download](https://github.com/8ug8ird/ByeBlocked/releases/latest) · [Issues](https://github.com/8ug8ird/ByeBlocked/issues) · [Discussions](https://github.com/8ug8ird/ByeBlocked/discussions)
 
 </div>
 
 ## Features
 
-- **Chat & Forums** - Hides messages, replies, mentions, forum posts, reactions, and pins from blocked users.
-- **Voice** - Hides blocked users, mutes their audio, and silences join/leave sounds.
-- **Calls & Group DMs** - Ignores calls from blocked users and hides them from group DMs.
-- **Member Lists** - Hides blocked profiles and empty role sections.
-- **Autocomplete** - Excludes blocked users from mention and invite suggestions.
-- **Events** - Hides blocked users from scheduled events.
-- **Notifications** - Suppresses the taskbar and tray badge when unread activity comes only from blocked users.
+- **Messages** - Hides messages, mentions, reactions, forum posts, and pins from blocked users.
+- **Voice & Calls** - Hides and mutes blocked users in voice, silences join/leave sounds, and ignores their calls.
+- **Visibility** - Keeps blocked users out of member lists, group DMs, events, and suggestions.
+- **Notifications** - Suppresses unread indicators caused only by blocked users.
 
 <br>
 
@@ -38,20 +35,13 @@ A BetterDiscord plugin that extends Discord's blocking behavior to hide and sile
 Requires [BetterDiscord](https://betterdiscord.app).
 
 1. Download `ByeBlocked.plugin.js` from the [latest release](https://github.com/8ug8ird/ByeBlocked/releases/latest).
-2. In Discord, go to **Settings → Plugins → Open Plugins Folder**.
-3. Move `ByeBlocked.plugin.js` into that folder.
-4. Enable **ByeBlocked** in the Plugins settings.
-
-## Feedback & Contributing
-
-For bugs, unexpected behavior, or edge cases, open an [Issue](https://github.com/8ug8ird/ByeBlocked/issues).
-
-Feature requests and implementation-related changes can be submitted through [Pull Requests](https://github.com/8ug8ird/ByeBlocked/pulls).
+2. Open **Discord Settings → Plugins → Open Plugins Folder**.
+3. Move the file into the folder and enable **ByeBlocked**.
 
 <br>
 
 > [!WARNING]
-> BetterDiscord modifies the Discord client, which is not permitted under Discord's Terms of Service. Use at your own risk.
+> BetterDiscord modifies the Discord client and violates Discord's Terms of Service. Use at your own risk.
 
 <br>
 
