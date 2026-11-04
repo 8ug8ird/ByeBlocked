@@ -13,7 +13,7 @@
 
 A BetterDiscord plugin that extends Discord's blocking behavior to hide and silence blocked users.
 
-[Download](https://github.com/8ug8ird/ByeBlocked/releases/latest) · [Issues](https://github.com/8ug8ird/ByeBlocked/issues) · [Discussions](https://github.com/8ug8ird/ByeBlocked/discussions)
+[Download](https://github.com/8ug8ird/ByeBlocked/releases/latest) · [Report an issues](https://github.com/8ug8ird/ByeBlocked/issues) · [Contribute](https://github.com/8ug8ird/ByeBlocked/pulls) · [Discussions](https://github.com/8ug8ird/ByeBlocked/discussions) 
 
 </div>
 
