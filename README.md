@@ -17,6 +17,19 @@ A BetterDiscord plugin that extends Discord's blocking behavior to hide and sile
 
 </div>
 
+<br>
+
+> [!WARNING]
+> **Future Discord client compatibility**
+>
+> Discord has announced plans to replace its Electron desktop client with a native Rust client. ByeBlocked depends on BetterDiscord and the current client’s internals, so it will not automatically be compatible with the replacement.
+>
+> Future support will depend on whether BetterDiscord or another suitable integration becomes available. A rewrite of ByeBlocked alone would not resolve this dependency.
+>
+> ByeBlocked has not been discontinued. Development continues for the current client, and this notice does not indicate a current compatibility issue.
+
+<br>
+
 ## Features
 
 - **Messages** - Hides messages, mentions, reactions, forum posts, and pins from blocked users.
