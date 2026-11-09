@@ -58,4 +58,4 @@ Requires [BetterDiscord](https://betterdiscord.app).
 
 <br>
 
-MIT © [8ug8ird](https://github.com/8ug8ird)
+[GPL-3.0](LICENSE) © [8ug8ird](https://github.com/8ug8ird)
