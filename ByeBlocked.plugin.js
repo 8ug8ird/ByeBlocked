@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.11.0
+ * @version 2.11.1
  * @description Hides blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -11524,20 +11524,22 @@ class UpdateSurface {
     }
     async _notifyUpdateAvailable(remote, htmlUrl, meta) {
         if (remote === this._lastNotifiedVersion) return;
-        this._lastNotifiedVersion = remote;
         this._removeNotice();
         try {
+            if (!document.getElementById("bd-notices")) {
+                const base = document.querySelector('div[class^="base_"]:has(> div[class^="content_"])');
+                if (base) {
+                    const container = document.createElement("div");
+                    container.id = "bd-notices";
+                    base.prepend(container);
+                }
+            }
             this._updateNotice = BdApi.UI.showNotice(`ByeBlocked v${remote} is now available!`, {
                 timeout: 0,
                 buttons: [ {
                     label: "Update now",
                     onClick: () => {
-                        if (this._updateNotice) {
-                            try {
-                                this._updateNotice.close();
-                            } catch (error) { _recordPatchCatch("UpdateSurface._notifyUpdateAvailable.L11029", this, error); }
-                            this._updateNotice = null;
-                        }
+                        this._removeNotice();
                         this._downloadAndInstall(meta);
                     }
                 }, {
@@ -11547,14 +11549,17 @@ class UpdateSurface {
                     }
                 } ]
             });
-        } catch (_) {
+        } catch (_) {}
+        if (!this._updateNotice) {
             this.api.toast(`ByeBlocked v${remote} is now available! Download it from GitHub.`, "info");
         }
+        this._lastNotifiedVersion = remote;
     }
     _removeNotice() {
         try {
             if (this._updateNotice) {
-                if (typeof this._updateNotice.close === "function") this._updateNotice.close(); else if (typeof this._updateNotice.remove === "function") this._updateNotice.remove();
+                if (typeof this._updateNotice === "function") this._updateNotice();
+                else if (typeof this._updateNotice.close === "function") this._updateNotice.close(); else if (typeof this._updateNotice.remove === "function") this._updateNotice.remove();
                 this._updateNotice = null;
             }
             document.querySelectorAll(".bd-notice").forEach(el => {
@@ -15836,7 +15841,7 @@ class PresentationMethods {
 
 class ByeBlocked {
     static MODULE_RESOLUTION_RETRY_DELAYS_MS = Object.freeze([1000, 2000, 3000, 5000, 8000, 12000, 18000, 25000]);
-    static VERSION="2.11.0";
+    static VERSION="2.11.1";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static UPDATE_CHECK_INTERVAL_MS = 18e5;
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
