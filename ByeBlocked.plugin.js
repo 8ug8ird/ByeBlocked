@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.11.1
+ * @version 2.11.2
  * @description Hides blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -11347,6 +11347,8 @@ function _settingsOnChange(section, key, value) {
         if (section === "places" && !next) _restoreTemporaryTexts(key);
         if (section === "places") this._resetShouldHideCache();
         if (section === "types") {
+            this.addStyles();
+            this._removeGuildSwitchGuard();
             _restoreTemporaryTexts();
             this._resetShouldHideCache();
             this._surfaces.badge.invalidateTaskbarBadgeCache();
@@ -13446,7 +13448,7 @@ class MessageFilteringMethods {
         if (!message || typeof message !== "object") return false;
         try {
             if (!this._placeEnabled("messages")) return false;
-            if (message.blocked === true) return true;
+            if (message.blocked === true && !message.author?.id && this.settings.types.blocked && this.settings.types.ignored) return true;
             const authorId = message.author?.id || null;
             if (authorId && this.shouldHide(authorId)) return true;
             if (this._placeEnabled("repliesToBlocked") && this._hasBlockedReplyAuthor(message, referencedMessage)) return true;
@@ -13881,7 +13883,7 @@ class MessageFilteringMethods {
     }
     _isBlockedMessage(msg) {
         if (!msg) return false;
-        if (msg.blocked === true) return true;
+        if (msg.blocked === true && !this._getAuthorId(msg) && this.settings.types.blocked && this.settings.types.ignored) return true;
         const authorId = this._getAuthorId(msg);
         if (authorId && this.shouldHide(authorId)) return true;
         try {
@@ -14234,7 +14236,7 @@ class ObserverMethods {
                 color: var(--channels-default) !important;
             }
         ` : "";
-        style.textContent = `
+        const messageGuardRule = this.settings.places.messages && this.settings.types.blocked && this.settings.types.ignored ? `
             [class*="messageGroupBlocked"],
             [class*="blockedSystemMessage"],
             li[class*="messageListItem"]:has([class*="messageGroupBlocked"]),
@@ -14244,6 +14246,9 @@ class ObserverMethods {
                 overflow: hidden !important;
                 contain: size style !important;
             }
+        ` : "";
+        style.textContent = `
+            ${messageGuardRule}
             ${voiceTimerRule}
             ${stageIconGuardRule}
             
@@ -14868,9 +14873,17 @@ class DomScanMethods {
             };
             collectTargets(el);
             for (const item of items) {
-                if (item.dataset?.hiddenBlocked !== "true") this.hideElement(item, "blocked-group-fast");
+                let shouldHideGroup = this.settings.types.blocked && this.settings.types.ignored;
+                if (!shouldHideGroup) {
+                    let messages = [];
+                    this._identity.walkFiberShallow(item, props => {
+                        if (!messages.length) messages = this._extractBlockedGroupMessages(props);
+                    });
+                    shouldHideGroup = messages.length > 0 && messages.every(message => this.isBlockedMessageData(message));
+                }
+                if (shouldHideGroup && item.dataset?.hiddenBlocked !== "true") this.hideElement(item, "blocked-group-fast");
             }
-            return true;
+            return Array.from(items).some(item => item.dataset?.hiddenBlocked === "true");
         }
         return false;
     }
@@ -14904,8 +14917,8 @@ class DomScanMethods {
         }
         const isBlocked = (replyUserId && this.shouldHide(replyUserId))
             || (referencedAuthorId && this.shouldHide(referencedAuthorId))
-            || replyBar.matches(_SEL.blockedMessage)
-            || (!referencedAuthorId && this.isBlockedMessageBannerText(replyBar.textContent || ""));
+            || (this.settings.types.blocked && this.settings.types.ignored && !referencedAuthorId && !replyUserId && replyBar.matches(_SEL.blockedMessage))
+            || (this.settings.types.blocked && this.settings.types.ignored && !referencedAuthorId && !replyUserId && this.isBlockedMessageBannerText(replyBar.textContent || ""));
         return isBlocked ? { userId: referencedAuthorId || replyUserId || null } : null;
     }
     _findFastMentionedBlockedUserId(messageRow, mentionWithId, mentionElem) {
@@ -14963,7 +14976,7 @@ class DomScanMethods {
                 return true;
             }
             const text = messageRow.textContent;
-            if (text && this.isBlockedMessageBannerText(text)) {
+            if (this.settings.types.blocked && this.settings.types.ignored && !userId && text && this.isBlockedMessageBannerText(text)) {
                 this.hideElement(messageRow, "blocked-group-fast");
                 return true;
             }
@@ -15639,7 +15652,7 @@ class ElementMethods {
 }
 
 
-function _buildByeBlockedStyles(hideStyles, places) {
+function _buildByeBlockedStyles(hideStyles, places, types) {
     const collapsedRowStyles = `                display: none !important;
                 height: 0 !important;
                 min-height: 0 !important;
@@ -15648,7 +15661,7 @@ function _buildByeBlockedStyles(hideStyles, places) {
                 margin: 0 !important;
                 overflow: hidden !important;
                 contain: size style !important;`;
-    const hideBlockedBanner = places.messages ? `
+    const hideBlockedBanner = places.messages && types.blocked && types.ignored ? `
             [class*="messageGroupBlocked"],
             [class*="blockedSystemMessage"],
             [class*="groupStart"]:has([class*="blocked"]),
@@ -15802,7 +15815,7 @@ class PresentationMethods {
         if (this._relIsBlockedFn) {
             document.getElementById('ByeBlocked-bootguard')?.remove();
         }
-        BdApi.DOM.addStyle(this.pluginName, _buildByeBlockedStyles(this.hideStyles, this.settings.places));
+        BdApi.DOM.addStyle(this.pluginName, _buildByeBlockedStyles(this.hideStyles, this.settings.places, this.settings.types));
     }
     removeStyles() {
         try {
@@ -15841,7 +15854,7 @@ class PresentationMethods {
 
 class ByeBlocked {
     static MODULE_RESOLUTION_RETRY_DELAYS_MS = Object.freeze([1000, 2000, 3000, 5000, 8000, 12000, 18000, 25000]);
-    static VERSION="2.11.1";
+    static VERSION="2.11.2";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static UPDATE_CHECK_INTERVAL_MS = 18e5;
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
