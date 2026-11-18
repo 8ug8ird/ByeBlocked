@@ -2,7 +2,7 @@
  * @name ByeBlocked
  * @author 8ug8ird
  * @authorId 698947564459917343
- * @version 2.11.2
+ * @version 2.11.3
  * @description Hides blocked and ignored users
  * @source https://github.com/8ug8ird/ByeBlocked
  */
@@ -265,8 +265,21 @@ function _messageCollectionToArray(value) {
 }
 
 function _filterArrayPreservingIdentity(items, predicate) {
-    const filtered = items.filter(predicate);
-    return filtered.length === items.length ? items : filtered;
+    const length = items.length;
+    let filtered = null;
+    for (let i = 0; i < length; i++) {
+        if (!(i in items)) continue;
+        const item = items[i];
+        if (predicate(item, i, items)) {
+            if (filtered) filtered.push(item);
+        } else if (!filtered) {
+            filtered = [];
+            for (let j = 0; j < i; j++) {
+                if (j in items) filtered.push(items[j]);
+            }
+        }
+    }
+    return filtered || items;
 }
 
 function _hideBlockedRows(surface, selector, label, resolveTarget = row => row) {
@@ -4939,7 +4952,13 @@ class MessageSurface {
     }
     promoteOrphanedMessages() {
         try {
-            const rows = document.querySelectorAll(`${_SEL.messageItemLi}:not([data-hidden-blocked="true"]):not([data-nmb-ghost="true"])`);
+            const scope = document.querySelector(_SEL.chatContent) || document;
+            const visibleMessage = `${_SEL.messageItemLi}:not([data-hidden-blocked="true"]):not([data-nmb-ghost="true"])`;
+            const hasPromotionWork = scope.querySelector(
+                `[data-hidden-blocked="true"] + ${visibleMessage}, [data-nmb-ghost="true"] + ${visibleMessage}, [data-nmb-promoted="true"]`
+            );
+            if (!hasPromotionWork) return;
+            const rows = scope.querySelectorAll(visibleMessage);
             for (let i = 0; i < rows.length; i++) {
                 const row = rows[i];
                 const immediatePrev = row.previousElementSibling;
@@ -4984,7 +5003,8 @@ class MessageSurface {
         li.style.removeProperty("--nmb-promoted");
     }
     hideOrphanedDividers() {
-        const dividers = document.querySelectorAll('li:has([class*="divider"]), [class*="divider_"], [class*="divider-"]');
+        const scope = document.querySelector(_SEL.chatContent) || document;
+        const dividers = scope.querySelectorAll('li:has([class*="divider"]), [class*="divider_"], [class*="divider-"]');
         for (let i = 0; i < dividers.length; i++) {
             const divider = dividers[i];
             if (divider.dataset?.hiddenBlocked === "true") continue;
@@ -13482,8 +13502,8 @@ class MessageFilteringMethods {
         if (value && typeof value.filter === "function" && typeof value.toArray === "function") {
             try {
                 const asArray = value.toArray();
-                const filtered = asArray.filter(msg => !this.isBlockedMessageData(msg));
-                if (filtered.length === asArray.length) return value;
+                const filtered = this._filterActionMessageArray(asArray);
+                if (filtered === asArray) return value;
                 try {
                     const internalArrayKey = Array.isArray(value._array) ? "_array" : null;
                     if (internalArrayKey) {
@@ -14206,9 +14226,12 @@ class ObserverMethods {
                 catch (error) { _recordPatchCatch("observer.stageSpeakerRequests", this, error); }
             });
         }));
+        let observedRoot = null;
         const _watchStageRoot = () => {
-            this._stageObserver?.disconnect();
             const root = document.querySelector('[class*="stageSection_"], [class*="chat_"]');
+            if (root === observedRoot) return;
+            this._stageObserver?.disconnect();
+            observedRoot = root;
             if (root) this._stageObserver?.observe(root, { childList: true, subtree: true });
         };
         _watchStageRoot();
@@ -15127,7 +15150,7 @@ class DomScanMethods {
         return false;
     }
     restoreUnhiddenElements() {
-        for (const el of Array.from(this.hiddenElements)) {
+        for (const el of this.hiddenElements) {
             if (!document.contains(el)) {
                 this.hiddenElements.delete(el);
                 continue;
@@ -15136,17 +15159,23 @@ class DomScanMethods {
             const userId = el.dataset?.nmbUserId;
             if (userId && !this.shouldHide(userId)) this.restoreElement(el);
         }
-        for (const parent of Array.from(this.hiddenParents)) {
+        for (const parent of this.hiddenParents) {
             if (!document.contains(parent)) {
                 this.hiddenParents.delete(parent);
                 continue;
             }
-            const visibleChildren = Array.from(parent.children).filter(child => child.dataset?.hiddenBlocked !== "true");
-            if (visibleChildren.length > 0) {
+            let hasVisibleChild = false;
+            for (const child of parent.children) {
+                if (child.dataset?.hiddenBlocked !== "true") {
+                    hasVisibleChild = true;
+                    break;
+                }
+            }
+            if (hasVisibleChild) {
                 this.restoreParent(parent);
             }
         }
-        for (const slot of Array.from(this._ghostedElements)) {
+        for (const slot of this._ghostedElements) {
             if (!document.contains(slot)) {
                 this._ghostedElements.delete(slot);
                 continue;
@@ -15154,7 +15183,7 @@ class DomScanMethods {
             _restoreGhostStyle(slot);
             this._ghostedElements.delete(slot);
         }
-        for (const el of Array.from(this._surfaces.reactions.hiddenReactorRows)) {
+        for (const el of this._surfaces.reactions.hiddenReactorRows) {
             if (!document.contains(el)) {
                 this._surfaces.reactions.hiddenReactorRows.delete(el);
                 continue;
@@ -15166,7 +15195,7 @@ class DomScanMethods {
                 this._surfaces.reactions.hiddenReactorRows.delete(el);
             }
         }
-        for (const btn of Array.from(this._surfaces.reactions.hiddenReactorRemoveBtns)) {
+        for (const btn of this._surfaces.reactions.hiddenReactorRemoveBtns) {
             if (!document.contains(btn)) {
                 this._surfaces.reactions.hiddenReactorRemoveBtns.delete(btn);
                 continue;
@@ -15854,7 +15883,7 @@ class PresentationMethods {
 
 class ByeBlocked {
     static MODULE_RESOLUTION_RETRY_DELAYS_MS = Object.freeze([1000, 2000, 3000, 5000, 8000, 12000, 18000, 25000]);
-    static VERSION="2.11.2";
+    static VERSION="2.11.3";
     static RELEASE_URL="https://github.com/8ug8ird/ByeBlocked";
     static UPDATE_CHECK_INTERVAL_MS = 18e5;
     static RELEASES_API_URL="https://api.github.com/repos/8ug8ird/ByeBlocked/releases/latest";
